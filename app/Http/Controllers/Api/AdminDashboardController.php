@@ -76,8 +76,14 @@ class AdminDashboardController extends Controller
 
             // ── Delivery counts ───────────────────────────────────────────────
             // delivery_status — NOT "status"
+            // Definition aligned with Dashboard.jsx's "Upcoming Deliveries" block
+            // (client/src/pages/admin/Dashboard.jsx, loadDeliveries()), which
+            // treats anything not yet delivered/returned as pending — including
+            // 'preparing'. Previously this only counted dispatched/in_transit,
+            // which caused the KPI card ("0 Deliveries") to disagree with the
+            // Upcoming Deliveries action block ("(1)") for the same table.
             $deliveringCount = DB::table('delivery_tracking')
-                ->whereIn('delivery_status', ['dispatched', 'in_transit'])
+                ->whereNotIn('delivery_status', ['delivered', 'returned'])
                 ->count();
 
             // ── Recent orders (last 10) ───────────────────────────────────────
