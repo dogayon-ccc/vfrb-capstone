@@ -32,6 +32,7 @@
 use App\Http\Controllers\Api\AIController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
+use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\DeliveryController;
 use App\Http\Controllers\Api\InventoryController;
@@ -370,6 +371,14 @@ Route::middleware(['auth:sanctum', 'role:staff,manager'])->prefix('admin')->grou
 // ADMIN PORTAL — MANAGER ONLY (approve + financial routes)
 // ══════════════════════════════════════════════════════════════
 Route::middleware(['auth:sanctum', 'role:manager'])->prefix('admin')->group(function () {
+
+    // ── Activity Log (Aug 22 2026) — genuinely manager-only, unlike the
+    // Reports index above which staff CAN reach on the backend. This reads
+    // across every staff/manager action table, so it stays fully gated. ──
+    // ActivityLog.jsx: GET /api/admin/activity-log
+    //                  GET /api/admin/activity-log/action-types
+    Route::get('/activity-log',              [ActivityLogController::class, 'index']);
+    Route::get('/activity-log/action-types', [ActivityLogController::class, 'actionTypes']);
 
     // ── Stage advance (manager override — bypasses qty check, still gates QC) ─
     // ProductionTracking.jsx advance button
