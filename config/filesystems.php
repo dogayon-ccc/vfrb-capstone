@@ -47,6 +47,29 @@ return [
             'report' => false,
         ],
 
+        // Company logo upload (Settings.jsx) — PRIMARY target as of Aug 22
+        // 2026. S3/R2/AWS all require a payment method on file to activate,
+        // which isn't available (student account, no card/bank/PayPal) —
+        // Cloudinary's free plan needs none and is free forever, not a
+        // trial. Requires composer require cloudinary-labs/cloudinary-laravel
+        // (implements Laravel's Storage Driver interface, so this behaves
+        // exactly like the 's3' disk below from the app's point of view).
+        'cloudinary' => [
+            'driver' => 'cloudinary',
+            'key' => env('CLOUDINARY_KEY'),
+            'secret' => env('CLOUDINARY_SECRET'),
+            'cloud' => env('CLOUDINARY_CLOUD_NAME'),
+            'url' => env('CLOUDINARY_URL'),
+            'secure' => (bool) env('CLOUDINARY_SECURE', true),
+            'prefix' => env('CLOUDINARY_PREFIX'),
+        ],
+
+        // Kept as a secondary/fallback path in case S3-compatible storage
+        // (AWS, Cloudflare R2, Backblaze B2) ever gets set up later —
+        // logoDisk() in SettingsController only falls back to this when
+        // Cloudinary isn't configured. Railway's own filesystem is
+        // ephemeral either way, so 'local'/'public' below stay dev-only —
+        // a redeploy wipes anything saved there.
         's3' => [
             'driver' => 's3',
             'key' => env('AWS_ACCESS_KEY_ID'),
@@ -61,6 +84,7 @@ return [
         ],
 
     ],
+
 
     /*
     |--------------------------------------------------------------------------

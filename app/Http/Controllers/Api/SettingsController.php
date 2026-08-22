@@ -49,8 +49,22 @@ class SettingsController extends Controller
     // isn't explicitly 's3' to the 'public' disk instead (storage/app/public,
     // symlinked via `php artisan storage:link`) — that's the only pairing
     // that's actually publicly viewable.
+    //
+    // UPDATE (Aug 22 2026): switched primary target to Cloudinary — Dave's
+    // AWS/R2 sign-up requires a payment method on file, which isn't an
+    // option (student, no card/bank/PayPal access). Cloudinary's free plan
+    // requires no card at all and is genuinely free forever, not a trial.
+    // cloudinary-labs/cloudinary-laravel implements Laravel's Storage
+    // Driver interface, so Storage::disk('cloudinary') works exactly like
+    // Storage::disk('s3') did — no other method in this controller needed
+    // to change. S3 stays as a secondary fallback path in case that setup
+    // is ever finished later; 'public' is the last-resort local-dev-only
+    // option, same as before.
     private function logoDisk(): string
     {
+        if (config('filesystems.disks.cloudinary.cloud')) {
+            return 'cloudinary';
+        }
         return config('filesystems.default') === 's3' ? 's3' : 'public';
     }
 
