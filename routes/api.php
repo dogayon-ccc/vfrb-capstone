@@ -43,6 +43,7 @@ use App\Http\Controllers\Api\PhysicalCountController;
 use App\Http\Controllers\Api\ProductionController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\QCChecklistController;
+use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\SalesTransactionController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AutomationController;
@@ -87,6 +88,11 @@ Route::middleware('auth:sanctum')->group(function () {
     // ── Email verification ───────────────────────────────────────
     // VerifyEmail.jsx calls POST /api/email/resend
     Route::post('/email/resend', [AuthController::class, 'resendVerification'])->middleware('throttle:5,1');
+
+    // ── Notification preferences (own row only, any role) ─────────
+    // Settings.jsx: GET/PATCH /api/settings/notifications
+    Route::get('/settings/notifications',   [SettingsController::class, 'notificationShow']);
+    Route::patch('/settings/notifications', [SettingsController::class, 'notificationUpdate']);
 
 });
 
@@ -354,6 +360,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager'])->prefix('admin')->grou
     Route::get('/reports',        [AdminReportController::class, 'index']);
     Route::get('/reports/sales',  [AdminReportController::class, 'salesSummary']);
 
+    // ── System Settings — company info (view only here; edit is manager-only below) ──
+    // Settings.jsx: GET /api/admin/settings/company
+    Route::get('/settings/company', [SettingsController::class, 'companyShow']);
+
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -410,5 +420,11 @@ Route::middleware(['auth:sanctum', 'role:manager'])->prefix('admin')->group(func
 
     // ── Output log deletion (manager corrects mis-entries) ───────
     Route::delete('/output-logs/{id}', [OutputLogController::class, 'destroy']);
+
+    // ── System Settings — company info edit (manager only; staff has view-only above) ──
+    // Settings.jsx: PATCH /api/admin/settings/company
+    //               POST  /api/admin/settings/company/logo
+    Route::patch('/settings/company',      [SettingsController::class, 'companyUpdate']);
+    Route::post('/settings/company/logo',  [SettingsController::class, 'companyLogoUpload']);
 
 });
