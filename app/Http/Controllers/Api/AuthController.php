@@ -39,6 +39,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Str;
+use Laravel\Socialite\Facades\Socialite;
 
 class AuthController extends Controller
 {
@@ -156,6 +157,116 @@ class AuthController extends Controller
             'user'    => $this->formatUser($user, 'customer'),
             'message' => 'Account created. Please verify your email.',
         ], 201);
+    }
+
+    // ── GET /auth/google/redirect — Customer Google Sign-In (start) ───────────
+    // Real implementation, Aug 23 2026. Was fully decorative before this
+    // (confirmed by investigation earlier this session — the frontend button
+    // pointed at a route that never existed, and laravel/socialite was
+    // installed but never actually called anywhere).
+    //
+    // Lives in routes/web.php, NOT api.php — this is a real full-page browser
+    // navigation (window.location.href), not an axios/XHR call, so it needs
+    // Laravel's normal session/cookie stack (the 'web' middleware group) for
+    // Socialite's CSRF-protecting state parameter. Both this and the callback
+    // below happen entirely on the backend's own domain until the very last
+    // step, so no cross-domain session issues arise.
+    public function googleRedirect()
+    {
+        return Socialite::driver('google')->redirect();
+    }
+
+    // ── GET /auth/google/callback — Customer Google Sign-In (finish) ─────────
+    // HARD RULE (locked, confirmed with Dave): this endpoint may ONLY create
+    // or authenticate CUSTOMER accounts. If the Google email already belongs
+    // to a staff or manager account, the attempt is rejected outright — never
+    // logged in as customer, never given any admin access via this route.
+    // This is the one thing this method must never get wrong.
+    public function googleCallback()
+    {
+        $frontend = rtrim(env('FRONTEND_URL', 'http://localhost:5173'), '/');
+
+        try {
+            $googleUser = Socialite::driver('google')->user();
+        } catch (\Exception $e) {
+            return redirect($frontend . '/login?google_error=' . urlencode(
+                'Google sign-in failed or was cancelled. Please try again.'
+            ));
+        }
+
+        $email = $googleUser->getEmail();
+        if (!$email) {
+            return redirect($frontend . '/login?google_error=' . urlencode(
+                'Your Google account did not share an email address. Please sign in with email instead.'
+            ));
+        }
+
+        $existing = DB::table('users')->where('email', $email)->first();
+
+        if ($existing) {
+            $role = $this->getRoleName($existing->user_id);
+
+            // The hard rule, enforced here: a staff/manager email can never
+            // be logged in — or upgraded, or touched in any way — through
+            // this customer-only flow. Reject clearly, issue no token.
+            if ($role !== 'customer') {
+                return redirect($frontend . '/admin/login?google_error=' . urlencode(
+                    'This email belongs to a staff/manager account. Google sign-in here is for customers only — please use the regular staff/manager login.'
+                ));
+            }
+
+            // Existing customer — log them in. Backfill google_id/avatar
+            // only if missing, never overwrite anything else about them.
+            if (!$existing->google_id) {
+                DB::table('users')->where('user_id', $existing->user_id)->update([
+                    'google_id'  => $googleUser->getId(),
+                    'avatar'     => $googleUser->getAvatar(),
+                    'updated_at' => now(),
+                ]);
+                $existing = DB::table('users')->where('user_id', $existing->user_id)->first();
+            }
+
+            $token   = $this->createToken($existing->user_id);
+            $payload = $this->formatUser($existing, 'customer');
+        } else {
+            // New email — create a new customer account. Mirrors register()
+            // exactly: raw insert + manual model_has_roles assignment.
+            // Password is an unusable random string — this account can only
+            // ever be accessed via Google from now on, which is fine since
+            // Google already verified the email (so email_verified_at is
+            // set immediately, unlike the manual-registration path).
+            $userId = DB::table('users')->insertGetId([
+                'name'              => $googleUser->getName() ?: ($googleUser->getNickname() ?: 'Customer'),
+                'email'             => $email,
+                'password'          => Hash::make(Str::random(40)),
+                'google_id'         => $googleUser->getId(),
+                'avatar'            => $googleUser->getAvatar(),
+                'client_type'       => 'individual',
+                'email_verified_at' => now(),
+                'created_at'        => now(),
+                'updated_at'        => now(),
+            ]);
+
+            $customerRoleId = DB::table('roles')->where('name', 'customer')->value('id');
+            if ($customerRoleId) {
+                DB::table('model_has_roles')->insert([
+                    'role_id'    => $customerRoleId,
+                    'model_type' => 'App\\Models\\User',
+                    'model_id'   => $userId,
+                ]);
+            }
+
+            $newUser = DB::table('users')->where('user_id', $userId)->first();
+            $token   = $this->createToken($userId);
+            $payload = $this->formatUser($newUser, 'customer');
+        }
+
+        // Hand the token back to the SPA. A full-page redirect can't set an
+        // Authorization header, so it's passed via query string to a small
+        // dedicated frontend route that stores it and redirects onward —
+        // same handoff pattern as email-verification links already use.
+        return redirect($frontend . '/auth/google/complete?token=' . urlencode($token)
+            . '&user=' . urlencode(json_encode($payload)));
     }
 
     // ── GET /api/user — Current authenticated user ────────────────────────────

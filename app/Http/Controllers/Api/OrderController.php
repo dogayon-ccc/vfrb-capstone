@@ -398,18 +398,38 @@ class OrderController extends Controller
             'status' => 'sometimes|in:pending,confirmed,pattern,segregation,cutting,sewing,qc,pressing,packing,completed,cancelled',
             'negotiated_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
+            // agreed_total (Aug 23 2026 — order confirm/cancel UI): lets a
+            // manager set the negotiated total at confirmation time, before
+            // production starts. Safe alongside SalesTransactionController,
+            // which only ever sets this field `if ($order->agreed_total ===
+            // null)` on first payment — pre-setting it here just means that
+            // first-payment logic uses the manager's number instead of
+            // deriving a fresh one. Never overwrites an already-set total
+            // (see the extra guard below) so a later payment can't
+            // accidentally clobber a confirmed negotiation.
+            'agreed_total' => 'nullable|numeric|min:0',
         ]);
 
         $fields = collect($request->only(['status', 'negotiated_delivery_date', 'notes']))
             ->filter(fn($v) => !is_null($v))
             ->toArray();
 
+        // Only ever set agreed_total, never overwrite an existing value
+        // through this endpoint — once a real total is locked in (whether
+        // by a manager here or by the first payment), it stays read-only,
+        // matching the schema comment on orders.agreed_total.
+        if ($request->filled('agreed_total') && $order->agreed_total === null) {
+            $fields['agreed_total'] = $request->input('agreed_total');
+        }
+
         $fields['updated_at'] = now();
         DB::table('orders')->where('order_id', $id)->update($fields);
 
         if (isset($fields['status'])) {
-            $this->notifyCustomer($order->user_id, $id,
-                "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . ".");
+            $statusMessage = $fields['status'] === 'cancelled' && $request->filled('notes')
+                ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
+                : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . ".";
+            $this->notifyCustomer($order->user_id, $id, $statusMessage);
         }
 
         Cache::forget('dashboard_stats');

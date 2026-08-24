@@ -70,13 +70,20 @@ Route::post('/password/reset',  [AuthController::class, 'resetPassword'])->middl
 Route::post('/ai/describe-design', [AIController::class, 'describeDesign'])->middleware('throttle:30,1');
 
 // ── Google OAuth ──────────────────────────────────────────────
-// These are handled in web.php — api.php only needs the callback token endpoint
-// Route::get('/auth/google/callback/token', [AuthController::class, 'googleCallback']);
+// Real routes now live in routes/web.php (Aug 23 2026) — GET
+// /auth/google/redirect and /auth/google/callback. They're full-page
+// browser navigations, not axios calls, so they need the 'web' session
+// middleware, not the stateless 'api' group this file uses.
 
 // ══════════════════════════════════════════════════════════════
 // AUTHENTICATED — SHARED (any logged-in user)
 // ══════════════════════════════════════════════════════════════
-Route::middleware('auth:sanctum')->group(function () {
+// Rate limiting (Aug 23 2026): group-level default via the existing
+// ApiThrottle middleware (already used for login/register) rather than
+// annotating each route individually — this group covers lightweight,
+// frequently-polled endpoints (session check, notification prefs), so
+// the limit is generous but no longer absent.
+Route::middleware(['auth:sanctum', 'auth.throttle:shared,60'])->group(function () {
 
     // ── Current user ────────────────────────────────────────────
     // GET /api/user — VerifyEmail.jsx calls this to refresh email_verified_at
@@ -100,7 +107,11 @@ Route::middleware('auth:sanctum')->group(function () {
 // ══════════════════════════════════════════════════════════════
 // CUSTOMER PORTAL
 // ══════════════════════════════════════════════════════════════
-Route::middleware(['auth:sanctum', 'role:customer'])->prefix('customer')->group(function () {
+// Rate limiting (Aug 23 2026): 60/min — normal browsing + order placement
+// traffic for a single customer never approaches this; it exists purely
+// to blunt a runaway script or compromised session, not to slow down
+// real use.
+Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60'])->prefix('customer')->group(function () {
 
     // ── Dashboard ───────────────────────────────────────────────
     // CustomerDashboard.jsx: GET /api/customer/dashboard
@@ -185,7 +196,11 @@ Route::middleware(['auth:sanctum', 'role:customer'])->prefix('customer')->group(
 // ══════════════════════════════════════════════════════════════
 // ADMIN PORTAL — STAFF + MANAGER (operational routes)
 // ══════════════════════════════════════════════════════════════
-Route::middleware(['auth:sanctum', 'role:staff,manager'])->prefix('admin')->group(function () {
+// Rate limiting (Aug 23 2026): 120/min — highest of the four tiers, since
+// AdminLayout.jsx polls notifications and dashboard widgets fairly
+// actively during a normal work shift. Still low enough to stop a
+// scripted scrape or a runaway retry loop.
+Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
 
     // ── Dashboard ────────────────────────────────────────────────
     // Dashboard.jsx: GET /api/admin/dashboard
@@ -370,7 +385,11 @@ Route::middleware(['auth:sanctum', 'role:staff,manager'])->prefix('admin')->grou
 // ══════════════════════════════════════════════════════════════
 // ADMIN PORTAL — MANAGER ONLY (approve + financial routes)
 // ══════════════════════════════════════════════════════════════
-Route::middleware(['auth:sanctum', 'role:manager'])->prefix('admin')->group(function () {
+// Rate limiting (Aug 23 2026): 60/min — lower tier, matches customer/shared.
+// This group covers Reports, Invoice, Suppliers, Users, Activity Log,
+// and Settings edits — deliberate, lower-frequency actions, not something
+// a manager does dozens of times a minute in normal use.
+Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])->prefix('admin')->group(function () {
 
     // ── Activity Log (Aug 22 2026) — genuinely manager-only, unlike the
     // Reports index above which staff CAN reach on the backend. This reads
@@ -434,6 +453,6 @@ Route::middleware(['auth:sanctum', 'role:manager'])->prefix('admin')->group(func
     // Settings.jsx: PATCH /api/admin/settings/company
     //               POST  /api/admin/settings/company/logo
     Route::patch('/settings/company',      [SettingsController::class, 'companyUpdate']);
-    Route::post('/settings/company/logo',  [SettingsController::class, 'companyLogoUpload']);
+    Route::post('/settings/company/logo',  [SettingsController::class, 'companyLogoUpload'])->middleware('auth.throttle:logo-upload,10');
 
 });
