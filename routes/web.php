@@ -15,3 +15,14 @@ Route::get('/', function () {
 // enforcement lives inside AuthController::googleCallback(), not here.
 Route::get('/auth/google/redirect', [AuthController::class, 'googleRedirect']);
 Route::get('/auth/google/callback', [AuthController::class, 'googleCallback']);
+
+// ── Email verification (Aug 25 2026 — the confirmed bug fix) ──────────────
+// This route name ('verification.verify') is exactly what
+// CustomVerifyEmailNotification::buildVerificationUrl() has been building
+// signed URLs against all along — it just never existed as an actual
+// route, confirmed by the RouteNotFoundException thrown when testing the
+// notification directly. The 'signed' middleware validates the URL itself
+// (unexpired, untampered) before AuthController::verifyEmail() ever runs.
+Route::get('/api/email/verify/{id}/{hash}', [AuthController::class, 'verifyEmail'])
+    ->middleware('signed')
+    ->name('verification.verify');

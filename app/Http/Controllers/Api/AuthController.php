@@ -31,6 +31,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
+use App\Notifications\CustomVerifyEmailNotification;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -149,8 +151,25 @@ class AuthController extends Controller
         $user  = DB::table('users')->where('user_id', $userId)->first();
         $token = $this->createToken($userId);
 
-        // Fire verification email event (if Laravel mail is configured)
-        // event(new Registered($user)); // Uncomment when mail is set up
+        // Real verification email (Aug 25 2026) — this was previously
+        // commented out (`// event(new Registered($user));`), left that way
+        // from before mail delivery was confirmed working end-to-end. Now
+        // that it's verified working (CustomResetPasswordNotification
+        // delivered successfully via Mailtrap), wiring in the real,
+        // already-built CustomVerifyEmailNotification directly rather than
+        // Laravel's generic Registered event — the generic event would
+        // fire Laravel's DEFAULT VerifyEmail notification, not this
+        // project's custom one with its own branding and signed-URL flow.
+        // notify() needs a real Eloquent model (for the Notifiable trait),
+        // not the plain stdClass $user above — hence the separate lookup.
+        // Wrapped in try/catch: registration itself already succeeded by
+        // this point; a mail hiccup must never turn a successful signup
+        // into a failed one.
+        try {
+            User::find($userId)?->notify(new CustomVerifyEmailNotification());
+        } catch (\Throwable $e) {
+            \Log::warning("CustomVerifyEmailNotification failed for new user #{$userId}: " . $e->getMessage());
+        }
 
         return response()->json([
             'token'   => $token,
@@ -347,10 +366,9 @@ class AuthController extends Controller
             return response()->json(['message' => 'Email already verified.'], 409);
         }
 
-        // In production: dispatch verification email
-        // $user->sendEmailVerificationNotification();
-
-        // For local dev, auto-verify the email so testing isn't blocked
+        // For local dev, auto-verify the email so day-to-day testing isn't
+        // blocked on Mailtrap round-trips — unchanged, this was already
+        // working as intended.
         if (app()->environment('local')) {
             DB::table('users')
                 ->where('user_id', $user->user_id)
@@ -359,7 +377,59 @@ class AuthController extends Controller
             return response()->json(['message' => 'Email verified (local dev auto-verify).']);
         }
 
-        return response()->json(['message' => 'Verification email sent.']);
+        // Real send (Aug 25 2026) — this used to be a stub that returned a
+        // fake success message ("Verification email sent.") without
+        // actually sending anything at all in non-local environments. Now
+        // that mail delivery is confirmed working end-to-end, this
+        // dispatches the real, already-built CustomVerifyEmailNotification
+        // — same class used at registration — via a proper Eloquent model
+        // lookup (notify() needs the Notifiable trait, not the Auth facade
+        // user object directly, since that can vary by guard).
+        try {
+            User::find($user->user_id)?->notify(new CustomVerifyEmailNotification());
+            return response()->json(['message' => 'Verification email sent.']);
+        } catch (\Throwable $e) {
+            \Log::warning("Resend CustomVerifyEmailNotification failed for user #{$user->user_id}: " . $e->getMessage());
+            return response()->json(['message' => 'Could not send verification email. Please try again.'], 500);
+        }
+    }
+
+    // ── GET /api/email/verify/{id}/{hash} — the actual bug fix ────────────────
+    // Route name 'verification.verify' (Aug 25 2026). This is the piece that
+    // was genuinely missing: CustomVerifyEmailNotification builds a signed
+    // URL pointing at a route named 'verification.verify', but that route
+    // was never registered anywhere — confirmed directly via
+    // `RouteNotFoundException: Route [verification.verify] not defined`
+    // when testing the notification in tinker. The Notification class
+    // itself was already correct; this was the missing other half.
+    //
+    // Lives in routes/web.php, not api.php — this is a real link clicked
+    // from an email client (full browser navigation), not an axios call,
+    // and it needs to end in a redirect the browser can follow, not a bare
+    // JSON response. The 'signed' middleware (applied at the route
+    // definition) validates the URL itself wasn't tampered with or expired
+    // before this method ever runs — this method only needs to check that
+    // the id/hash actually correspond to a real, matching user.
+    //
+    // Redirects with exactly the 3 status values VerifyEmail.jsx already
+    // expects (confirmed by reading that file directly, not guessed):
+    // 'verified', 'already_verified', 'invalid'.
+    public function verifyEmail(Request $request, int $id, string $hash)
+    {
+        $frontendUrl = rtrim(config('app.frontend_url', 'http://localhost:5173'), '/');
+        $user = User::find($id);
+
+        if (!$user || !hash_equals(sha1($user->getEmailForVerification()), $hash)) {
+            return redirect($frontendUrl . '/verify-email?status=invalid');
+        }
+
+        if ($user->email_verified_at) {
+            return redirect($frontendUrl . '/verify-email?status=already_verified');
+        }
+
+        $user->forceFill(['email_verified_at' => now()])->save();
+
+        return redirect($frontendUrl . '/verify-email?status=verified');
     }
 
     // ── Private: getRoleName ──────────────────────────────────────────────────
