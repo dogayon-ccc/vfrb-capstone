@@ -124,6 +124,49 @@ class AdminDashboardController extends Controller
                 ->orderBy('status')
                 ->get();
 
+            // ── Delayed orders (Aug 24 2026 — closes a real gap: Dashboard.jsx
+            // was previously showing this card as permanently "Not available
+            // yet"). Real definition, not a naive threshold on orders.updated_at
+            // (which could be touched by unrelated edits, not just stage
+            // progress). A real per-stage timestamp already exists:
+            // order_production_tracking has one row per (order, stage), each
+            // with its own updated_at. An order counts as delayed if:
+            //   1. it's actively in one of the 7 production stages (not
+            //      pending/confirmed/completed/cancelled)
+            //   2. the tracking row for its EXACT current stage hasn't been
+            //      touched in 3+ days
+            //   3. it's genuinely still incomplete for that stage
+            //      (qty_completed < qty_target) — a fully-done stage sitting
+            //      briefly before auto-advance isn't "delayed."
+            // 3 days is a first-pass, explainable threshold, not a fully
+            // modeled SLA system — worth saying exactly that in a defense.
+            $delayedThresholdDays = 3;
+            $delayedOrders = DB::table('orders')
+                ->join('order_production_tracking', function ($join) {
+                    $join->on('order_production_tracking.order_id', '=', 'orders.order_id')
+                         ->on('order_production_tracking.stage', '=', 'orders.status');
+                })
+                ->join('users', 'users.user_id', '=', 'orders.user_id')
+                ->whereIn('orders.status', ['pattern','segregation','cutting','sewing','qc','pressing','packing'])
+                ->whereColumn('order_production_tracking.qty_completed', '<', 'order_production_tracking.qty_target')
+                ->where('order_production_tracking.updated_at', '<=', $now->copy()->subDays($delayedThresholdDays))
+                ->select(
+                    'orders.order_id',
+                    'orders.status as stage',
+                    'orders.garment_type',
+                    'users.name as customer_name',
+                    'order_production_tracking.qty_completed',
+                    'order_production_tracking.qty_target',
+                    'order_production_tracking.updated_at as stage_updated_at'
+                )
+                ->orderBy('order_production_tracking.updated_at', 'asc')
+                ->limit(10)
+                ->get()
+                ->map(function ($o) use ($now) {
+                    $o->days_stalled = (int) $now->diffInDays($o->stage_updated_at);
+                    return $o;
+                });
+
             // ── Physical count reconciliation pending ──────────────────────────
             // "Needs reconciliation" = not yet reconciled AND variance over the
             // 5% threshold (matches the rule documented on the Physical Count
@@ -188,6 +231,9 @@ class AdminDashboardController extends Controller
                     'color_hold'     => $colorHoldCount,
                     'delivering'     => $deliveringCount,
                     'stage_dist'     => $stageDist,
+                    'delayed_orders' => $delayedOrders,
+                    'delayed_count'  => $delayedOrders->count(),
+                    'delayed_threshold_days' => $delayedThresholdDays,
                 ],
                 'recent_orders' => $recentOrders,
                 'generated_at'  => $now->toIso8601String(),

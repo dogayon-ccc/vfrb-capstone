@@ -33,6 +33,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
+use App\Notifications\OrderStatusNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -430,6 +432,35 @@ class OrderController extends Controller
                 ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
                 : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . ".";
             $this->notifyCustomer($order->user_id, $id, $statusMessage);
+
+            // Real email (Aug 25 2026) — deliberately restricted to only
+            // these two statuses, not every value the enum allows. A
+            // manager manually setting a production stage through this
+            // same endpoint is covered separately by
+            // StageAdvancedNotification (ProductionController), so this
+            // doesn't send a duplicate email for what's functionally the
+            // same underlying event.
+            //
+            // Wrapped in try/catch deliberately: the order status change
+            // above already succeeded in the database by this point. If
+            // Mailtrap/mail sending has a hiccup, that should never surface
+            // as a failed order-confirm action to the manager — email is
+            // best-effort here, not a blocking dependency of the real
+            // business action.
+            if (in_array($fields['status'], ['confirmed', 'cancelled'], true)) {
+                try {
+                    $customer = User::find($order->user_id);
+                    if ($customer) {
+                        $customer->notify(new OrderStatusNotification(
+                            $id,
+                            $fields['status'],
+                            $fields['status'] === 'cancelled' ? $request->input('notes') : null,
+                        ));
+                    }
+                } catch (\Throwable $e) {
+                    \Log::warning("OrderStatusNotification failed for order #{$id}: " . $e->getMessage());
+                }
+            }
         }
 
         Cache::forget('dashboard_stats');

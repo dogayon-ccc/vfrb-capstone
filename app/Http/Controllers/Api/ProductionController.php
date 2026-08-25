@@ -36,6 +36,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\User;
+use App\Notifications\StageAdvancedNotification;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -426,6 +428,23 @@ class ProductionController extends Controller
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
+        }
+
+        // Real email to the customer only (Aug 25 2026) — managers already
+        // get their own in-app notification above and don't need an email
+        // for every stage move across every order; that would be far too
+        // noisy for day-to-day staff use. Wrapped in try/catch for the same
+        // reliability reason as OrderStatusNotification: the actual stage
+        // advance already succeeded in the database by this point, so a
+        // Mailtrap hiccup should never surface as a failed production
+        // action to the staff member who just logged the output.
+        try {
+            $customer = User::find($customerId);
+            if ($customer) {
+                $customer->notify(new StageAdvancedNotification($orderId, $fromStage, $toStage));
+            }
+        } catch (\Throwable $e) {
+            \Log::warning("StageAdvancedNotification failed for order #{$orderId}: " . $e->getMessage());
         }
     }
 

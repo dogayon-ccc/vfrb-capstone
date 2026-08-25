@@ -2,7 +2,7 @@
 // database/migrations/2026_04_21_000002_create_order_production_tracking_table.php
 //
 // ═══════════════════════════════════════════════════════════════════════════
-// FIX SUMMARY (3 changes from original):
+// FIX SUMMARY (4 changes from original):
 //
 // FIX 1 — Table already exists error
 //   BEFORE: Schema::create() runs unconditionally → crashes on 2nd migrate
@@ -17,6 +17,20 @@
 // FIX 3 — down() also made safe
 //   BEFORE: Schema::dropIfExists() — fine as-is
 //   AFTER:  unchanged (dropIfExists is already idempotent)
+//
+// FIX 4 (Aug 25 2026) — stage enum was missing 2 of the 7 real pipeline
+//   stages ('segregation' and 'pressing'). Confirmed by reading
+//   ProductionController.php directly: its own header comment says
+//   "stage (enum 7)", its STAGE_MAP and logProgress() validation both
+//   require all 7 values (pattern → segregation → cutting → sewing → qc
+//   → pressing → packing), but this file only ever created 5. Any
+//   already-migrated database needs the separate repair migration
+//   (2026_08_25_000001_fix_order_production_tracking_stage_enum.php) —
+//   ALTERing an ENUM on a live table with an idempotent-guarded
+//   Schema::create() migration like this one won't retroactively widen
+//   it. This file is fixed so a FRESH environment (new clone, new
+//   database) gets the correct enum on the very first migrate, without
+//   needing the repair migration to run afterward.
 // ═══════════════════════════════════════════════════════════════════════════
 
 use Illuminate\Database\Migrations\Migration;
@@ -44,7 +58,11 @@ return new class extends Migration
                   ->on('orders')
                   ->onDelete('cascade');
 
-            $table->enum('stage', ['pattern', 'cutting', 'sewing', 'qc', 'packing']);
+            // ── FIX 4: All 7 real pipeline stages, not 5 ───────────────────
+            // Matches ProductionController::STAGE_MAP and its
+            // logProgress() validation rule exactly — those two must never
+            // drift apart again.
+            $table->enum('stage', ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing']);
 
             $table->unsignedInteger('qty_target')->default(0);
             $table->unsignedInteger('qty_completed')->default(0);
