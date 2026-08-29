@@ -6,9 +6,14 @@ use Illuminate\Database\Eloquent\Model;
 class MaterialRecommendation extends Model
 {
     protected $primaryKey = 'rec_id';
+    // NOTE (Aug 28 2026 scope correction): estimated_range/total_estimated_range
+    // removed from $fillable — no formula/BOM exists in this system, nothing
+    // computes or writes these anymore. DB columns intentionally left in
+    // place (not part of this change) in case any legacy row still has data
+    // in them; just no code path reads or writes them now.
     protected $fillable = [
         'order_id','material_name','material_id','category',
-        'estimated_range','total_estimated_range','unit','ai_note',
+        'unit','ai_note',
         'display_order','status','customer_accepted','accepted_at',
         'customer_note','linked_by','linked_at','actual_qty_issued',
         'issued_at','created_at','updated_at',

@@ -209,16 +209,24 @@ class InventoryController extends Controller
         return response()->json(['message' => 'Material deleted.']);
     }
 
-    // ── POST /api/admin/materials/{id}/stock-in ───────────────────────────────
-    public function stockIn(Request $request, int $id)
+    // ── POST /api/admin/materials/{id}/stock-in  (URL-bound id)
+    // ── POST /api/admin/inventory/stock-in       (no {id} — Inventory.jsx sends
+    //         material_id in the body instead: axios.post(`/api/admin/inventory/
+    //         stock-${type}`, { material_id, quantity, reason }) )
+    // FIX (Aug 27 2026): $id was previously required, so the id-less route always
+    // 500'd before this method body ran. Now optional, falls back to the body.
+    public function stockIn(Request $request, ?int $id = null)
     {
-        return $this->adjustStock($request, $id, 'stock_in');
+        $materialId = $id ?? (int) $request->input('material_id');
+        return $this->adjustStock($request, $materialId, 'stock_in');
     }
 
-    // ── POST /api/admin/materials/{id}/stock-out ──────────────────────────────
-    public function stockOut(Request $request, int $id)
+    // ── POST /api/admin/materials/{id}/stock-out  (URL-bound id)
+    // ── POST /api/admin/inventory/stock-out       (no {id} — see stockIn() note)
+    public function stockOut(Request $request, ?int $id = null)
     {
-        return $this->adjustStock($request, $id, 'stock_out');
+        $materialId = $id ?? (int) $request->input('material_id');
+        return $this->adjustStock($request, $materialId, 'stock_out');
     }
 
     // ── POST /api/admin/materials/{id}/adjust ─────────────────────────────────
@@ -296,11 +304,11 @@ class InventoryController extends Controller
         }
 
         $request->validate([
-            'change_qty' => 'required|numeric|min:0.01',
-            'reason'     => 'nullable|string|max:255',
+            'quantity' => 'required|numeric|min:0.01',
+            'reason'   => 'nullable|string|max:255',
         ]);
 
-        $qty   = (float) $request->input('change_qty');
+        $qty   = (float) $request->input('quantity');
         $delta = in_array($type, ['stock_out', 'wastage']) ? -abs($qty) : abs($qty);
 
         $newStock = max(0, $material->quantity_in_stock + $delta);
@@ -380,64 +388,10 @@ class InventoryController extends Controller
         }
     }
 
-    // ── Material usage rates (deterministic BOM engine config) ─────────────
-    // See database/migrations/2026_08_01_000001_create_material_usage_rates_table.php
-    // for the full architecture note. Staff set these; the AI never touches
-    // them. AIController::computeDeterministicQty() reads from this table.
-
-    // GET /api/admin/material-rates — list all configured rates, joined to
-    // material name for display
-    public function ratesIndex()
-    {
-        $rates = DB::table('material_usage_rates')
-            ->join('materials', 'materials.material_id', '=', 'material_usage_rates.material_id')
-            ->select(
-                'material_usage_rates.*',
-                'materials.material_name',
-                'materials.category'
-            )
-            ->orderBy('materials.category')
-            ->orderBy('materials.material_name')
-            ->get();
-
-        return response()->json(['rates' => $rates]);
-    }
-
-    // POST /api/admin/material-rates — create or update a rate for
-    // (material_id, garment_type). Upsert on the unique constraint.
-    public function ratesUpsert(Request $request)
-    {
-        $request->validate([
-            'material_id'  => 'required|integer|exists:materials,material_id',
-            'garment_type' => 'required|string|max:50',
-            'qty_per_unit' => 'required|numeric|min:0.0001',
-            'unit'         => 'required|string|max:20',
-        ]);
-
-        DB::table('material_usage_rates')->updateOrInsert(
-            [
-                'material_id'  => $request->material_id,
-                'garment_type' => $request->garment_type,
-            ],
-            [
-                'qty_per_unit' => $request->qty_per_unit,
-                'unit'         => $request->unit,
-                'set_by'       => Auth::id(),
-                'updated_at'   => now(),
-                'created_at'   => now(),
-            ]
-        );
-
-        Cache::forget('material_rates_all');
-
-        return response()->json(['message' => 'Usage rate saved.']);
-    }
-
-    // DELETE /api/admin/material-rates/{id}
-    public function ratesDestroy(int $id)
-    {
-        DB::table('material_usage_rates')->where('rate_id', $id)->delete();
-        Cache::forget('material_rates_all');
-        return response()->json(['message' => 'Usage rate removed.']);
-    }
+    // ratesIndex()/ratesUpsert()/ratesDestroy() removed Aug 28 2026 — no
+    // formula/BOM exists in this system anymore (locked design decision).
+    // These were the CRUD backing MaterialRates.jsx (also deleted) and fed
+    // AIController::computeDeterministicQty() (also removed). The
+    // material_usage_rates table and its columns are intentionally left in
+    // the DB — just no code path reads or writes them now.
 }

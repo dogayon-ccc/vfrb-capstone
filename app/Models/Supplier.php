@@ -28,12 +28,7 @@ class Supplier extends Model
     ];
 
     // ─── Relationships ────────────────────────────────────────────────────────
-
-    // The user account linked to this supplier (via users.supplier_id FK)
-    public function user(): \Illuminate\Database\Eloquent\Relations\HasOne
-    {
-        return $this->hasOne(User::class, 'supplier_id', 'supplier_id');
-    }
+    // No user() relation — suppliers never get a login (users.supplier_id was dropped).
 
     public function rfqResponses(): \Illuminate\Database\Eloquent\Relations\HasMany
     {

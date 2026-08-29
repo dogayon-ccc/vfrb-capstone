@@ -42,6 +42,7 @@ use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\OutputLogController;
 use App\Http\Controllers\Api\PhysicalCountController;
 use App\Http\Controllers\Api\ProductionController;
+use App\Http\Controllers\Api\ProductionIncidentController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\QCChecklistController;
 use App\Http\Controllers\Api\SettingsController;
@@ -191,6 +192,9 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::post('/drafts',          [OrderDraftController::class, 'store']);
     Route::delete('/drafts/latest', [OrderDraftController::class, 'destroy']);
 
+    // ── Feedback (Aug 27 2026) — any customer can submit a note about the
+    // system itself. Deliberately minimal — see migration comment.
+    Route::post('/feedback', [\App\Http\Controllers\Api\FeedbackController::class, 'store']);
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -206,6 +210,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // Dashboard.jsx: GET /api/admin/dashboard
     //                GET /api/admin/notifications (bell dropdown — reads same table)
     Route::get('/dashboard', [AdminDashboardController::class, 'index']);
+
+    // ── Feedback (Aug 27 2026) — any staff/manager can also submit; only
+    // managers can view the list (see role:manager group below).
+    Route::post('/feedback', [\App\Http\Controllers\Api\FeedbackController::class, 'store']);
 
     // ── Notifications ────────────────────────────────────────────
     // Dashboard.jsx:  GET  /api/admin/notifications?per_page=20
@@ -244,17 +252,31 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // ── Production Stage Advance ──────────────────────────────────
     // ProductionTracking.jsx: GET  /api/admin/orders/{id}/production  → stages()
     //                         POST /api/admin/orders/{id}/advance     → advance() (manager override)
-    // DailyOutputLog.jsx:     POST /api/admin/orders/{id}/log-output  → logProgress()
-    //                         POST /api/admin/orders/{id}/log-progress → logProgress() (alias)
+    // Actual output logging (DailyOutputLog.jsx) posts to
+    // POST /api/admin/output-logs → OutputLogController::store() — see
+    // that route below. This section previously also registered
+    // /log-output and /log-progress → ProductionController::logProgress(),
+    // but that method was never called by any frontend page (the comment
+    // claiming DailyOutputLog.jsx used it was stale/aspirational) and, after
+    // the Aug 28 2026 consolidation, delegated 100% of its logic to
+    // ProductionStageService::logOutput() with no unique code of its own —
+    // confirmed zero functional loss, removed as dead code (Aug 28 2026).
     Route::get('/orders/{id}/production',    [ProductionController::class, 'stages']);
-    Route::post('/orders/{id}/log-output',   [ProductionController::class, 'logProgress']);
-    Route::post('/orders/{id}/log-progress', [ProductionController::class, 'logProgress']);
+
+    // ── Production Incidents (machine breakdown / cutting damage) ─
+    // ProductionIncidents.jsx: added Aug 25 2026, per interview transcript.
+    // Not manager-exclusive — any staff can report/acknowledge/resolve,
+    // same tier as QCChecklist/PhysicalCount.
+    Route::get('/production-incidents',                 [ProductionIncidentController::class, 'index'])->middleware('jobfn:production');
+    Route::post('/production-incidents',                [ProductionIncidentController::class, 'store'])->middleware('jobfn:production');
+    Route::patch('/production-incidents/{id}/acknowledge',[ProductionIncidentController::class, 'acknowledge'])->middleware('jobfn:production');
+    Route::patch('/production-incidents/{id}/resolve',   [ProductionIncidentController::class, 'resolve'])->middleware('jobfn:production');
 
     // ── QC Checklist ─────────────────────────────────────────────
     // QCChecklist.jsx: GET  /api/admin/orders/{orderId}/qc
     //                  POST /api/admin/orders/{orderId}/qc
-    Route::get('/orders/{orderId}/qc',  [QCChecklistController::class, 'show']);
-    Route::post('/orders/{orderId}/qc', [QCChecklistController::class, 'store']);
+    Route::get('/orders/{orderId}/qc',  [QCChecklistController::class, 'show'])->middleware('jobfn:production');
+    Route::post('/orders/{orderId}/qc', [QCChecklistController::class, 'store'])->middleware('jobfn:production');
 
     // ── Daily Output Logs ─────────────────────────────────────────
     // DailyOutputLog.jsx: GET  /api/admin/output-logs?date=...
@@ -262,11 +284,11 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     //                     POST /api/admin/output-logs  ← DailyOutputLog.jsx submits here
     // summary/{orderId} must come BEFORE /{id} to avoid param collision
     // POST must also come before /{id} for Laravel route resolution
-    Route::get('/output-logs/summary/{orderId}', [OutputLogController::class, 'summaryByOrder']);
-    Route::post('/output-logs',                  [OutputLogController::class, 'store']);
-    Route::get('/output-logs',                   [OutputLogController::class, 'index']);
-    Route::get('/output-logs/{id}',              [OutputLogController::class, 'show']);
-    Route::delete('/output-logs/{id}',           [OutputLogController::class, 'destroy']);
+    Route::get('/output-logs/summary/{orderId}', [OutputLogController::class, 'summaryByOrder'])->middleware('jobfn:production');
+    Route::post('/output-logs',                  [OutputLogController::class, 'store'])->middleware('jobfn:production');
+    Route::get('/output-logs',                   [OutputLogController::class, 'index'])->middleware('jobfn:production');
+    Route::get('/output-logs/{id}',              [OutputLogController::class, 'show'])->middleware('jobfn:production');
+    Route::delete('/output-logs/{id}',           [OutputLogController::class, 'destroy'])->middleware('jobfn:production');
 
     // ── Inventory ─────────────────────────────────────────────────
     // Inventory.jsx: GET /api/admin/inventory
@@ -277,29 +299,31 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // where type is 'in' or 'out' — routes must match exactly
     Route::get('/inventory',      [InventoryController::class, 'index']);
     Route::get('/inventory/logs', [InventoryController::class, 'allLogs']); // FIX: was 'logs' → 500
-    Route::post('/inventory/stock-in',  [InventoryController::class, 'stockIn']);
-    Route::post('/inventory/stock-out', [InventoryController::class, 'stockOut']);
+    Route::post('/inventory/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
+    Route::post('/inventory/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
 
     // ── Materials ─────────────────────────────────────────────────
     // Materials.jsx:    GET  /api/admin/materials
     // PhysicalCount.jsx:GET  /api/admin/materials  (for dropdown)
     // PurchaseOrders.jsx:GET /api/admin/materials  (for RFQ dropdown)
     // Inventory.jsx:    PUT  /api/admin/materials/{id}
-    Route::get('/materials',       [InventoryController::class, 'index']);
-    Route::post('/materials',      [InventoryController::class, 'store']);
-    Route::put('/materials/{id}',  [InventoryController::class, 'update']);
-    Route::delete('/materials/{id}', [InventoryController::class, 'destroy']);
-    Route::get('/materials/{id}',  [InventoryController::class, 'show']);
-    Route::post('/materials/{id}/stock-in',  [InventoryController::class, 'stockIn']);
-    Route::post('/materials/{id}/stock-out', [InventoryController::class, 'stockOut']);
-    Route::post('/materials/{id}/adjust',    [InventoryController::class, 'adjust']);
-    Route::get('/materials/{id}/logs',       [InventoryController::class, 'logs']);
+    Route::get('/materials',       [InventoryController::class, 'index'])->middleware('jobfn:inventory');
+    Route::post('/materials',      [InventoryController::class, 'store'])->middleware('jobfn:inventory');
+    Route::put('/materials/{id}',  [InventoryController::class, 'update'])->middleware('jobfn:inventory');
+    Route::delete('/materials/{id}', [InventoryController::class, 'destroy'])->middleware('jobfn:inventory');
+    Route::get('/materials/{id}',  [InventoryController::class, 'show'])->middleware('jobfn:inventory');
+    Route::post('/materials/{id}/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
+    Route::post('/materials/{id}/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
+    Route::post('/materials/{id}/adjust',    [InventoryController::class, 'adjust'])->middleware('jobfn:inventory');
+    Route::get('/materials/{id}/logs',       [InventoryController::class, 'logs'])->middleware('jobfn:inventory');
 
-    // ── Material usage rates (deterministic BOM engine — staff-configured) ──
-    // Feeds AIController::computeDeterministicQty(). Never touched by the AI.
-    Route::get('/material-rates',        [InventoryController::class, 'ratesIndex']);
-    Route::post('/material-rates',       [InventoryController::class, 'ratesUpsert']);
-    Route::delete('/material-rates/{id}', [InventoryController::class, 'ratesDestroy']);
+    // Material usage-rate routes removed (Aug 29 2026, this pass) — the
+    // three controller methods they pointed to (InventoryController::
+    // ratesIndex/ratesUpsert/ratesDestroy) were already deleted Aug 28 2026
+    // alongside MaterialRates.jsx (see InventoryController.php's own
+    // comment at that spot). These three routes were left behind pointing
+    // at nonexistent methods — any request to them would have thrown a
+    // fatal BadMethodCallException. Genuinely dead now, not orphaned.
     // garment-types route moved above orders/{id} — see that registration
 
     // ── Physical Count ────────────────────────────────────────────
@@ -309,10 +333,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     //                    POST /api/admin/physical-counts
     //                    PATCH /api/admin/physical-counts/{id}/reconcile (manager only — but staff triggers, manager approves)
     // summary and sheet must come BEFORE /{id} to avoid collision
-    Route::get('/physical-counts/summary', [PhysicalCountController::class, 'summary']);
-    Route::get('/physical-counts/sheet',   [PhysicalCountController::class, 'sheet']);
-    Route::get('/physical-counts',         [PhysicalCountController::class, 'index']);
-    Route::post('/physical-counts',        [PhysicalCountController::class, 'store']);
+    Route::get('/physical-counts/summary', [PhysicalCountController::class, 'summary'])->middleware('jobfn:inventory');
+    Route::get('/physical-counts/sheet',   [PhysicalCountController::class, 'sheet'])->middleware('jobfn:inventory');
+    Route::get('/physical-counts',         [PhysicalCountController::class, 'index'])->middleware('jobfn:inventory');
+    Route::post('/physical-counts',        [PhysicalCountController::class, 'store'])->middleware('jobfn:inventory');
 
     // ── Messages (order-based thread) ────────────────────────────
     // Messages.jsx:    GET  /api/admin/messages        (all threads)
@@ -353,14 +377,23 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::post('/rfq/{id}/respond',            [PurchaseOrderController::class, 'rfqRespond']);
     Route::patch('/rfq/{id}/close',             [PurchaseOrderController::class, 'rfqClose']);
 
-    // ── Suppliers (master data — no portal, read/write only) ─────
-    // PurchaseOrders.jsx: GET /api/admin/suppliers
-    //                     POST /api/admin/suppliers
-    // Suppliers.jsx:      GET /api/admin/suppliers
-    //                     PUT /api/admin/suppliers/{id}
+    // ── Suppliers — READ ONLY here (staff+manager) ────────────────
+    // FIX (Aug 28 2026 — role gap): Suppliers.jsx is manager-exclusive
+    // in the frontend nav (App.jsx wraps its route in <RequireManager>),
+    // but the write routes (POST/PUT) were sitting in this staff+manager
+    // group, so any staff bearer token could create/edit supplier master
+    // data directly via the API, bypassing the nav restriction entirely.
+    // GET stays here deliberately: PurchaseOrders.jsx (NOT manager-gated —
+    // staff creates RFQs per the locked business rule "Staff: New RFQ →
+    // select supplier → select material") reads this same endpoint to
+    // populate its supplier dropdown in LogResponseModal. Confirmed via
+    // direct grep that no staff-facing JSX ever POSTs or PUTs to
+    // /suppliers — only Suppliers.jsx does, and it's already
+    // manager-gated on the frontend. Moving GET here too would have
+    // broken the real, locked RFQ workflow — moving only the writes
+    // closes the actual gap without breaking anything.
+    // POST/PUT moved to the manager-only group below.
     Route::get('/suppliers',        [PurchaseOrderController::class, 'suppliersIndex']);
-    Route::post('/suppliers',       [PurchaseOrderController::class, 'suppliersStore']);
-    Route::put('/suppliers/{id}',   [PurchaseOrderController::class, 'suppliersUpdate']);
 
     // ── Sales Transactions ────────────────────────────────────────
     // SalesTransactions.jsx: GET  /api/admin/transactions
@@ -391,6 +424,20 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
 // a manager does dozens of times a minute in normal use.
 Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])->prefix('admin')->group(function () {
 
+    // ── Suppliers — WRITE routes (Aug 28 2026 role-gap fix) ───────
+    // Moved from the staff+manager group above: Suppliers.jsx is already
+    // manager-exclusive in the nav (<RequireManager> wrapper), but a staff
+    // bearer token could previously hit these two endpoints directly and
+    // create/edit supplier master data. GET stays in the staff+manager
+    // group above (PurchaseOrders.jsx's staff-facing RFQ flow needs read
+    // access to the supplier list — see comment there).
+    Route::post('/suppliers',       [PurchaseOrderController::class, 'suppliersStore']);
+    Route::put('/suppliers/{id}',   [PurchaseOrderController::class, 'suppliersUpdate']);
+
+    // ── Feedback triage (Aug 27 2026) — manager-only, like Reports/Users.
+    Route::get('/feedback',        [\App\Http\Controllers\Api\FeedbackController::class, 'index']);
+    Route::patch('/feedback/{id}', [\App\Http\Controllers\Api\FeedbackController::class, 'update']);
+
     // ── Activity Log (Aug 22 2026) — genuinely manager-only, unlike the
     // Reports index above which staff CAN reach on the backend. This reads
     // across every staff/manager action table, so it stays fully gated. ──
@@ -403,11 +450,16 @@ Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])-
     // ProductionTracking.jsx advance button
     Route::post('/orders/{id}/advance',  [ProductionController::class, 'advance']);
     Route::patch('/orders/{id}/confirm', [ProductionController::class, 'confirm']); // pending → confirmed
-    Route::get('/orders/{id}/material-check', [ProductionController::class, 'materialCheck']); // pre-confirm feasibility warning
+    // materialCheck() route removed Aug 29 2026 — the controller method itself
+    // was already deleted as part of the no-formula redesign (see confirm()'s
+    // doc comment above it), but this GET route was left pointing at the
+    // now-nonexistent method. Confirmed zero live callers before removing:
+    // Orders.jsx calls PATCH .../confirm directly and reads its response
+    // body, never this GET endpoint.
 
     // ── Physical count reconciliation (manager approves) ─────────
     // PhysicalCount.jsx: PATCH /api/admin/physical-counts/{id}/reconcile
-    Route::patch('/physical-counts/{id}/reconcile', [PhysicalCountController::class, 'reconcile']);
+    Route::patch('/physical-counts/{id}/reconcile', [PhysicalCountController::class, 'reconcile'])->middleware('jobfn:inventory');
 
     // ── Color confirmation (manager unblocks cutting) ─────────────
     // PurchaseOrders.jsx: PATCH /api/admin/purchase-orders/{id}/confirm-color

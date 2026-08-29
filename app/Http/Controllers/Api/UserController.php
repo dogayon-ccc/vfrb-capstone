@@ -30,6 +30,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 
 class UserController extends Controller
 {
@@ -51,7 +52,7 @@ class UserController extends Controller
 
         $query = DB::table('users')
             ->whereIn('user_id', $userIds)
-            ->select('user_id', 'name', 'email', 'contact_number',
+            ->select('user_id', 'name', 'email', 'contact_number', 'job_function',
                      'organization_name', 'email_verified_at', 'created_at', 'updated_at');
 
         if ($search) {
@@ -83,13 +84,15 @@ class UserController extends Controller
     {
         $request->validate([
             'name'                  => 'required|string|max:100',
-            'email'                 => 'required|email|max:100|unique:users,email',
-            'password'              => 'required|string|min:8|confirmed',
+            'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
+            'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
             'role' => 'required|in:staff,manager', // customers self-register only
+            'job_function'          => 'nullable|in:general,production,inventory,sales',
             'contact_number'        => 'nullable|string|max:20',
             'organization_name'     => 'nullable|string|max:100',
         ], [
             'email.unique' => 'An account with this email already exists.',
+            'email.email'  => 'Please enter a real, valid email address.',
         ]);
 
         $userId = DB::table('users')->insertGetId([
@@ -98,6 +101,10 @@ class UserController extends Controller
             'password'          => Hash::make($request->input('password')),
             'contact_number'    => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
+            // job_function is only meaningful for staff — managers/customers stay 'general'
+            'job_function'      => $request->input('role') === 'staff'
+                ? ($request->input('job_function') ?? 'general')
+                : 'general',
             // Auto-verify staff/manager accounts (manager creates them directly)
             'email_verified_at' => in_array($request->input('role'), ['staff','manager']) ? now() : null,
             'created_at'        => now(),
@@ -211,7 +218,7 @@ class UserController extends Controller
     {
         $request->validate([
             'current_password' => 'required|string',
-            'password'         => 'required|string|min:8|confirmed',
+            'password'         => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
         ]);
 
         $user = DB::table('users')->where('user_id', Auth::id())->first();

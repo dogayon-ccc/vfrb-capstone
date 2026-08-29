@@ -5,10 +5,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\MaterialRecommendation;
-use App\Models\Notification;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -183,7 +183,6 @@ class AIController extends Controller
         // Defensive: only trust material_ids that actually exist in the
         // catalog we sent — never trust an LLM-generated ID at face value.
         $catalogById = $catalog->keyBy('material_id');
-        $qty         = (int) ($order->quantity_ordered ?? 0);
 
         MaterialRecommendation::where('order_id', $order->order_id)->delete();
         $i = 0;
@@ -192,15 +191,11 @@ class AIController extends Controller
             $mat   = $catalogById->get($matId);
             if (!$mat) continue; // hallucinated ID — skip rather than guess
 
-            $computed = $this->computeDeterministicQty($matId, $order->garment_type, $qty, $mat->unit);
-
             MaterialRecommendation::create([
                 'order_id'              => $order->order_id,
                 'material_name'         => $mat->material_name,
                 'material_id'           => $mat->material_id, // FIX: previously always null
                 'category'              => $mat->category ?? 'Other',
-                'estimated_range'       => $computed['estimated_range'],
-                'total_estimated_range' => null, // avoid duplicate display — estimated_range already carries the full computed string
                 'unit'                  => $mat->unit,
                 // AI note is narration only — no numbers ever come from Gemini
                 'ai_note'               => $sel['reason'] ?? null,
@@ -213,38 +208,24 @@ class AIController extends Controller
 
         $order->update(['ai_recommendation_status' => 'ready']);
 
+        // SCOPE CORRECTION (Aug 28 2026): estimated_range/total_estimated_range
+        // no longer exist on the create() call above at all — there is no
+        // formula/BOM anywhere in this system now. Automated inventory
+        // deduction still happens on Pattern completion, but the quantity
+        // comes from staff manually entering actual usage at that point (see
+        // ProductionStageService::issueMaterialsToProduction()), not from
+        // anything computed here. Gemini recommends material TYPES only —
+        // that was already the locked customer-facing rule (SCOPE-001); this
+        // makes it true internally as well, so makeHidden() below is now
+        // belt-and-suspenders rather than load-bearing (nothing to hide that
+        // wasn't already never written).
+        $materials = MaterialRecommendation::where('order_id', $order->order_id)
+                        ->orderBy('display_order')->get();
+
         return response()->json([
             'recommendation' => $parsed['narration'] ?? '',
-            'materials'      => MaterialRecommendation::where('order_id', $order->order_id)
-                                    ->orderBy('display_order')->get(),
+            'materials'      => $materials,
         ]);
-    }
-
-    // ── Deterministic BOM engine — rule-based, NOT the LLM ──────────────────
-    // Looks up the staff-configured rate for (material_id, garment_type) and
-    // multiplies by quantity_ordered. If no rate has been set yet, this does
-    // NOT invent a number — it says so plainly, per the project's "never
-    // guess a business figure" rule. See material_usage_rates migration.
-    private function computeDeterministicQty(int $materialId, ?string $garmentType, int $qtyOrdered, string $unit): array
-    {
-        $rate = \App\Models\MaterialUsageRate::where('material_id', $materialId)
-            ->where('garment_type', $garmentType)
-            ->first();
-
-        if (!$rate) {
-            return ['estimated_range' => 'Not yet configured — staff must set a usage rate for this material.'];
-        }
-
-        // IMPORTANT: both issueMaterialsToProduction() and materialCheck()
-        // pull the number back out with preg_replace('/[^0-9.]/', '', ...) —
-        // it strips every non-digit character and concatenates what's left,
-        // so this string must contain exactly ONE number or the deduction/
-        // feasibility logic silently reads garbage (e.g. "350.0 yards total
-        // (3.5 per pc)" → "350.03.5100", an early version of this bug I
-        // caught before shipping it). Keep this to a single clean figure —
-        // matches the schema comment's own example format ("3.5 yards").
-        $total = round($rate->qty_per_unit * $qtyOrdered, 2);
-        return ['estimated_range' => "{$total} {$rate->unit}"];
     }
 
     // ── Customer chooses their own materials instead of accepting the AI's ──
@@ -273,22 +254,17 @@ class AIController extends Controller
                       ->firstOrFail();
 
         $catalog = \App\Models\Material::whereIn('material_id', $request->material_ids)->get()->keyBy('material_id');
-        $qty     = (int) ($order->quantity_ordered ?? 0);
 
         MaterialRecommendation::where('order_id', $orderId)->delete();
         foreach ($request->material_ids as $i => $matId) {
             $mat = $catalog->get($matId);
             if (!$mat) continue;
 
-            $computed = $this->computeDeterministicQty($matId, $order->garment_type, $qty, $mat->unit);
-
             MaterialRecommendation::create([
                 'order_id'              => $orderId,
                 'material_name'         => $mat->material_name,
                 'material_id'           => $mat->material_id,
                 'category'              => $mat->category ?? 'Other',
-                'estimated_range'       => $computed['estimated_range'],
-                'total_estimated_range' => null,
                 'unit'                  => $mat->unit,
                 'ai_note'               => 'Selected directly by customer, not AI-recommended.',
                 'display_order'         => $i,
@@ -308,7 +284,9 @@ class AIController extends Controller
 
         $staffUsers = User::role(['staff', 'manager'])->get();
         foreach ($staffUsers as $staff) {
-            Notification::create([
+            // BUG FIX (pre-deployment audit): DB::table()->insert() instead of
+            // Notification::create() — see acceptRecommendation() above for why.
+            DB::table('notifications')->insert([
                 'user_id'    => $staff->user_id,
                 'order_id'   => $orderId,
                 'message'    => "{$user->name} chose their own materials for Order #{$orderId} (skipped AI recommendation).",
@@ -337,7 +315,15 @@ class AIController extends Controller
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
 
-        MaterialRecommendation::where('order_id', $orderId)
+        // BUG FIX (pre-deployment audit): this update is correctly scoped to
+        // status='pending', which makes the DB write itself idempotent — a
+        // second call after acceptance matches 0 rows. But the notification
+        // loop below used to run unconditionally regardless of that count,
+        // so double-clicking "Accept" (or a retried request) still sent
+        // duplicate "materials accepted" notifications to every staff/manager
+        // even though the order's actual state only changed once. Capture the
+        // affected-row count and gate everything below it on that.
+        $updated = MaterialRecommendation::where('order_id', $orderId)
             ->where('status', 'pending')
             ->update([
                 'status'            => 'accepted',
@@ -346,6 +332,18 @@ class AIController extends Controller
                 'customer_note'     => $request->notes,
                 'updated_at'        => now(),
             ]);
+
+        if ($updated === 0) {
+            // Already accepted (or never had a pending recommendation) —
+            // nothing changed, so nothing to notify. Not an error: the
+            // customer's intent ("accept these materials") is already
+            // satisfied, so we return success without re-firing side effects.
+            return response()->json([
+                'message'            => 'Materials were already accepted.',
+                'materials_accepted' => true,
+                'already_accepted'   => true,
+            ]);
+        }
 
         $order->update([
             'ai_recommendation_status'      => 'accepted',
@@ -358,7 +356,13 @@ class AIController extends Controller
         // would throw "Unknown column 'role'" on every call. Use Spatie's role() scope.
         $staffUsers = User::role(['staff', 'manager'])->get();
         foreach ($staffUsers as $staff) {
-            Notification::create([
+            // BUG FIX (pre-deployment audit): Notification::create() silently
+            // drops 'type' and 'title' because the model's $fillable omits
+            // them even though both columns exist in the schema — Eloquent's
+            // mass-assignment guard drops unlisted fields with no error.
+            // Use DB::table()->insert() instead, same pattern already used
+            // correctly by ProductionController::notifyStageAdvance().
+            DB::table('notifications')->insert([
                 'user_id'    => $staff->user_id,
                 'order_id'   => $orderId,
                 'message'    => "{$user->name} accepted AI material recommendations for Order #{$orderId}."
@@ -373,8 +377,9 @@ class AIController extends Controller
         }
 
         return response()->json([
-            'message'           => 'Materials accepted. VFRB staff have been notified.',
-            'materials_accepted'=> true,
+            'message'            => 'Materials accepted. VFRB staff have been notified.',
+            'materials_accepted' => true,
+            'already_accepted'   => false,
         ]);
     }
 
@@ -392,7 +397,10 @@ class AIController extends Controller
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
 
-        MaterialRecommendation::where('order_id', $orderId)
+        // BUG FIX (pre-deployment audit): same idempotency + $fillable issue
+        // as acceptRecommendation() — gate on affected-row count and use
+        // DB::table()->insert() so 'type'/'title' actually persist.
+        $updated = MaterialRecommendation::where('order_id', $orderId)
             ->where('status', 'pending')
             ->update([
                 'status'            => 'rejected',
@@ -401,13 +409,20 @@ class AIController extends Controller
                 'updated_at'        => now(),
             ]);
 
+        if ($updated === 0) {
+            return response()->json([
+                'message'          => 'Materials were already declined.',
+                'already_rejected' => true,
+            ]);
+        }
+
         $order->update([
             'ai_recommendation_status' => 'rejected',
         ]);
 
         $staffUsers = User::role(['staff', 'manager'])->get();
         foreach ($staffUsers as $staff) {
-            Notification::create([
+            DB::table('notifications')->insert([
                 'user_id'    => $staff->user_id,
                 'order_id'   => $orderId,
                 'message'    => "{$user->name} declined the AI material recommendation for Order #{$orderId}."
@@ -430,10 +445,11 @@ class AIController extends Controller
     // =========================================================================
     // Get recommendation summary for an order (customer OrderDetail.jsx)
     // GET /api/customer/orders/{id}/ai-recommendation
-    // NEW — synthesizes the material_recommendations rows for this order into
-    // the single-object shape OrderDetail.jsx renders:
-    //   { rec_id, status, customer_accepted, materials_json: {name: {estimated_range}},
-    //     total_estimated_range, notes }
+    // Synthesizes the material_recommendations rows for this order into the
+    // single-object shape OrderDetail.jsx renders:
+    //   { rec_id, status, customer_accepted, materials_json: {name: {category,unit}}, notes }
+    // No quantity field anywhere in this shape — no formula/BOM exists in
+    // this system (Aug 28 2026 design decision).
     // =========================================================================
     public function showForOrder($orderId)
     {
@@ -452,10 +468,15 @@ class AIController extends Controller
         $materialsJson = [];
         $notesParts    = [];
         foreach ($rows as $row) {
+            // Material TYPE only — category/unit, never a quantity. This was
+            // already the locked customer-facing rule (SCOPE-001) and is now
+            // also true of every other code path in this file (Aug 28 2026):
+            // admin/OrderDetail.jsx's separate endpoint (GET
+            // /api/admin/orders/{id}) no longer has an estimated_range to
+            // show either — that column is never written anymore.
             $materialsJson[$row->material_name] = [
-                'estimated_range' => $row->estimated_range,
-                'category'        => $row->category,
-                'unit'            => $row->unit,
+                'category' => $row->category,
+                'unit'     => $row->unit,
             ];
             if ($row->ai_note) {
                 $notesParts[] = $row->ai_note;
@@ -468,7 +489,6 @@ class AIController extends Controller
                 'status'                => $order->ai_recommendation_status,
                 'customer_accepted'     => $rows->first()->customer_accepted,
                 'materials_json'        => $materialsJson,
-                'total_estimated_range' => $rows->first()->total_estimated_range,
                 'notes'                 => implode(' ', $notesParts),
             ],
         ]);

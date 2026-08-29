@@ -13,21 +13,18 @@
 //   (qty_xs+qty_s+qty_m+qty_l+qty_xl+qty_xxl+qty_xxxl+qty_custom) STORED
 //   MySQL 8 throws error if you try to INSERT it. NEVER include it in inserts.
 //
-// This controller is the AUDIT TRAIL read path AND the write path that
-// drives the auto-advance engine in order_production_tracking (see store()).
+// This controller is the AUDIT TRAIL read path (index/show/summary) AND the
+// write path (store()) for staff logging daily output.
 //
-// PORTED FROM AdminOrderController (dead code, never wired to any route):
-//   - issueMaterialsToProduction() — MIGO MT-261 Goods Issue. Fires when
-//     the Pattern stage completes. Deducts only material_recommendations
-//     rows the customer accepted AND staff already linked to real stock
-//     (material_id not null). Row-locks each material to stay safe under
-//     concurrent completions. This never ran anywhere before this port —
-//     inventory only ever moved via manual stock-in/out or PO receipt.
-//   - autoCreateDelivery() — creates the delivery_tracking row the moment
-//     Packing completes (order status -> 'completed'). Never ran before
-//     either — staff had to remember to create it manually.
-// Both run inside the SAME DB transaction as the output-log write itself,
-// so a failure anywhere rolls back everything atomically.
+// AS OF Aug 28 2026, store()'s actual stage-advance logic — including the
+// MIGO MT-261 goods-issue deduction on Pattern completion and auto-delivery
+// creation on Packing completion — was extracted into
+// App\Services\ProductionStageService, shared with
+// ProductionController::logProgress(). See that service's file header for
+// the full history of why (two independently-drifted code paths, only one
+// of which had transaction locking, only one of which triggered real
+// inventory movement). store() below just validates the request and
+// delegates.
 
 namespace App\Http\Controllers\Api;
 
@@ -35,7 +32,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Log;
 
 class OutputLogController extends Controller
 {
@@ -65,319 +61,101 @@ class OutputLogController extends Controller
             'defect_notes'     => 'nullable|string|max:1000',
             'notes'            => 'nullable|string|max:500',
             'scanned_via_qr'   => 'nullable|boolean',
+            // See ProductionController::logProgress() for the full comment
+            // on why this is shape-only validation, not required_if.
+            'material_actuals'               => 'nullable|array',
+            'material_actuals.*.material_id' => 'required_with:material_actuals|integer|exists:materials,material_id',
+            'material_actuals.*.qty_used'    => 'required_with:material_actuals|numeric|min:0',
         ]);
 
-        $order = DB::table('orders')
-            ->where('order_id', $request->order_id)
-            ->first();
-
+        // Fast-path existence check only — kept here so a plainly-missing
+        // order 404s before any qty parsing happens. NOT relied on for the
+        // stage-match check any more: that check (and the order fetch used
+        // for the actual mutation) now happens again inside
+        // ProductionStageService::logOutput(), under lockForUpdate(), which
+        // is the authoritative check. This one is a convenience early-exit,
+        // not a security or correctness boundary.
+        $order = DB::table('orders')->where('order_id', $request->order_id)->first();
         if (!$order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
-        // Must match current stage
-        if ($order->status !== $request->stage) {
-            return response()->json([
-                'message' => "Order is in '{$order->status}' stage, not '{$request->stage}'. Update the stage field to match.",
-            ], 422);
-        }
-
-        $qtyFields = [
-            'qty_xs'     => (int) $request->input('qty_xs',     0),
-            'qty_s'      => (int) $request->input('qty_s',      0),
-            'qty_m'      => (int) $request->input('qty_m',      0),
-            'qty_l'      => (int) $request->input('qty_l',      0),
-            'qty_xl'     => (int) $request->input('qty_xl',     0),
-            'qty_xxl'    => (int) $request->input('qty_xxl',    0),
-            'qty_xxxl'   => (int) $request->input('qty_xxxl',   0),
-            'qty_custom' => (int) $request->input('qty_custom', 0),
-        ];
-
-        $batchTotal = array_sum($qtyFields);
-        if ($batchTotal === 0) {
-            return response()->json(['message' => 'At least one size quantity must be greater than 0.'], 422);
-        }
-
-        DB::beginTransaction();
-        try {
-            // INSERT — NEVER include total_output (GENERATED column)
-            $logId = DB::table('daily_output_logs')->insertGetId([
-                'order_id'         => $request->order_id,
-                'stage'            => $request->stage,
-                'logged_by'        => Auth::id(),
+        // CONSOLIDATED (Aug 28 2026): everything that used to run inline here
+        // (unlocked read-modify-write of qty_completed, QC gate, auto-advance,
+        // MIGO MT-261 inventory deduction, auto-delivery creation, notify) now
+        // lives in ProductionStageService::logOutput(), shared with
+        // ProductionController::logProgress(). The real fix that comes along
+        // with this merge for THIS endpoint specifically: the read-modify-write
+        // of qty_completed is now inside DB::transaction() + lockForUpdate() on
+        // both the orders row and the order_production_tracking row — this
+        // endpoint never had that locking before (it used a plain
+        // DB::beginTransaction()/commit() with no row locks at all), only
+        // logProgress() did. The stage-mismatch check that already existed
+        // here is preserved — the service performs the same check again,
+        // authoritatively, under lock.
+        // DailyOutputLog.jsx needs no changes — the request shape and this
+        // response shape are both unchanged below.
+        $result = (new \App\Services\ProductionStageService())->logOutput(
+            $request->order_id,
+            $request->stage,
+            [
+                'qty_xs'     => $request->input('qty_xs',     0),
+                'qty_s'      => $request->input('qty_s',      0),
+                'qty_m'      => $request->input('qty_m',      0),
+                'qty_l'      => $request->input('qty_l',      0),
+                'qty_xl'     => $request->input('qty_xl',     0),
+                'qty_xxl'    => $request->input('qty_xxl',    0),
+                'qty_xxxl'   => $request->input('qty_xxxl',   0),
+                'qty_custom' => $request->input('qty_custom', 0),
+            ],
+            [
+                'staff_id'         => Auth::id(),
                 'log_date'         => $request->log_date,
-                'qty_xs'           => $qtyFields['qty_xs'],
-                'qty_s'            => $qtyFields['qty_s'],
-                'qty_m'            => $qtyFields['qty_m'],
-                'qty_l'            => $qtyFields['qty_l'],
-                'qty_xl'           => $qtyFields['qty_xl'],
-                'qty_xxl'          => $qtyFields['qty_xxl'],
-                'qty_xxxl'         => $qtyFields['qty_xxxl'],
-                'qty_custom'       => $qtyFields['qty_custom'],
-                // total_output OMITTED — GENERATED
-                'defect_count'     => (int) $request->input('defect_count',     0),
-                'alteration_count' => (int) $request->input('alteration_count', 0),
-                'defect_notes'     => $request->input('defect_notes'),
-                'scanned_via_qr'   => $request->boolean('scanned_via_qr') ? 1 : 0,
                 'notes'            => $request->input('notes'),
-                'created_at'       => now(),
-                'updated_at'       => now(),
-            ]);
+                'defect_count'     => $request->input('defect_count',     0),
+                'alteration_count' => $request->input('alteration_count', 0),
+                'defect_notes'     => $request->input('defect_notes'),
+                'scanned_via_qr'   => $request->boolean('scanned_via_qr'),
+            ],
+            $request->input('material_actuals', [])
+        );
 
-            // Read back the GENERATED total_output for this row
-            $row = DB::table('daily_output_logs')
-                ->where('log_id', $logId)
-                ->first(['log_id', 'total_output']);
-
-            // Running total for this order+stage (sum all qty columns — not total_output to avoid GENERATED issues)
-            $runningTotal = (int) DB::table('daily_output_logs')
-                ->where('order_id', $request->order_id)
-                ->where('stage', $request->stage)
-                ->sum(DB::raw('qty_xs+qty_s+qty_m+qty_l+qty_xl+qty_xxl+qty_xxxl+qty_custom'));
-
-            // Update order_production_tracking
-            DB::table('order_production_tracking')->updateOrInsert(
-                ['order_id' => $request->order_id, 'stage' => $request->stage],
-                [
-                    'qty_target'    => $order->quantity_ordered,
-                    'qty_completed' => min($runningTotal, $order->quantity_ordered),
-                    'updated_by'    => Auth::id(),
-                    'updated_at'    => now(),
-                    'created_at'    => now(),
-                ]
-            );
-
-            $advanced       = false;
-            $newStatus      = $order->status;
-            $deductionLog   = [];
-            $lowStockAlerts = [];
-
-            // Auto-advance when running total >= quantity ordered
-            if ($runningTotal >= $order->quantity_ordered) {
-                // FIX: this used to be a local $stageSeq array of only the 7
-                // production stages with no 'completed' entry, so
-                // $stageSeq[$curIdx + 1] was always null once $request->stage
-                // was 'packing' — the advance block below was skipped
-                // entirely, meaning orders NEVER reached 'completed' through
-                // this path and autoCreateDelivery() (below) never fired,
-                // despite being fully implemented and correctly gated.
-                // ProductionController::STAGE_MAP is the locked, canonical
-                // source of truth and already maps packing => completed —
-                // reusing it here instead of a second, drifted copy.
-                $next = ProductionController::STAGE_MAP[$request->stage] ?? null;
-
-                // QC hold: block advance from QC → Pressing unless the checklist
-                // passed the 80/20 rule (or QC isn't required for this order).
-                // NOTE: this must key off $request->stage === 'qc' (the stage that
-                // just hit 100%), never 'sewing' — qc_passed_at cannot exist yet
-                // when sewing finishes, so gating there would block every order
-                // from ever reaching QC.
-                $qcHold = false;
-                if ($request->stage === 'qc' && $order->qc_required) {
-                    $checklist = DB::table('qc_checklists')
-                        ->where('order_id', $request->order_id)
-                        ->orderByDesc('checked_at')
-                        ->first();
-
-                    if (!$checklist) {
-                        $qcHold = true; // no checklist submitted yet
-                    } elseif (!$checklist->passed) {
-                        $passRate = $checklist->items_checked > 0
-                            ? $checklist->items_passed / $checklist->items_checked
-                            : 0;
-                        $qcHold = $passRate < 0.80; // 80/20 rule
-                    }
-                }
-
-                if ($next && !$qcHold) {
-                    DB::table('orders')
-                        ->where('order_id', $request->order_id)
-                        ->update(['status' => $next, 'updated_at' => now()]);
-
-                    if ($request->stage === 'qc') {
-                        DB::table('orders')
-                            ->where('order_id', $request->order_id)
-                            ->update(['qc_passed_at' => now()]);
-                    }
-
-                    $advanced  = true;
-                    $newStatus = $next;
-
-                    // ── MIGO MT-261 — Goods Issue to Production ──────────────
-                    // Fires ONLY when Pattern completes — the one stage flagged
-                    // for deduction (matches AdminOrderController::STAGE_MAP,
-                    // which this project already treats as the source of truth
-                    // for when materials are consumed).
-                    if ($request->stage === 'pattern') {
-                        $result         = $this->issueMaterialsToProduction($request->order_id, Auth::id());
-                        $deductionLog   = $result['log'];
-                        $lowStockAlerts = $result['low_stock'];
-                    }
-
-                    // ── Auto-create delivery record on order completion ──────
-                    if ($next === 'completed') {
-                        $this->autoCreateDelivery($request->order_id, Auth::id());
-                    }
-
-                    // Notify customer + manager
-                    $label = ucfirst($next);
-                    DB::table('notifications')->insert([
-                        'user_id'   => $order->user_id,
-                        'type'      => 'success',
-                        'title'     => "Order #{$request->order_id} Advanced",
-                        'message'   => "All pieces for {$request->stage} complete. Order advanced to {$label}."
-                            . (count($deductionLog) > 0 ? " · MIGO MT-261: " . count($deductionLog) . " materials deducted." : ""),
-                        'is_read'   => 0,
-                        'date_sent' => now(),
-                    ]);
-                }
-            }
-
-            DB::commit();
-        } catch (\Throwable $e) {
-            DB::rollBack();
-            return response()->json(['message' => 'Failed to log output. Please try again.'], 500);
+        if ($result['error']) {
+            // NOTE (correcting my own earlier comment in this exact spot):
+            // the pre-merge code here DID already have a stage-mismatch
+            // check (compared $order->status to $request->stage, returned
+            // 422 on mismatch) — I mis-stated that it didn't, in an earlier
+            // pass. What's actually new here is the LOCKING around that
+            // check: the pre-merge check read $order unlocked, so a second
+            // concurrent request could still slip past it before the first
+            // committed. The service now performs the same check
+            // authoritatively, inside lockForUpdate().
+            return response()->json([
+                'message' => $result['message'],
+            ], $result['status']);
         }
 
         return response()->json([
-            'message'      => 'Output logged successfully.',
-            'log_id'       => $logId,
-            'total_output' => $row->total_output ?? $batchTotal,
-            'stage_total'  => $runningTotal,
-            'qty_ordered'  => (int) $order->quantity_ordered,
-            'pct'          => round(($runningTotal / max($order->quantity_ordered, 1)) * 100),
-            'advanced'     => $advanced,
-            'new_status'   => $newStatus,
-            'deduction_log'=> $deductionLog,
-            'low_stock'    => $lowStockAlerts,
+            'message'                  => 'Output logged successfully.',
+            'log_id'                   => $result['log_id'],
+            'total_output'             => $result['total_output'],
+            'stage_total'              => $result['completed'],
+            'qty_ordered'              => $result['total'],
+            'pct'                      => $result['pct'],
+            'advanced'                 => $result['advanced'],
+            'new_status'               => $result['new_stage'],
+            'materials_blocked'        => $result['materials_blocked'],
+            'materials_needing_actual' => $result['materials_needing_actual'],
+            'deduction_log'            => $result['deduction_log'],
+            'low_stock'                => $result['low_stock'],
         ], 201);
     }
 
-    // ── PRIVATE: MIGO MT-261 — Goods Issue to Production ───────────────────────
-    // Ported from AdminOrderController::issueMaterialsToProduction() (dead code,
-    // never wired to a route — this logic has never actually run in this system).
-    //
-    // Only deducts recommendations the customer explicitly accepted
-    // (customer_accepted = 1) AND that staff already linked to a real
-    // inventory item (material_id not null). A pending/rejected AI suggestion,
-    // or one never linked to actual stock, is not a valid basis for touching
-    // inventory — this is a real fix vs. the original dead code, which deducted
-    // every recommendation regardless of acceptance status.
-    private function issueMaterialsToProduction(int $orderId, int $actorId): array
-    {
-        $recs = DB::table('material_recommendations')
-            ->where('order_id', $orderId)
-            ->where('customer_accepted', 1)
-            ->whereNotNull('material_id')
-            ->get();
-
-        $log      = [];
-        $lowStock = [];
-
-        if ($recs->isEmpty()) {
-            Log::warning("MIGO MT-261: No accepted+linked material recommendations for Order #{$orderId}");
-            return ['log' => [], 'low_stock' => []];
-        }
-
-        foreach ($recs as $rec) {
-            // Row-lock — safe under concurrent stage completions (this
-            // method runs inside store()'s existing DB transaction).
-            $material = DB::table('materials')
-                ->where('material_id', $rec->material_id)
-                ->lockForUpdate()
-                ->first();
-
-            if (!$material) continue;
-
-            // estimated_range is a string like "3.5 yards" — extract the numeric portion.
-            $qty = (float) preg_replace('/[^0-9.]/', '', $rec->estimated_range ?? '0');
-            if ($qty <= 0) continue;
-
-            $before = (float) $material->quantity_in_stock;
-            $after  = $before - $qty; // allowed to go negative — that's what triggers the low-stock flag below
-
-            DB::table('materials')
-                ->where('material_id', $material->material_id)
-                ->update([
-                    'quantity_in_stock' => $after,
-                    'updated_at'        => now(),
-                ]);
-
-            DB::table('inventory_logs')->insert([
-                'material_id' => $material->material_id,
-                'recorded_by' => $actorId,
-                'type'        => 'stock_out',
-                'change_qty'  => -$qty,
-                'reason'      => "MIGO MT-261 — Goods Issue to Production — Order #{$orderId}",
-                'log_date'    => now(),
-                'created_at'  => now(),
-                'updated_at'  => now(),
-            ]);
-
-            // Mark the recommendation as issued — completes the audit trail
-            // the schema already has columns for (actual_qty_issued, issued_at)
-            // but that were never actually being written before this port.
-            DB::table('material_recommendations')
-                ->where('rec_id', $rec->rec_id)
-                ->update([
-                    'actual_qty_issued' => $qty,
-                    'issued_at'         => now(),
-                    'updated_at'        => now(),
-                ]);
-
-            $item = [
-                'material_id'   => $material->material_id,
-                'material_name' => $material->material_name,
-                'unit'          => $material->unit,
-                'deducted'      => round($qty, 4),
-                'before'        => round($before, 4),
-                'after'         => round($after, 4),
-                'low_stock'     => $after <= (float) $material->reorder_threshold,
-            ];
-            $log[] = $item;
-            if ($item['low_stock']) $lowStock[] = $item;
-        }
-
-        Log::info("MIGO MT-261 complete — Order #{$orderId} — " . count($log) . " materials deducted");
-        return ['log' => $log, 'low_stock' => $lowStock];
-    }
-
-    // ── PRIVATE: auto-create delivery record on order completion ───────────────
-    // Ported from AdminOrderController::autoCreateDelivery() (dead code, never
-    // wired to a route). Guards against duplicate delivery rows if this were
-    // ever somehow triggered twice for the same order.
-    private function autoCreateDelivery(int $orderId, int $actorId): void
-    {
-        $exists = DB::table('delivery_tracking')->where('order_id', $orderId)->exists();
-        if ($exists) return;
-
-        $order   = DB::table('orders')->where('order_id', $orderId)->first();
-        $address = DB::table('users')->where('user_id', $order->user_id)->value('address');
-
-        DB::table('delivery_tracking')->insert([
-            'order_id'                => $orderId,
-            'delivery_method'         => 'vfrb_deliver',
-            'delivery_status'         => 'preparing',
-            'delivery_address'        => $address ?? 'Address pending',
-            'estimated_delivery_date' => now()->addDays(3)->toDateString(),
-            'updated_by'              => $actorId,
-            'notes'                   => 'Auto-created on order completion.',
-            'created_at'              => now(),
-            'updated_at'              => now(),
-        ]);
-
-        DB::table('notifications')->insert([
-            'user_id'   => $order->user_id,
-            'order_id'  => $orderId,
-            'type'      => 'success',
-            'title'     => "Order #{$orderId} Ready for Delivery",
-            'message'   => "🎉 Order #{$orderId} is complete! Delivery is being prepared.",
-            'is_read'   => 0,
-            'date_sent' => now(),
-            'created_at'=> now(),
-            'updated_at'=> now(),
-        ]);
-    }
+    // issueMaterialsToProduction() and autoCreateDelivery() moved to
+    // App\Services\ProductionStageService as part of the Aug 28 2026 merge —
+    // both ProductionController::logProgress() and this controller's store()
+    // now call that one shared implementation instead of each having (or, in
+    // logProgress()'s case, lacking) their own copy.
 
     // ── GET /api/admin/output-logs/summary/{orderId} ──────────────────────────
     // DailyOutputLog.jsx calls: GET /api/admin/output-logs/summary/{form.order_id}

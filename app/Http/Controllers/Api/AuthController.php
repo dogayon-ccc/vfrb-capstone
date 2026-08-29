@@ -40,6 +40,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 use Illuminate\Support\Str;
 use Laravel\Socialite\Facades\Socialite;
 
@@ -118,13 +119,18 @@ class AuthController extends Controller
     {
         $request->validate([
             'name'                  => 'required|string|max:100',
-            'email'                 => 'required|email|unique:users,email',
-            'password'              => 'required|string|min:8|confirmed',
+            // rfc,dns: not just syntactically valid — the domain must actually
+            // have a mail-exchanger record, so 'a@b.com' with a domain that
+            // doesn't receive mail is rejected here, not after signup.
+            'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
+            'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
             'contact_number'        => 'nullable|string|max:20',
             'organization_name'     => 'nullable|string|max:100',
             'client_type'           => 'nullable|in:individual,corporate,school,medical',
         ], [
             'email.unique' => 'An account with this email already exists.',
+            'email.email'  => 'Please enter a real, valid email address.',
+            'password.min' => 'Password must be at least 8 characters.',
         ]);
 
         $userId = DB::table('users')->insertGetId([
@@ -333,7 +339,7 @@ class AuthController extends Controller
         $request->validate([
             'token'    => 'required|string',
             'email'    => 'required|email',
-            'password' => 'required|string|min:8|confirmed',
+            'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
         ]);
 
         $status = Password::reset(
@@ -470,6 +476,7 @@ class AuthController extends Controller
             'address'           => $user->address,
             'client_type'       => $user->client_type,
             'avatar'            => $user->avatar,
+            'job_function'      => $user->job_function ?? 'general',
         ];
     }
 }

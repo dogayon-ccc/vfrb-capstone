@@ -109,7 +109,7 @@ class OrderController extends Controller
     {
         $request->validate([
             'garment_type'     => 'required|string|max:60',
-            'quantity_ordered' => 'required|integer|min:1',
+            'quantity_ordered' => 'required|integer|min:100',
             'color'            => 'nullable|string|max:50',
             'order_type'       => 'nullable|in:direct,subcontract,bulk,rush',
             'sizing_type'      => 'nullable|in:standard,custom',
@@ -125,6 +125,23 @@ class OrderController extends Controller
             'measurements'     => 'nullable|string',    // JSON string
             'custom_qty'       => 'nullable|integer|min:0',
         ]);
+
+        // Size-breakdown-vs-total check (standard sizing only — custom sizing
+        // has no per-size breakdown to sum). Runs BEFORE the order insert so
+        // a mismatched breakdown never reaches the database at all.
+        $sizingType = $request->input('sizing_type', 'standard');
+        $sizesInput = json_decode($request->input('sizes', '{}'), true);
+        if ($sizingType === 'standard' && is_array($sizesInput) && !empty($sizesInput)) {
+            $sizeSum = array_sum(array_map('intval', $sizesInput));
+            $qtyOrdered = (int) $request->input('quantity_ordered');
+            if ($sizeSum !== $qtyOrdered) {
+                return response()->json([
+                    'message' => "Size breakdown ({$sizeSum} pcs) doesn't match the total quantity ordered ({$qtyOrdered} pcs). They must add up exactly.",
+                    'size_sum' => $sizeSum,
+                    'quantity_ordered' => $qtyOrdered,
+                ], 422);
+            }
+        }
 
         // Handle design reference file upload
         $refFilePath = null;
@@ -166,7 +183,8 @@ class OrderController extends Controller
         ]);
 
         // Store per-size quantities in measurements table if provided
-        $sizes = json_decode($request->input('sizes', '{}'), true);
+        // (reuses $sizesInput, already decoded + validated above — no need to decode twice)
+        $sizes = $sizesInput;
         if (is_array($sizes)) {
             foreach ($sizes as $sizeLabel => $qty) {
                 if ($qty > 0) {

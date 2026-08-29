@@ -16,8 +16,8 @@
 //   purchase_orders.created_by          -> po_created
 //   rfq_requests.created_by             -> rfq_created (excludes auto_generated=1 — that's the
 //                                          daily automation job, not a person's action)
-//   material_usage_rates.set_by         -> usage_rate_set
 //   company_settings.updated_by         -> settings_updated (only updated_by IS NOT NULL)
+//   (usage_rate_set removed Aug 29 2026 — see body comment, source deleted)
 //
 // EXPLICITLY OUT OF SCOPE (per the scoping conversation):
 //   - No login/logout history — no auth_logs table or login timestamp exists
@@ -109,11 +109,11 @@ class ActivityLogController extends Controller
                 ->where('auto_generated', 0)
                 ->whereNotNull('created_by'),
 
-            DB::table('material_usage_rates')
-                ->selectRaw("'usage_rate_set' as action_type, set_by as actor_user_id,
-                    CONCAT('Set usage rate: ', qty_per_unit, ' ', unit, ' per ', garment_type) as description,
-                    CONCAT('material:', material_id) as target, COALESCE(updated_at, created_at) as occurred_at")
-                ->whereNotNull('set_by'),
+            // usage_rate_set union arm removed Aug 29 2026 — InventoryController::
+            // ratesUpsert() (the only thing that ever wrote material_usage_rates.set_by)
+            // was deleted in the Aug 28 2026 no-formula redesign. Left in place, this
+            // arm would just run a permanently-empty query forever — removing it is
+            // pure cleanup, not a behavior change (it already returned zero rows).
 
             DB::table('company_settings')
                 ->selectRaw("'settings_updated' as action_type, updated_by as actor_user_id,
@@ -188,7 +188,7 @@ class ActivityLogController extends Controller
             'output_logged', 'stage_progress', 'qc_checked', 'physical_count',
             'count_reconciled', 'inventory_stock_in', 'inventory_stock_out',
             'inventory_adjustment', 'inventory_wastage', 'delivery_updated',
-            'po_created', 'rfq_created', 'usage_rate_set', 'settings_updated',
+            'po_created', 'rfq_created', 'settings_updated',
         ]);
     }
 }

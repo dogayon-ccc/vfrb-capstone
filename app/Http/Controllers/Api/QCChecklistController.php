@@ -88,13 +88,19 @@ class QCChecklistController extends Controller
         // 80/20 rule: pass rate must be >= 80%
         $passRate = $itemsChecked > 0 ? $itemsPassed / $itemsChecked : 0;
 
-        // Boolean checks: all 6 must be true for an auto-pass
+        // BUG FIX (Aug 29 2026, confirmed by direct code read, not narrative):
+        // button_ok was validated above and stored below, but never included
+        // in this array — meaning it had zero effect on whether QC actually
+        // passed. A checker could leave "button" failed and QC would still
+        // pass on the other 5 checks + pass rate. Adding it here is the
+        // actual fix; the DB write below already had the column right.
         $boolChecks = [
             $request->boolean('stitching_ok', false),
             $request->boolean('color_ok',     false),
             $request->boolean('size_ok',      false),
             $request->boolean('label_ok',     false),
             $request->boolean('finish_ok',    false),
+            $request->boolean('button_ok',    false),
         ];
         $allBoolsPassed = !in_array(false, $boolChecks, true);
 

@@ -68,6 +68,7 @@ return Application::configure(basePath: dirname(__DIR__))
             // DB query to bypass guard_name='web' vs Sanctum 'api' mismatch.
             // Usage: ->middleware('role:manager') or ->middleware('role:staff,manager')
             'role' => \App\Http\Middleware\RoleMiddleware::class,
+            'jobfn' => \App\Http\Middleware\JobFunctionMiddleware::class,
         ]);
 
         // ── Never redirect unauthenticated guests to a 'login' route ──────────

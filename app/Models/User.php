@@ -28,8 +28,40 @@ class User extends Authenticatable
         'organization_name',
         'address',
         'client_type',
+        'job_function',
         'email_verified_at',
     ];
+
+    // area => job_functions allowed to touch it. 'general' always passes
+    // (checked separately in hasJobAccess) — this map only needs the
+    // restricted functions. Manager role bypasses this entirely.
+    public const JOB_FUNCTION_AREAS = [
+        'production' => ['production', 'general'],
+        'inventory'  => ['inventory', 'general'],
+        'sales'      => ['sales', 'general'],
+    ];
+
+    public function hasJobAccess(string $area): bool
+    {
+        // NOTE: can't use $this->hasRole('manager') here — Spatie's guard_name
+        // ('web') doesn't match Sanctum's guard ('api'), so getRoleNames()/
+        // hasRole() silently return false/empty for every Sanctum-authenticated
+        // user. Same bug RoleMiddleware.php already works around — matching
+        // that fix here rather than reintroducing the broken call.
+        $roleName = \Illuminate\Support\Facades\DB::table('model_has_roles as mr')
+            ->join('roles as r', 'r.id', '=', 'mr.role_id')
+            ->where('mr.model_type', self::class)
+            ->where('mr.model_id', $this->user_id)
+            ->value('r.name');
+
+        if ($roleName === 'manager') {
+            return true; // managers always see/do everything
+        }
+        if (($this->job_function ?? 'general') === 'general') {
+            return true; // unset/general staff keep today's full access
+        }
+        return in_array($this->job_function, self::JOB_FUNCTION_AREAS[$area] ?? [], true);
+    }
 
     protected $hidden = [
         'password',

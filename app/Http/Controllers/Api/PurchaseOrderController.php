@@ -111,7 +111,7 @@ class PurchaseOrderController extends Controller
             'items.*.unit_cost'       => 'required|numeric|min:0',
             'expected_delivery_date'  => 'nullable|date',
             'order_id'                => 'nullable|integer|exists:orders,order_id',
-            'order_color_hex'         => 'nullable|string|size:7',
+            'order_color_hex'         => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/', // real hex, not just 7 chars
             'notes'                   => 'nullable|string|max:1000',
         ]);
 
@@ -159,7 +159,7 @@ class PurchaseOrderController extends Controller
         }
 
         $request->validate([
-            'received_color_hex' => 'nullable|string|size:7',
+            'received_color_hex' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/',
             'notes'              => 'nullable|string|max:500',
         ]);
 
@@ -350,7 +350,7 @@ class PurchaseOrderController extends Controller
 
         $request->validate([
             'supplier_id'    => 'required|integer|exists:suppliers,supplier_id',
-            'unit_price'     => 'required|numeric|min:0',
+            'unit_price'     => 'required|numeric|min:0.01', // was min:0 — a supplier quote is never free
             'qty_available'  => 'required|numeric|min:0.01',
             'lead_time_days' => 'required|integer|min:1',
             'notes'          => 'nullable|string|max:1000',
