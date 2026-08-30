@@ -50,11 +50,19 @@ use App\Http\Controllers\Api\SalesTransactionController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\OrderDraftController;
+use App\Http\Controllers\Api\VersionController;
 use Illuminate\Support\Facades\Route;
 
 // ══════════════════════════════════════════════════════════════
 // PUBLIC ROUTES (no auth)
 // ══════════════════════════════════════════════════════════════
+
+// ── Deploy verification (NEW Aug 30 2026) ───────────────────────
+// GET /api/version — confirms what's actually live: commit hash,
+// deploy time, PHP/Laravel version, real DB connectivity check.
+// No auth on purpose — a validator shouldn't need to log in just to
+// confirm the system is up and talking to its database.
+Route::get('/version', [VersionController::class, 'show']);
 
 // ── Customer auth ─────────────────────────────────────────────
 Route::post('/login',    [AuthController::class, 'login'])->middleware('throttle:10,1');
