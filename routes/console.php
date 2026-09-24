@@ -23,3 +23,8 @@ Artisan::command('inspire', function () {
 //   Windows (Laragon):   Task Scheduler → run every minute:
 //                         php C:/laragon/www/vfrb-capstone/artisan schedule:run
 Schedule::command('vfrb:daily-digest')->dailyAt('07:00');
+
+// KPI snapshot for Dashboard sparklines — also fires lazily on dashboard
+// load, so this is a backstop, not the only trigger. Runs late so the
+// day's revenue/production figures are settled.
+Schedule::command('vfrb:kpi-snapshot')->dailyAt('23:55');

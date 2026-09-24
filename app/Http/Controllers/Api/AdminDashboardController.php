@@ -22,6 +22,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\KpiDailySnapshot;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -30,6 +32,12 @@ class AdminDashboardController extends Controller
     // ── GET /api/admin/dashboard ──────────────────────────────────────────────
     public function index()
     {
+        // Lazy snapshot capture — see KpiDailySnapshot::captureToday()'s own
+        // doc comment. Cheap (early-returns once today's row exists), so
+        // safe to call on every dashboard load rather than only from the
+        // scheduler.
+        KpiDailySnapshot::captureToday();
+
         $data = Cache::remember('dashboard_stats', 120, function () {
             $now         = now();
             $startMonth  = $now->copy()->startOfMonth();
@@ -60,6 +68,14 @@ class AdminDashboardController extends Controller
             $lowStockCount = DB::table('materials')
                 ->whereRaw('quantity_in_stock <= reorder_threshold')
                 ->count();
+
+            // Stock health % — this exact field keeps getting dropped when this
+            // file gets resynced from an older branch; re-verify it's still
+            // here before assuming Dashboard.jsx's Stock Health KPI card works.
+            $materialCount  = DB::table('materials')->count();
+            $stockHealthPct = $materialCount > 0
+                ? round((($materialCount - $lowStockCount) / $materialCount) * 100, 2)
+                : 0;
 
             // ── QC / color hold alerts ────────────────────────────────────────
             $qcBlockedCount = DB::table('orders')->where('status', 'qc')->count();
@@ -191,6 +207,36 @@ class AdminDashboardController extends Controller
                 ->map(fn($r) => ['month' => $r->month, 'total' => (float) $r->total])
                 ->values();
 
+            // ── Order trend — last 6 months, for the Dashboard.jsx trend chart.
+            // Same DATE_FORMAT/groupBy pattern as monthly_sales above, so the
+            // two charts stay consistent with each other.
+            $orderTrends = DB::table('orders')
+                ->selectRaw("
+                    DATE_FORMAT(created_at,'%b %Y') as month,
+                    DATE_FORMAT(created_at,'%Y%m')  as sort_key,
+                    COUNT(*) as orders
+                ")
+                ->where('created_at', '>=', $now->copy()->subMonths(6)->toDateString())
+                ->groupByRaw("DATE_FORMAT(created_at,'%b %Y'), DATE_FORMAT(created_at,'%Y%m')")
+                ->orderBy('sort_key')
+                ->get()
+                ->map(fn($r) => ['month' => $r->month, 'orders' => (int) $r->orders])
+                ->values();
+
+            // ── KPI sparkline history — real daily snapshots, not invented
+            // trends (see KpiDailySnapshot::captureToday()). Kept to the same
+            // 6-month window as the other two trend queries above.
+            $kpiHistory = KpiDailySnapshot::since($now->copy()->subMonths(6)->toDateString())
+                ->get(['snapshot_date', 'revenue', 'orders_total', 'in_production', 'stock_health_pct'])
+                ->map(fn($r) => [
+                    'date'             => $r->snapshot_date->toDateString(),
+                    'revenue'          => (float) $r->revenue,
+                    'orders_total'     => (int) $r->orders_total,
+                    'in_production'    => (int) $r->in_production,
+                    'stock_health_pct' => (float) $r->stock_health_pct,
+                ])
+                ->values();
+
             return [
                 // FIX: Dashboard.jsx reads these as flat top-level fields
                 // (s.total_orders, s.active_orders, s.monthly_revenue, etc.) —
@@ -201,9 +247,12 @@ class AdminDashboardController extends Controller
                 'active_orders'        => $inProduction,
                 'monthly_revenue'      => (float) $revenueMonth,
                 'low_stock_count'      => $lowStockCount,
+                'stock_health_pct'     => $stockHealthPct,
                 'pending_deliveries'   => $deliveringCount,
                 'unreconciled_counts'  => $unreconciledCounts,
                 'monthly_sales'        => $monthlySales,
+                'order_trends'         => $orderTrends,
+                'kpi_history'          => $kpiHistory,
 
                 'orders' => [
                     'total'         => $totalOrders,
@@ -241,5 +290,154 @@ class AdminDashboardController extends Controller
         });
 
         return response()->json($data);
+    }
+
+    // ── GET /api/admin/dashboard/staff — non-manager staff home, shaped by
+    // job_function. Manager keeps using index() above, unchanged, so this
+    // adds nothing that could regress the demo-critical manager view.
+    // "Assigned to me" has no dedicated assignment column in this schema —
+    // it's derived from order_production_tracking.updated_by on the order's
+    // CURRENT stage (the real, honest proxy: orders this staff member most
+    // recently logged progress on), not a fabricated assignment system.
+    public function staffIndex()
+    {
+        $user = Auth::user();
+        $fn   = $user->job_function ?? 'general';
+        $now  = now();
+
+        return response()->json(match ($fn) {
+            'sales'      => $this->salesStaffDashboard($now),
+            'production' => $this->productionStaffDashboard($user, $now),
+            default      => $this->generalStaffDashboard($now), // general, inventory
+        });
+    }
+
+    private function generalStaffDashboard($now): array
+    {
+        $activeOrders = DB::table('orders')
+            ->whereIn('status', ['pattern','segregation','cutting','sewing','qc','pressing','packing'])
+            ->count();
+        $lowStockMaterials = DB::table('materials')
+            ->whereRaw('quantity_in_stock <= reorder_threshold')
+            ->select('material_id','material_name','quantity_in_stock','reorder_threshold','unit')
+            ->orderByRaw('quantity_in_stock / reorder_threshold ASC')
+            ->limit(5)->get();
+
+        // "Urgent" = same delayed-stage definition the manager dashboard
+        // uses (stalled 3+ days on its current stage), just staff-facing.
+        $urgentOrders = DB::table('orders')
+            ->join('order_production_tracking', function ($j) {
+                $j->on('order_production_tracking.order_id', '=', 'orders.order_id')
+                  ->on('order_production_tracking.stage', '=', 'orders.status');
+            })
+            ->join('users', 'users.user_id', '=', 'orders.user_id')
+            ->whereIn('orders.status', ['pattern','segregation','cutting','sewing','qc','pressing','packing'])
+            ->whereColumn('order_production_tracking.qty_completed', '<', 'order_production_tracking.qty_target')
+            ->where('order_production_tracking.updated_at', '<=', $now->copy()->subDays(3))
+            ->select('orders.order_id','users.name as customer_name','orders.status as stage')
+            ->limit(5)->get();
+
+        return [
+            'stats' => [
+                'active_orders' => $activeOrders,
+                'low_stock'     => $lowStockMaterials->count(),
+                'urgent'        => $urgentOrders->count(),
+            ],
+            'urgent_orders'      => $urgentOrders,
+            'low_stock_materials'=> $lowStockMaterials,
+            'generated_at'       => $now->toIso8601String(),
+        ];
+    }
+
+    private function salesStaffDashboard($now): array
+    {
+        // Balance per order = agreed_total minus whatever's actually been
+        // paid so far (sales_transactions.amount_paid). No agreed_total yet
+        // (deal not finalized) is excluded — nothing to follow up on yet.
+        $orders = DB::table('orders')
+            ->join('users', 'users.user_id', '=', 'orders.user_id')
+            ->leftJoin(DB::raw('(select order_id, sum(amount_paid) as paid from sales_transactions group by order_id) as p'), 'p.order_id', '=', 'orders.order_id')
+            ->whereNotNull('orders.agreed_total')
+            ->whereNotIn('orders.status', ['cancelled'])
+            ->select('orders.order_id','users.name as customer_name','orders.status',
+                'orders.agreed_total', DB::raw('COALESCE(p.paid,0) as paid'))
+            ->get()
+            ->map(function ($o) {
+                $o->balance = round($o->agreed_total - $o->paid, 2);
+                $o->dp_pct  = $o->agreed_total > 0 ? round(($o->paid / $o->agreed_total) * 100) : 0;
+                return $o;
+            });
+
+        $needsFollowUp = $orders->filter(fn($o) => $o->balance > 0)->values();
+
+        $funnelMap = ['pending'=>'Pending','confirmed'=>'Confirmed',
+            'pattern'=>'In Production','segregation'=>'In Production','cutting'=>'In Production',
+            'sewing'=>'In Production','qc'=>'In Production','pressing'=>'In Production','packing'=>'In Production',
+            'completed'=>'Delivered'];
+        $funnel = ['Pending'=>0,'Confirmed'=>0,'In Production'=>0,'Delivered'=>0];
+        foreach ($orders as $o) {
+            $bucket = $funnelMap[$o->status] ?? null;
+            if ($bucket) $funnel[$bucket]++;
+        }
+
+        return [
+            'stats' => [
+                'total_orders'    => $orders->count(),
+                'needs_follow_up' => $needsFollowUp->count(),
+                'total_value'     => round($orders->sum('agreed_total'), 2),
+            ],
+            'needs_follow_up' => $needsFollowUp->take(5)->values(),
+            'order_funnel'    => $funnel,
+            'payment_status'  => $orders->sortByDesc('order_id')->take(10)->values(),
+            'generated_at'    => $now->toIso8601String(),
+        ];
+    }
+
+    private function productionStaffDashboard($user, $now): array
+    {
+        $STAGES = ['pattern','segregation','cutting','sewing','qc','pressing','packing'];
+
+        // Orders whose CURRENT stage this staff member most recently logged.
+        $myOrderIds = DB::table('orders')
+            ->join('order_production_tracking', function ($j) {
+                $j->on('order_production_tracking.order_id', '=', 'orders.order_id')
+                  ->on('order_production_tracking.stage', '=', 'orders.status');
+            })
+            ->whereIn('orders.status', $STAGES)
+            ->where('order_production_tracking.updated_by', $user->user_id)
+            ->pluck('orders.order_id');
+
+        $orders = DB::table('orders')
+            ->join('users', 'users.user_id', '=', 'orders.user_id')
+            ->whereIn('orders.order_id', $myOrderIds)
+            ->select('orders.order_id','orders.garment_type','orders.status','orders.target_delivery_date','users.name as customer_name')
+            ->get();
+
+        $tracking = DB::table('order_production_tracking')
+            ->whereIn('order_id', $myOrderIds)
+            ->get()
+            ->groupBy('order_id');
+
+        $assignedToday = $orders->map(function ($o) use ($tracking, $STAGES) {
+            $rows = $tracking->get($o->order_id, collect());
+            $o->stages = collect($STAGES)->map(function ($stage) use ($rows) {
+                $row = $rows->firstWhere('stage', $stage);
+                return ['stage'=>$stage,'completed'=>(int)($row->qty_completed ?? 0),'target'=>(int)($row->qty_target ?? 0)];
+            })->values();
+            return $o;
+        })->values();
+
+        return [
+            'stats' => [
+                'assigned_today' => $assignedToday->count(),
+                'at_my_stage'    => $assignedToday->where('status', '!=', 'completed')->count(),
+                'completed'      => DB::table('order_production_tracking')
+                    ->where('updated_by', $user->user_id)
+                    ->whereColumn('qty_completed', '>=', 'qty_target')
+                    ->whereDate('updated_at', $now->toDateString())->count(),
+            ],
+            'assigned_orders' => $assignedToday,
+            'generated_at'    => $now->toIso8601String(),
+        ];
     }
 }

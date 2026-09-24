@@ -60,8 +60,18 @@ class QCChecklistController extends Controller
     {
         $request->validate([
             'items_checked'  => 'required|integer|min:1',
-            'items_passed'   => 'required|integer|min:0',
-            'items_failed'   => 'required|integer|min:0',
+            // FIX (Task A, Aug 31 2026): items_passed/items_failed had no
+            // upper bound tied to items_checked — a checker could submit
+            // items_checked=10, items_passed=500 and it would validate
+            // fine, inflating pass_rate past 100% and letting `passed`
+            // flip to true on bad data. lte:items_checked closes both
+            // halves of this (passed count and failed count each can't
+            // exceed the sample size). Deliberately NOT requiring
+            // items_passed + items_failed === items_checked — partial/
+            // in-progress counts during a QC pass are a real workflow
+            // per QCChecklist.jsx, not a data-entry error.
+            'items_passed'   => 'required|integer|min:0|lte:items_checked',
+            'items_failed'   => 'required|integer|min:0|lte:items_checked',
             'stitching_ok'   => 'nullable|boolean',
             'color_ok'       => 'nullable|boolean',
             'size_ok'        => 'nullable|boolean',

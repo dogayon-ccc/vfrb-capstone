@@ -24,7 +24,8 @@
 //   AI public: throttle:30,1
 //
 // ROLE MIDDLEWARE:
-//   'role:customer'        — Spatie: customer role only
+//   'role:customer'        — Spatie: customer only (DB role name is 'customer' — UI/routes say
+//                              "client", the DB role identifier does not; don't rename this string)
 //   'role:staff,manager'   — Spatie: either staff OR manager
 //   'role:manager'         — Spatie: manager only
 //   No supplier portal — ever.
@@ -34,7 +35,11 @@ use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\BillingProfileController;
+use App\Http\Controllers\Api\NotificationPreferenceController;
+use App\Http\Controllers\Api\CustomerFabricPreferenceController;
 use App\Http\Controllers\Api\DeliveryController;
+use App\Http\Controllers\Api\DesignController;
 use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\MessageController;
 use App\Http\Controllers\Api\NotificationController;
@@ -46,6 +51,7 @@ use App\Http\Controllers\Api\ProductionIncidentController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\QCChecklistController;
 use App\Http\Controllers\Api\SettingsController;
+use App\Http\Controllers\Api\ShippingAddressController;
 use App\Http\Controllers\Api\SalesTransactionController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\AutomationController;
@@ -162,6 +168,15 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // GET /api/customer/orders/{id}/ai-recommendation — routed here now.
     Route::get('/orders/{id}/ai-recommendation', [AIController::class, 'showForOrder']);
 
+    // ── Design archive/catalog (InspoGallery.jsx) ────────────────
+    // GET /api/customer/designs — starter templates + this customer's
+    // own auto-archived past designs (see DesignController).
+    Route::get('/designs', [DesignController::class, 'customerIndex']);
+    Route::put('/designs/{id}', [DesignController::class, 'customerUpdate']);
+    Route::delete('/designs/{id}', [DesignController::class, 'customerDestroy']);
+    Route::get('/designs/showcase', [DesignController::class, 'customerShowcaseIndex']);
+    Route::post('/designs/{id}/submit-showcase', [DesignController::class, 'customerSubmitShowcase']);
+
     // ── Messages ─────────────────────────────────────────────────
     // Messages.jsx:    GET  /api/customer/messages         (thread list)
     //                  POST /api/customer/messages         (send message)
@@ -192,6 +207,31 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::put('/profile',            [UserController::class, 'customerUpdateProfile']);
     Route::put('/profile/password',   [UserController::class, 'customerUpdatePassword']);
 
+    // ── Shipping addresses / Billing profiles / Fabric preferences (Sept 16
+    // 2026) — customer-owned account records, not yet wired into OrderWizard
+    // or invoice generation (see each migration's comment for scope).
+    Route::get('/shipping-addresses',         [ShippingAddressController::class, 'index']);
+    Route::post('/shipping-addresses',        [ShippingAddressController::class, 'store']);
+    Route::put('/shipping-addresses/{id}',    [ShippingAddressController::class, 'update']);
+    Route::delete('/shipping-addresses/{id}', [ShippingAddressController::class, 'destroy']);
+
+    Route::get('/billing-profiles',         [BillingProfileController::class, 'index']);
+    Route::post('/billing-profiles',        [BillingProfileController::class, 'store']);
+    Route::put('/billing-profiles/{id}',    [BillingProfileController::class, 'update']);
+    Route::delete('/billing-profiles/{id}', [BillingProfileController::class, 'destroy']);
+
+    // Model + table existed already (one row per user); controller/routes
+    // were the only missing piece (Sept 20 2026 audit).
+    Route::get('/notification-preferences', [NotificationPreferenceController::class, 'show']);
+    Route::put('/notification-preferences', [NotificationPreferenceController::class, 'update']);
+
+    // Picker catalog reuses the existing /materials-catalog endpoint
+    // (AIController::customerMaterialsCatalog) — filter client-side to
+    // category === 'Fabric'. No duplicate catalog route here.
+    Route::get('/fabric-preferences',         [CustomerFabricPreferenceController::class, 'index']);
+    Route::post('/fabric-preferences',        [CustomerFabricPreferenceController::class, 'store']);
+    Route::delete('/fabric-preferences/{id}', [CustomerFabricPreferenceController::class, 'destroy']);
+
     // DesignStudio.jsx: Design draft persistence (Task T)
     //   GET    /api/customer/drafts/latest  → restore latest draft on mount
     //   POST   /api/customer/drafts         → auto-save (debounced 30s) + manual Save
@@ -218,6 +258,9 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // Dashboard.jsx: GET /api/admin/dashboard
     //                GET /api/admin/notifications (bell dropdown — reads same table)
     Route::get('/dashboard', [AdminDashboardController::class, 'index']);
+
+    // StaffDashboard.jsx (general/sales/production staff): GET /api/admin/dashboard/staff
+    Route::get('/dashboard/staff', [AdminDashboardController::class, 'staffIndex']);
 
     // ── Feedback (Aug 27 2026) — any staff/manager can also submit; only
     // managers can view the list (see role:manager group below).
@@ -253,8 +296,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::get('/orders/garment-types', [OrderController::class, 'garmentTypes']);
     Route::get('/orders',      [OrderController::class, 'adminIndex']);
     Route::get('/orders/{id}', [OrderController::class, 'adminShow']);
-    // Invoice.jsx: "Download PDF" button -> GET /api/admin/orders/{id}/invoice-pdf
-    Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
+    // Invoice.jsx "Download PDF" button moved to the manager-only group
+    // below (Sept 15 2026, QA account) — Invoice is manager-exclusive per
+    // the locked business rules; this endpoint was reachable by any staff
+    // bearer token here, a real RBAC gap.
     Route::patch('/orders/{id}', [OrderController::class, 'adminUpdate']);
 
     // ── Production Stage Advance ──────────────────────────────────
@@ -409,13 +454,13 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::get('/transactions',  [SalesTransactionController::class, 'index']);
     Route::post('/transactions', [SalesTransactionController::class, 'store']);
     Route::get('/transactions/{id}', [SalesTransactionController::class, 'show']);
+    Route::get('/transactions/{id}/receipt-pdf', [SalesTransactionController::class, 'downloadReceiptPdf']);
 
-    // ── Reports (TASK P) ─────────────────────────────────────────
-    // Reports.jsx: GET /api/admin/reports
-    //              GET /api/admin/reports/sales
-    // analytics-summary is manager-only but staffs can still view reports index
-    Route::get('/reports',        [AdminReportController::class, 'index']);
-    Route::get('/reports/sales',  [AdminReportController::class, 'salesSummary']);
+    // ── Reports (TASK P) moved to the manager-only group below (Sept 15
+    // 2026, QA account) — Reports is manager-exclusive per the locked
+    // business rules; both routes were reachable by staff here, a real
+    // RBAC gap (the old comment even said so: "staffs can still view
+    // reports index").
 
     // ── System Settings — company info (view only here; edit is manager-only below) ──
     // Settings.jsx: GET /api/admin/settings/company
@@ -432,6 +477,23 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
 // a manager does dozens of times a minute in normal use.
 Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])->prefix('admin')->group(function () {
 
+    // ── Reports + Invoice (Sept 15 2026 role-gap fix, QA account) ──
+    // Moved from the staff+manager group above: Reports and Invoice are
+    // manager-exclusive per the locked business rules, but a staff bearer
+    // token could previously reach all three of these directly.
+    // Reports.jsx:  GET /api/admin/reports
+    //               GET /api/admin/reports/sales
+    // Invoice.jsx:  GET /api/admin/orders/{id}/invoice-pdf ("Download PDF")
+    Route::get('/reports',                 [AdminReportController::class, 'index']);
+    Route::get('/reports/sales',           [AdminReportController::class, 'salesSummary']);
+    Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
+
+    // ── Design showcase moderation (Sept 18 2026) ──────────────────
+    Route::get('/designs/showcase-queue',        [DesignController::class, 'adminShowcaseQueue']);
+    Route::post('/designs/{id}/showcase-approve', [DesignController::class, 'adminShowcaseApprove']);
+    Route::post('/designs/{id}/showcase-reject',  [DesignController::class, 'adminShowcaseReject']);
+    Route::post('/designs/{id}/showcase-remove',  [DesignController::class, 'adminShowcaseRemove']);
+
     // ── Suppliers — WRITE routes (Aug 28 2026 role-gap fix) ───────
     // Moved from the staff+manager group above: Suppliers.jsx is already
     // manager-exclusive in the nav (<RequireManager> wrapper), but a staff
@@ -446,9 +508,9 @@ Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])-
     Route::get('/feedback',        [\App\Http\Controllers\Api\FeedbackController::class, 'index']);
     Route::patch('/feedback/{id}', [\App\Http\Controllers\Api\FeedbackController::class, 'update']);
 
-    // ── Activity Log (Aug 22 2026) — genuinely manager-only, unlike the
-    // Reports index above which staff CAN reach on the backend. This reads
-    // across every staff/manager action table, so it stays fully gated. ──
+    // ── Activity Log (Aug 22 2026) — manager-only, like Reports/Invoice
+    // above (Sept 15 2026 fix). Reads across every staff/manager action
+    // table, so it stays fully gated. ──
     // ActivityLog.jsx: GET /api/admin/activity-log
     //                  GET /api/admin/activity-log/action-types
     Route::get('/activity-log',              [ActivityLogController::class, 'index']);
@@ -486,6 +548,7 @@ Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])-
     Route::get('/users',                     [UserController::class, 'adminIndex']);
     Route::post('/users/create',             [UserController::class, 'adminCreate']);
     Route::post('/users',                    [UserController::class, 'adminCreate']);
+    Route::put('/users/{id}',                [UserController::class, 'adminUpdate']);
     Route::patch('/users/{id}/toggle',       [UserController::class, 'adminToggle']);
 
     // ── Automation — manual "Run Now" trigger (manager only) ──────

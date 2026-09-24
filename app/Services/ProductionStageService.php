@@ -10,7 +10,7 @@
 // They had drifted: only logProgress() had DB::transaction()+lockForUpdate()
 // protecting the qty_completed read-modify-write (a real double-count race
 // on double-click/retry), and only store() called
-// issueMaterialsToProduction() (MIGO MT-261 inventory deduction on Pattern
+// issueMaterialsToProduction() (inventory deduction on Pattern
 // completion) and autoCreateDelivery() (on Packing completion). Which UI a
 // staff member happened to use determined whether real inventory moved.
 //
@@ -45,6 +45,7 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -80,8 +81,7 @@ class ProductionStageService
      * @param array $qty         ['qty_xs'=>int, 'qty_s'=>int, ... 'qty_custom'=>int]
      * @param array $meta        ['staff_id'=>int, 'notes'=>?string,
      *                            'log_date'=>string, 'defect_count'=>int,
-     *                            'alteration_count'=>int, 'defect_notes'=>?string,
-     *                            'scanned_via_qr'=>bool]
+     *                            'alteration_count'=>int, 'defect_notes'=>?string]
      * @param array $materialActuals  [{'material_id'=>int, 'qty_used'=>float}, ...]
      *              — staff-entered ACTUAL quantities used, one entry per
      *              accepted+linked material_recommendations row on this
@@ -175,7 +175,6 @@ class ProductionStageService
                 'defect_count'     => (int) ($meta['defect_count'] ?? 0),
                 'alteration_count' => (int) ($meta['alteration_count'] ?? 0),
                 'defect_notes'     => $meta['defect_notes'] ?? null,
-                'scanned_via_qr'   => (int) ($meta['scanned_via_qr'] ?? false),
                 'notes'            => $notes,
                 'created_at'       => now(),
                 'updated_at'       => now(),
@@ -266,7 +265,7 @@ class ProductionStageService
                             DB::table('orders')->where('order_id', $orderId)->update(['qc_passed_at' => now()]);
                         }
 
-                        // ── MIGO MT-261 — Goods Issue to Production ──────────
+                        // ── Goods Issue to Production ──────────
                         // Fires ONLY when Pattern completes (locked rule, was
                         // previously only reachable via OutputLogController).
                         // Quantity source: staff-entered $actualsByMaterialId,
@@ -280,13 +279,14 @@ class ProductionStageService
                         // ── Auto-create delivery record on order completion ──
                         if ($nextStage === 'completed') {
                             $this->autoCreateDelivery($orderId, $staffId);
+                            $this->archiveCompletedDesign($orderId, $order);
                         }
 
                         $advanced  = true;
                         $newStage  = $nextStage;
                         $stageLabel = ucfirst($nextStage);
                         $message = "🎉 All {$qtyTarget} pieces completed — Order #{$orderId} advanced to {$stageLabel}!"
-                            . (count($deductionLog) > 0 ? " MIGO MT-261: " . count($deductionLog) . " materials deducted." : "");
+                            . (count($deductionLog) > 0 ? " " . count($deductionLog) . " materials issued to production." : "");
 
                         $this->notifyStageAdvance($orderId, $order->user_id, $stage, $nextStage, count($deductionLog));
                     }
@@ -384,7 +384,7 @@ class ProductionStageService
         return true; // blocked
     }
 
-    // ── MIGO MT-261 — Goods Issue to Production ─────────────────────────────
+    // ── Goods Issue to Production ─────────────────────────────
     // REWRITTEN Aug 28 2026 (scope correction, not a syntax fix): this used
     // to parse a quantity out of estimated_range with a regex. That's gone —
     // there is no formula/BOM anywhere in this system now, per the locked
@@ -409,9 +409,18 @@ class ProductionStageService
         $lowStock = [];
 
         if ($recs->isEmpty()) {
-            Log::warning("MIGO MT-261: No accepted+linked material recommendations for Order #{$orderId}");
+            Log::warning("No accepted+linked material recommendations for Order #{$orderId}");
             return ['log' => [], 'low_stock' => []];
         }
+
+        // Interview transcript (Ma'am Fe, Apr 30 2026), Bahagi D: for
+        // subcontract jobs "Ang tela, supply ng OTG yan. Ang sinulid, garter
+        // at iba pa, ino-order namin sa ibang supplier" — OTG supplies the
+        // fabric; VFRB only sources thread/notions itself for those orders.
+        // Without this, every subcontract order silently drained fabric
+        // from VFRB's own materials.quantity_in_stock for stock VFRB never
+        // actually bought for that job.
+        $orderType = DB::table('orders')->where('order_id', $orderId)->value('order_type');
 
         foreach ($recs as $rec) {
             $material = DB::table('materials')
@@ -429,9 +438,17 @@ class ProductionStageService
             // and log it loudly rather than silently deduct 0.
             $qty = $actualsByMaterialId[$rec->material_id] ?? -1;
             if ($qty < 0) {
-                Log::warning("MIGO MT-261: material_id {$rec->material_id} on Order #{$orderId} reached issueMaterialsToProduction() with no actual — gate should have caught this. Skipped, not deducted.");
+                Log::warning("material_id {$rec->material_id} on Order #{$orderId} reached issueMaterialsToProduction() with no actual — gate should have caught this. Skipped, not deducted.");
                 continue;
             }
+
+            // Client-supplied fabric on a subcontract order — record the
+            // usage on the recommendation for the audit trail, but don't
+            // touch VFRB's own stock or the inventory log; VFRB never held
+            // this fabric. Non-fabric categories (thread, elastic, trims)
+            // still deduct normally even on a subcontract order — those are
+            // the materials VFRB sources itself regardless of order type.
+            $isClientSuppliedFabric = $orderType === 'subcontract' && $material->category === 'Fabric';
 
             $before = (float) $material->quantity_in_stock;
             $after  = max(0, $before - $qty); // clamped — a typo'd qty_used can't push stock negative
@@ -440,7 +457,7 @@ class ProductionStageService
             // actually used. A confirmed-zero usage still gets recorded on
             // the recommendation itself (below) so the audit trail shows it
             // was reviewed, not just skipped.
-            if ($qty > 0) {
+            if ($qty > 0 && !$isClientSuppliedFabric) {
                 DB::table('materials')
                     ->where('material_id', $material->material_id)
                     ->update(['quantity_in_stock' => $after, 'updated_at' => now()]);
@@ -450,7 +467,7 @@ class ProductionStageService
                     'recorded_by' => $actorId,
                     'type'        => 'stock_out',
                     'change_qty'  => -$qty,
-                    'reason'      => "MIGO MT-261 — Goods Issue to Production (staff-entered actual) — Order #{$orderId}",
+                    'reason'      => "Issued to production — Order #{$orderId} (Pattern stage, staff-entered actual usage)",
                     'log_date'    => now(),
                     'created_at'  => now(),
                     'updated_at'  => now(),
@@ -464,6 +481,14 @@ class ProductionStageService
                     'issued_at'         => now(),
                     'updated_at'        => now(),
                 ]);
+
+            // Client-supplied fabric never leaves this method's $log/$lowStock
+            // — it never touched VFRB's stock, so it has no "before/after" or
+            // low-stock state to report, and DailyOutputLog.jsx's "N
+            // material(s) deducted from stock" count would be wrong if it did.
+            if ($isClientSuppliedFabric) {
+                continue;
+            }
 
             $item = [
                 'material_id'   => $material->material_id,
@@ -479,7 +504,11 @@ class ProductionStageService
             if ($item['low_stock'] || $item['over_issued']) $lowStock[] = $item;
         }
 
-        Log::info("MIGO MT-261 complete — Order #{$orderId} — " . count($log) . " materials deducted");
+        Log::info("Deduction complete — Order #{$orderId} — " . count($log) . " materials deducted");
+        Cache::forget('materials_list');
+        Cache::forget('admin_reports_index');
+        Cache::forget('dashboard_stats');
+
         return ['log' => $log, 'low_stock' => $lowStock];
     }
 
@@ -519,6 +548,56 @@ class ProductionStageService
         ]);
     }
 
+    // ── Auto-archive design on order completion ─────────────────────────────
+    // Realistic VFRB flow: a client (school, hospital) orders once a year,
+    // reordering next year is "reconfigure last year's design", not
+    // start-from-scratch. Snapshot studio_config into designs.custom_builder_config
+    // so InspoGallery.jsx can list + reload it for this customer's future orders.
+    private function archiveCompletedDesign(int $orderId, object $order): void
+    {
+        if (empty($order->studio_config)) return; // upload-only orders have no builder config to archive
+
+        $configJson = (string) $order->studio_config;
+
+        // Skip if this exact config is already archived for this customer —
+        // a reorder of the same design shouldn't clutter their gallery with
+        // near-identical rows. Link the order to the existing one instead.
+        $duplicate = DB::table('designs')
+            ->where('custom_builder_config', $configJson)
+            ->whereIn('source_order_id', function ($q) use ($order) {
+                $q->select('order_id')->from('orders')->where('user_id', $order->user_id);
+            })
+            ->first();
+
+        if ($duplicate) {
+            if (!$order->design_id) {
+                DB::table('orders')->where('order_id', $orderId)->update(['design_id' => $duplicate->design_id]);
+            }
+            return;
+        }
+
+        $designId = DB::table('designs')->insertGetId([
+            'design_name'           => "{$order->garment_type} — Order #{$orderId}",
+            'garment_type'          => $order->garment_type,
+            'category'              => null,
+            'collar_type'           => $order->collar_type,
+            'sleeve_type'           => $order->sleeve_type,
+            'pocket_type'           => $order->pocket_type,
+            'color'                 => $order->color,
+            'photo_path'            => $order->client_design_preview_file,
+            'custom_builder_config' => $configJson,
+            'source_order_id'       => $orderId,
+            'parent_design_id'      => $order->design_id,
+            'is_active'             => 1,
+            'created_at'            => now(),
+            'updated_at'            => now(),
+        ]);
+
+        if (!$order->design_id) {
+            DB::table('orders')->where('order_id', $orderId)->update(['design_id' => $designId]);
+        }
+    }
+
     // ── Notify: stage advance ─────────────────────────────────────────────────
     // Ported verbatim from ProductionController::notifyStageAdvance() — chosen
     // as canonical over OutputLogController's inline version because it also
@@ -528,7 +607,7 @@ class ProductionStageService
         $fromLabel = ucfirst($fromStage);
         $toLabel   = ucfirst($toStage);
         $now       = now();
-        $suffix    = $materialsDeductedCount > 0 ? " · MIGO MT-261: {$materialsDeductedCount} materials deducted." : "";
+        $suffix    = $materialsDeductedCount > 0 ? " · {$materialsDeductedCount} materials issued to production." : "";
 
         DB::table('notifications')->insert([
             'user_id'    => $customerId,

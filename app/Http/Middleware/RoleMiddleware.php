@@ -31,6 +31,9 @@ class RoleMiddleware
             ->value('r.name');
 
         // FIX: was '$user->supplier_id ?: customer' — supplier_id column removed in DB v4
+        // DB role name is 'customer' (roles.id=3) — do not rename to 'client' here. UI/routes
+        // say "client"; the Spatie role identifier does not, and every route guard checks
+        // against this exact string via model_has_roles above.
         if (!$userRole) {
             $userRole = 'customer';
         }

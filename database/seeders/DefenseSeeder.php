@@ -78,6 +78,34 @@ class DefenseSeeder extends Seeder
                 'email'    => 'vfrbstaff@gmail.com',
                 'password' => 'VFRBstaff2026!',
                 'role'     => 'staff',
+                'job_function' => 'general',
+            ],
+            // ── ADDED Sept 8 2026 (QA account): 2 more staff accounts, each
+            // with a real, currently-ENFORCED job_function value —
+            // 'inventory' and 'production' are the only 2 values any real
+            // jobfn: route middleware actually checks (confirmed via
+            // routes/api.php: 27 gated routes, zero for 'sales' despite it
+            // existing in the DB enum). Without these, there was no seeded
+            // account that could demonstrate job-function restriction
+            // actually working in a live defense demo — every seeded staff
+            // account defaulted to 'general', which bypasses every jobfn:
+            // check. Names match the existing Figma mockup's demo personas
+            // (Carlo=production, Joy=inventory) for continuity between the
+            // design reference and the real seeded system, in case that
+            // comes up in the defense.
+            [
+                'name'     => 'Carlo',
+                'email'    => 'carlo.production@vfrbenterprise.com',
+                'password' => 'VFRBCarlo2026!',
+                'role'     => 'staff',
+                'job_function' => 'production',
+            ],
+            [
+                'name'     => 'Joy',
+                'email'    => 'joy.inventory@vfrbenterprise.com',
+                'password' => 'VFRBJoy2026!',
+                'role'     => 'staff',
+                'job_function' => 'inventory',
             ],
             [
                 'name'              => 'Test Customer',
@@ -123,6 +151,7 @@ class DefenseSeeder extends Seeder
                     'client_type'       => $acc['client_type'] ?? null,
                     'contact_number'    => $acc['contact_number'] ?? null,
                     'address'           => $acc['address'] ?? null,
+                    'job_function'      => $acc['job_function'] ?? 'general',
                 ]
             );
 
@@ -263,10 +292,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer1->user_id,
                 'status'           => 'pattern',
                 'order_type'       => 'direct',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'navy blue',
                 'quantity_ordered' => 100,
                 'sizing_type'      => 'standard',
@@ -282,10 +311,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer2->user_id,
                 'status'           => 'segregation',
                 'order_type'       => 'subcontract',
-                'garment_type'     => 'scrub_top',
+                'garment_type'     => 'Medical Scrubs Top',
                 'collar_type'      => 'v-neck',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'ceil blue',
                 'quantity_ordered' => 250,
                 'sizing_type'      => 'custom',
@@ -301,10 +330,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer1->user_id,
                 'status'           => 'cutting',
                 'order_type'       => 'direct',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'none',
+                'pocket_type'      => 'No Pocket',
                 'color'            => 'white',
                 'quantity_ordered' => 150,
                 'sizing_type'      => 'standard',
@@ -320,10 +349,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer2->user_id,
                 'status'           => 'sewing',
                 'order_type'       => 'subcontract',
-                'garment_type'     => 'scrub_pants',
+                'garment_type'     => 'Medical Scrubs Bottom',
                 'collar_type'      => 'none',
                 'sleeve_type'      => 'sleeveless',
-                'pocket_type'      => 'side_x2',
+                'pocket_type'      => 'Two Side Pockets',
                 'color'            => 'ceil blue',
                 'quantity_ordered' => 250,
                 'sizing_type'      => 'custom',
@@ -339,10 +368,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer3->user_id,
                 'status'           => 'qc',
                 'order_type'       => 'bulk',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'bottle green',
                 'quantity_ordered' => 500,
                 'sizing_type'      => 'standard',
@@ -358,10 +387,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer1->user_id,
                 'status'           => 'pressing',
                 'order_type'       => 'rush',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'maroon',
                 'quantity_ordered' => 80,
                 'sizing_type'      => 'standard',
@@ -378,10 +407,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer2->user_id,
                 'status'           => 'packing',
                 'order_type'       => 'subcontract',
-                'garment_type'     => 'scrub_top',
+                'garment_type'     => 'Medical Scrubs Top',
                 'collar_type'      => 'v-neck',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'surgical green',
                 'quantity_ordered' => 100,
                 'sizing_type'      => 'custom',
@@ -398,10 +427,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer3->user_id,
                 'status'           => 'completed',
                 'order_type'       => 'bulk',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'royal blue',
                 'quantity_ordered' => 200,
                 'sizing_type'      => 'standard',
@@ -418,10 +447,10 @@ class DefenseSeeder extends Seeder
                 'user_id'          => $customer1->user_id,
                 'status'           => 'pending',
                 'order_type'       => 'direct',
-                'garment_type'     => 'polo_shirt',
+                'garment_type'     => 'Polo Shirt',
                 'collar_type'      => 'polo',
                 'sleeve_type'      => 'short',
-                'pocket_type'      => 'left_chest',
+                'pocket_type'      => 'Left Chest Pocket',
                 'color'            => 'sky blue',
                 'quantity_ordered' => 60,
                 'sizing_type'      => 'standard',
@@ -589,7 +618,9 @@ class DefenseSeeder extends Seeder
         $this->command->info('Test accounts:');
         $this->command->line('  vfrbmanager@gmail.com  / VFRBmanager2026!  (manager)');
         $this->command->line('  roxanne@vfrbenterprise.com / VFRBRoxanne2026!  (manager)');
-        $this->command->line('  vfrbstaff@gmail.com    / VFRBstaff2026!    (staff)');
+        $this->command->line('  vfrbstaff@gmail.com    / VFRBstaff2026!    (staff, general)');
+        $this->command->line('  carlo.production@vfrbenterprise.com / VFRBCarlo2026! (staff, production)');
+        $this->command->line('  joy.inventory@vfrbenterprise.com    / VFRBJoy2026!   (staff, inventory)');
         $this->command->line('  testcustomer@gmail.com / TestPass2026!     (customer)');
         $this->command->line('  otghospital@gmail.com  / OTGPass2026!      (customer)');
         $this->command->line('  pngschool@gmail.com    / PNGPass2026!      (customer)');

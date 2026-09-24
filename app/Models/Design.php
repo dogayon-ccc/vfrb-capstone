@@ -23,10 +23,16 @@ class Design extends Model
         'is_active',
         'custom_builder_config',
         'parent_design_id',
+        'showcase_status',
+        'showcase_label',
+        'submitted_by_user_id',
+        'showcase_approved_by',
+        'showcase_approved_at',
     ];
 
     protected $casts = [
-        'is_active' => 'boolean',
+        'is_active'            => 'boolean',
+        'showcase_approved_at' => 'datetime',
     ];
 
     // ─── Relationships ────────────────────────────────────────────────────────
@@ -46,5 +52,10 @@ class Design extends Model
     public function children(): \Illuminate\Database\Eloquent\Relations\HasMany
     {
         return $this->hasMany(Design::class, 'parent_design_id', 'design_id');
+    }
+
+    public function showcaseAudit(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(DesignShowcaseAudit::class, 'design_id', 'design_id');
     }
 }

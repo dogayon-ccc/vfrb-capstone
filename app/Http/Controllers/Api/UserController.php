@@ -130,6 +130,40 @@ class UserController extends Controller
         return response()->json($user, 201);
     }
 
+    // ── PUT /api/admin/users/{id} ──────────────────────────────────────────────
+    // UserManagement.jsx: edit an existing staff/manager's role/job_function
+    // (previously only creatable, never editable after — DB access was the
+    // only way to change it).
+    public function adminUpdate(Request $request, int $id)
+    {
+        $user = DB::table('users')->where('user_id', $id)->first();
+        if (!$user) {
+            return response()->json(['message' => 'User not found.'], 404);
+        }
+
+        $request->validate([
+            'role'         => 'required|in:staff,manager',
+            'job_function' => 'nullable|in:general,production,inventory,sales',
+        ]);
+
+        $newRole = $request->input('role');
+        DB::table('users')->where('user_id', $id)->update([
+            'job_function' => $newRole === 'staff' ? ($request->input('job_function') ?? 'general') : 'general',
+            'updated_at'   => now(),
+        ]);
+
+        $roleId = DB::table('roles')->where('name', $newRole)->value('id');
+        if ($roleId) {
+            DB::table('model_has_roles')->where('model_id', $id)->where('model_type', 'App\\Models\\User')->delete();
+            DB::table('model_has_roles')->insert(['role_id' => $roleId, 'model_type' => 'App\\Models\\User', 'model_id' => $id]);
+        }
+
+        $updated       = DB::table('users')->where('user_id', $id)->first();
+        $updated->role = $newRole;
+
+        return response()->json($updated);
+    }
+
     // ── PATCH /api/admin/users/{id}/toggle ────────────────────────────────────
     // UserManagement.jsx activate/deactivate a user
     // Implementation: null out email_verified_at to "deactivate", set it to now() to "activate"
@@ -181,7 +215,7 @@ class UserController extends Controller
         $user->role = DB::table('model_has_roles')
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('model_has_roles.model_id', $userId)
-            ->value('roles.name') ?? 'customer';
+            ->value('roles.name') ?? 'client';
 
         return response()->json(['user' => $user]);
     }

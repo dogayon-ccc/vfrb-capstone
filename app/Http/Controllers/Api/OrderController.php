@@ -39,9 +39,55 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 class OrderController extends Controller
 {
+    // Mirrors SettingsController::logoDisk() exactly (Task B, Aug 31 2026) —
+    // design_ref_file uploads were hardcoded to the local 'public' disk,
+    // which Railway wipes on every redeploy (per DEPLOYMENT.md's ephemeral-
+    // filesystem note). Cloudinary preferred when configured, 's3' as a
+    // secondary fallback if that's ever finished, 'public' local-dev-only
+    // as the last resort — same three-way priority, not a new mechanism.
+    private function designRefDisk(): string
+    {
+        if (config('filesystems.disks.cloudinary.cloud')) {
+            return 'cloudinary';
+        }
+        return config('filesystems.default') === 's3' ? 's3' : 'public';
+    }
+
+    // Resolves a stored design_ref_file path into a real, loadable URL on
+    // whatever disk is currently configured. Matches SettingsController's
+    // read-time resolution for logo_url — same known simplification: a
+    // file uploaded under a since-changed disk config would resolve wrong.
+    // Not solved here since SettingsController doesn't solve it either;
+    // consistent with the existing convention rather than a new one.
+    private function resolveDesignRefUrl($rawPath): ?string
+    {
+        if (!$rawPath) {
+            return null;
+        }
+        return Storage::disk($this->designRefDisk())->url($rawPath);
+    }
+
+    // Resolves the Design Studio preview image for one order. Orders created
+    // before 2026_09_16 have no preview file and still carry the base64
+    // previewPng inside studio_config, so fall back to that rather than
+    // showing them as having no design.
+    private function resolveDesignPreviewUrl($order): ?string
+    {
+        if (!empty($order->client_design_preview_file)) {
+            return $this->resolveDesignRefUrl($order->client_design_preview_file);
+        }
+
+        $cfg = is_array($order->studio_config)
+            ? $order->studio_config
+            : json_decode($order->studio_config ?? '', true);
+
+        return $cfg['previewPng'] ?? null;
+    }
+
     // ── GET /api/customer/orders ──────────────────────────────────────────────
     // Orders.jsx + Messages.jsx + AIMaterials.jsx: paginated order list
     // Supports ?status=active to filter in-production orders
@@ -84,6 +130,15 @@ class OrderController extends Controller
             $order->studio_config = json_decode($order->studio_config, true);
         }
 
+        // FIX (Task B, Aug 31 2026): was returning the raw stored path,
+        // leaving fileUrl.js's getStorageUrl() to guess how to build a
+        // loadable URL from it — worked by luck when everything lived on
+        // the local 'public' disk, breaks the moment designRefDisk()
+        // resolves to 'cloudinary'. Resolve it here instead, same as
+        // SettingsController does for logo_url.
+        $order->client_design_ref_file = $this->resolveDesignRefUrl($order->client_design_ref_file);
+        $order->design_preview_url = $this->resolveDesignPreviewUrl($order);
+
         // Attach AI recommendations
         $recommendations = DB::table('material_recommendations')
             ->where('order_id', $id)
@@ -107,6 +162,28 @@ class OrderController extends Controller
     // OrderWizard.jsx sends multipart/form-data
     public function customerStore(Request $request)
     {
+        // FIX (Sept 22 2026 — design-gate audit): client_design_notes was
+        // 'nullable' here while OrderWizard.jsx's own validate() has
+        // *always* required it (15+ chars, Step 0) before letting the
+        // customer past Step 1. That made the requirement frontend-only —
+        // a direct POST to this endpoint (curl/Postman/a modified client)
+        // could create an order with a garment_type and a quantity and
+        // nothing describing what to actually make. Mirroring the
+        // frontend's own rule here, not inventing a stricter one: both
+        // real submission paths (Studio-prefilled notes in the mount
+        // effect, or manually typed) already clear 15 chars, so this
+        // closes the bypass without changing behavior for any real
+        // customer. It does NOT require studio_config or design_ref_file
+        // specifically — the frontend never required either of those on
+        // their own, only the description, so making that a new hard
+        // requirement here would be a scope decision beyond "close the
+        // bypass," not a bug fix.
+        //
+        // Also added: 'deadline' => 'after:today'. Nothing — frontend or
+        // backend — previously rejected a past date; the <input
+        // type="date"> has no min attribute and validate() never checks
+        // it. A blank/omitted deadline is still fine (nullable); a
+        // supplied one must be in the future.
         $request->validate([
             'garment_type'     => 'required|string|max:60',
             'quantity_ordered' => 'required|integer|min:100',
@@ -116,15 +193,41 @@ class OrderController extends Controller
             'collar_type'      => 'nullable|string|max:60',
             'sleeve_type'      => 'nullable|string|max:60',
             'pocket_type'      => 'nullable|string|max:60',
-            'deadline'         => 'nullable|date',
+            'deadline'         => 'nullable|date|after:today',
             'po_reference'     => 'nullable|string|max:100',
-            'client_design_notes' => 'nullable|string',
+            'client_design_notes' => 'required|string|min:15',
             'studio_config'    => 'nullable|string',    // JSON string from canvas
             'design_ref_file'  => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:5120',
+            'design_preview_file' => 'nullable|file|mimes:png|max:5120',
             'sizes'            => 'nullable|string',    // JSON string
             'measurements'     => 'nullable|string',    // JSON string
             'custom_qty'       => 'nullable|integer|min:0',
         ]);
+
+        // Idempotency guard (Sept 22 2026): nothing previously stopped a
+        // dropped network response + client retry from creating two
+        // identical orders — the frontend's disabled={busy} on the submit
+        // button doesn't survive a connection drop that happens before the
+        // response arrives back. Cache::lock() runs on the 'file' cache
+        // store (CACHE_STORE=file in .env); file-store atomic locks have
+        // been supported since Laravel 9's FileLock, so this needs no
+        // migration, no new table, and no Redis dependency.
+        //
+        // Deliberately per-user, not per-payload: hashing studio_config to
+        // detect "the same order" risks false negatives from
+        // non-deterministic JSON key ordering, and a real customer placing
+        // two genuinely different bulk orders (100+ pcs, full 4-step
+        // wizard each) inside the same 10-second window isn't a case this
+        // needs to support. The lock is deliberately left to expire on its
+        // own rather than released in a finally block — it's a short
+        // debounce window on the act of submitting, not a mutex meant to
+        // guard the whole method body.
+        $lock = Cache::lock('order-submit:' . Auth::id(), 10);
+        if (!$lock->get()) {
+            return response()->json([
+                'message' => 'Your previous order submission is still being processed. Please wait a moment before trying again.',
+            ], 409);
+        }
 
         // Size-breakdown-vs-total check (standard sizing only — custom sizing
         // has no per-size breakdown to sum). Runs BEFORE the order insert so
@@ -135,6 +238,11 @@ class OrderController extends Controller
             $sizeSum = array_sum(array_map('intval', $sizesInput));
             $qtyOrdered = (int) $request->input('quantity_ordered');
             if ($sizeSum !== $qtyOrdered) {
+                // Release immediately: this is the customer correcting a typo,
+                // not a duplicate submission — they shouldn't have to wait out
+                // the 10-second debounce window just to fix a number and
+                // resubmit right away.
+                $lock->release();
                 return response()->json([
                     'message' => "Size breakdown ({$sizeSum} pcs) doesn't match the total quantity ordered ({$qtyOrdered} pcs). They must add up exactly.",
                     'size_sum' => $sizeSum,
@@ -147,7 +255,14 @@ class OrderController extends Controller
         $refFilePath = null;
         if ($request->hasFile('design_ref_file')) {
             $refFilePath = $request->file('design_ref_file')
-                ->store('design-refs', 'public');
+                ->store('design-refs', $this->designRefDisk());
+        }
+
+        // Design Studio preview PNG, uploaded as a real file by OrderWizard.
+        $previewFilePath = null;
+        if ($request->hasFile('design_preview_file')) {
+            $previewFilePath = $request->file('design_preview_file')
+                ->store('design-previews', $this->designRefDisk());
         }
 
         // Parse studio_config JSON string
@@ -155,7 +270,11 @@ class OrderController extends Controller
         if ($request->filled('studio_config')) {
             $decoded = json_decode($request->input('studio_config'), true);
             if (json_last_error() === JSON_ERROR_NONE) {
-                $studioConfig = $request->input('studio_config'); // store as JSON string
+                // previewPng is a base64 data URL of the same image now stored
+                // in $previewFilePath. Keeping both would put a ~150-500KB blob
+                // in a column adminIndex() selects and decodes on every row.
+                unset($decoded['previewPng']);
+                $studioConfig = json_encode($decoded);
             }
         }
 
@@ -173,6 +292,7 @@ class OrderController extends Controller
             'po_reference'          => $request->input('po_reference'),
             'client_design_notes'   => $request->input('client_design_notes'),
             'client_design_ref_file'=> $refFilePath,
+            'client_design_preview_file' => $previewFilePath,
             'studio_config'         => $studioConfig,
             'status'                => 'pending',
             'ai_recommendation_status' => 'not_requested',
@@ -285,11 +405,18 @@ class OrderController extends Controller
 
         $result = $query->paginate($perPage);
 
-        // Decode studio_config for each order
+        // Legacy orders (pre-2026_09_16) carry a base64 previewPng inside
+        // studio_config. This list never renders it, so drop it from the
+        // payload — 20 rows per page of ~150-500KB each otherwise.
         $result->getCollection()->transform(function ($o) {
             if ($o->studio_config) {
-                $o->studio_config = json_decode($o->studio_config, true);
+                $cfg = json_decode($o->studio_config, true);
+                unset($cfg['previewPng']);
+                $o->studio_config = $cfg;
             }
+            $o->design_preview_url = $o->client_design_preview_file
+                ? $this->resolveDesignRefUrl($o->client_design_preview_file)
+                : null;
             return $o;
         });
 
@@ -364,6 +491,13 @@ class OrderController extends Controller
             $order->studio_config = json_decode($order->studio_config, true);
         }
 
+        // FIX (Task B, Aug 31 2026): same resolution as customerShow() —
+        // this one feeds BOTH adminShow() and downloadInvoicePdf() (see
+        // this method's own header comment), so fixing it here covers the
+        // admin order-detail screen and the printed invoice in one place.
+        $order->client_design_ref_file = $this->resolveDesignRefUrl($order->client_design_ref_file);
+        $order->design_preview_url = $this->resolveDesignPreviewUrl($order);
+
         // Nested `user` object — Invoice.jsx / invoice.blade.php read
         // order.user.{name, organization_name, email, contact_number}.
         $order->user = [
@@ -414,19 +548,14 @@ class OrderController extends Controller
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
+        if ($request->hasAny(['status', 'agreed_total']) && !$request->user()->isManager()) {
+            return response()->json(['message' => 'Only a manager can change order status or total.'], 403);
+        }
+
         $request->validate([
             'status' => 'sometimes|in:pending,confirmed,pattern,segregation,cutting,sewing,qc,pressing,packing,completed,cancelled',
             'negotiated_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
-            // agreed_total (Aug 23 2026 — order confirm/cancel UI): lets a
-            // manager set the negotiated total at confirmation time, before
-            // production starts. Safe alongside SalesTransactionController,
-            // which only ever sets this field `if ($order->agreed_total ===
-            // null)` on first payment — pre-setting it here just means that
-            // first-payment logic uses the manager's number instead of
-            // deriving a fresh one. Never overwrites an already-set total
-            // (see the extra guard below) so a later payment can't
-            // accidentally clobber a confirmed negotiation.
             'agreed_total' => 'nullable|numeric|min:0',
         ]);
 
@@ -434,10 +563,7 @@ class OrderController extends Controller
             ->filter(fn($v) => !is_null($v))
             ->toArray();
 
-        // Only ever set agreed_total, never overwrite an existing value
-        // through this endpoint — once a real total is locked in (whether
-        // by a manager here or by the first payment), it stays read-only,
-        // matching the schema comment on orders.agreed_total.
+        // agreed_total is write-once: later changes go through payments.
         if ($request->filled('agreed_total') && $order->agreed_total === null) {
             $fields['agreed_total'] = $request->input('agreed_total');
         }

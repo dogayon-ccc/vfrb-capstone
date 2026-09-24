@@ -12,7 +12,7 @@
 // InventoryController::destroy() is a real, wired DELETE endpoint with no
 // history check and no soft-delete anywhere in this schema (no deleted_at
 // column exists on any table). So deleting one discontinued material would
-// silently and permanently wipe every inventory_logs entry (every MIGO
+// silently and permanently wipe every inventory_logs entry (every stock
 // deduction, every PO goods-receipt) and every RFQ ever requested for it —
 // destroying exactly the audit trail this system exists to preserve.
 //

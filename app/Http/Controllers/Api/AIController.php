@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\MaterialRecommendation;
 use App\Models\User;
+use App\Services\GeminiClient;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -14,109 +15,14 @@ use Illuminate\Support\Facades\Log;
 
 class AIController extends Controller
 {
-    // ── Gemini helper ─────────────────────────────────────────────────────────
-    // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
-    private function callGemini(string $prompt, int $maxTokens = 1500): ?string
+    private GeminiClient $gemini;
+
+    public function __construct(GeminiClient $gemini)
     {
-        $keyCount = (int) config('services.gemini.key_count', 1);
-        $model    = config('services.gemini.model', 'gemini-1.5-flash');
-
-        for ($i = 0; $i < $keyCount; $i++) {
-            $keyNum = $i + 1;
-            $key    = config("services.gemini.key_{$keyNum}");
-            if (!$key) continue;
-
-            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$key}";
-
-            try {
-                $response = Http::timeout(30)->post($url, [
-                    'contents'         => [['parts' => [['text' => $prompt]]]],
-                    'generationConfig' => [
-                        'temperature'     => 0.3,
-                        'maxOutputTokens' => $maxTokens,
-                        // BUG-008 FIX (confirmed against Google's current docs,
-                        // Aug 2026): gemini-3.x models (current GEMINI_MODEL =
-                        // gemini-3.6-flash) think by default and CANNOT be
-                        // fully disabled — "Gemini 3 Flash and Flash-Lite also
-                        // do not support full thinking-off." Without this,
-                        // thinking tokens were silently consuming the entire
-                        // maxOutputTokens budget before any real answer text
-                        // came out — matches the logged raw fragments exactly
-                        // (e.g. raw="{\n  \"selections\":" — cut off after a
-                        // handful of tokens). 'minimal' is the lowest level
-                        // 3.x supports; this task is a simple catalog-selection
-                        // classification with no need for deep reasoning.
-                        // Do NOT add the legacy 'thinkingBudget' alongside
-                        // this — 3.x models reject requests sending both.
-                        'thinkingConfig'  => ['thinkingLevel' => 'minimal'],
-                    ],
-                    'safetySettings'   => [
-                        ['category' => 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold' => 'BLOCK_NONE'],
-                    ],
-                ]);
-
-                // FIX: this used to only retry the next key on 429
-                // (rate-limited). Any other failure — a bad/invalid key
-                // (401/403), which is a real, distinct possibility here
-                // since GEMINI_KEY_2/GEMINI_KEY_3 have a different string
-                // format than GEMINI_KEY_1 and were never individually
-                // verified — gave up immediately without ever trying the
-                // remaining 2 keys. 401/403 are key-specific failures, just
-                // like 429; a genuine 4xx request-shape error (400) or a
-                // 5xx on Google's end would fail identically on every key,
-                // so those still stop the loop rather than retry pointlessly.
-                if (in_array($response->status(), [429, 401, 403])) {
-                    Log::warning("Gemini key #{$keyNum} failed ({$response->status()}), trying next", [
-                        'status' => $response->status(),
-                    ]);
-                    continue;
-                }
-
-                if (!$response->successful()) {
-                    Log::error('Gemini error', ['status' => $response->status(), 'key' => $keyNum]);
-                    return null;
-                }
-
-                // BUG-008 FIX: candidates[0].content.parts can hold MORE THAN
-                // ONE part on thinking-enabled 3.x models — Google's own docs:
-                // "the main result in a native Gemini response lives under
-                // candidates[].content.parts" (plural). The old code always
-                // read parts.0.text, which on a thinking model can be an
-                // internal reasoning fragment rather than the final answer.
-                // Concatenate every non-thought text part instead.
-                $parts = $response->json('candidates.0.content.parts', []);
-                $text  = collect($parts)
-                    ->reject(fn($p) => $p['thought'] ?? false)
-                    ->pluck('text')
-                    ->filter()
-                    ->implode('');
-
-                // Diagnostic only (doesn't change control flow): confirms
-                // whether a given failure was really the token budget running
-                // out, next time this happens — usageMetadata.thoughtsTokenCount
-                // shows exactly how much of maxOutputTokens thinking consumed.
-                if ($response->json('candidates.0.finishReason') === 'MAX_TOKENS') {
-                    Log::warning('Gemini hit MAX_TOKENS before finishing', [
-                        'model'             => $model,
-                        'key'               => $keyNum,
-                        'requested_max'     => $maxTokens,
-                        'thoughts_tokens'   => $response->json('usageMetadata.thoughtsTokenCount'),
-                        'candidates_tokens' => $response->json('usageMetadata.candidatesTokenCount'),
-                        'text_length'       => strlen($text),
-                    ]);
-                }
-
-                return $text !== '' ? $text : null;
-
-            } catch (\Exception $e) {
-                Log::error('Gemini exception', ['msg' => $e->getMessage(), 'key' => $keyNum]);
-                continue; // try next key rather than give up on one transient failure
-            }
-        }
-
-        Log::error('Gemini: all keys exhausted');
-        return null;
+        $this->gemini = $gemini;
     }
+    // Gemini API calls moved to app/Services/GeminiClient.php (Sept 2026)
+    // — same logic, now shared cleanly instead of living inline here.
 
     // =========================================================================
     // AI LAYER 1 — Raw Material Recommendation
@@ -156,7 +62,7 @@ class AIController extends Controller
         // BUG-008: was 1200 — too tight once thinking tokens (unavoidable on
         // gemini-3.6-flash, see callGemini()) share this same budget with the
         // actual JSON answer. Raised with headroom for both.
-        $aiText = $this->callGemini($prompt, 3000);
+        $aiText = $this->gemini->call($prompt, 3000);
 
         if (!$aiText) {
             $order->update(['ai_recommendation_status' => 'failed']);
@@ -500,6 +406,16 @@ class AIController extends Controller
     // =========================================================================
     public function describeDesign(Request $request)
     {
+        // Two real callers hit this route with different shapes:
+        //   AIPanel.jsx (in-canvas, one-shot)   -> { description }
+        //   AIDesignChat.jsx (floating widget)  -> { prompt, chat_context, mode:'chat' }
+        // They were never reconciled — chat mode always failed validation
+        // (no `description` field) and, even past that, the response shape
+        // this method returned had no `chat_response` key the widget reads.
+        if ($request->input('mode') === 'chat') {
+            return $this->describeDesignChat($request);
+        }
+
         $request->validate(['description' => 'required|string|max:500']);
 
         $prompt = <<<PROMPT
@@ -516,6 +432,8 @@ Return ONLY valid JSON (no markdown, no backticks):
   "pocketType": "none" | "left_chest" | "side_x2" | "both",
   "colors": { "body": "#hexcode", "accent": "#hexcode" },
   "pattern": "solid" | "h-stripe" | "v-stripe" | "pinstripe" | "grid" | "dots",
+  "textContent": "text/name/number the customer wants printed on the garment, or null if none was mentioned",
+  "textBold": true or false (true if customer said "bold", "block letters", or similar),
   "description_summary": "One sentence summary"
 }
 PROMPT;
@@ -524,7 +442,7 @@ PROMPT;
         // — was 400, too tight on gemini-3.6-flash. Not confirmed broken by a
         // logged failure yet, but it shares callGemini() and is even smaller,
         // so it's exposed to the identical failure mode. Raised preventively.
-        $text = $this->callGemini($prompt, 1000);
+        $text = $this->gemini->call($prompt, 1000);
         if (!$text) return response()->json(['error' => 'AI unavailable'], 503);
 
         $clean  = preg_replace('/```json|```/i', '', $text);
@@ -535,6 +453,28 @@ PROMPT;
             'config'      => $config,
             'description' => $config['description_summary'] ?? $request->description,
         ]);
+    }
+
+    // Chat-mode branch of describeDesign(): free-form Q&A for the floating
+    // widget, kept separate from the config-generating branch above because
+    // the two need different prompts, different max tokens, and a plain-text
+    // reply rather than a JSON config.
+    private function describeDesignChat(Request $request)
+    {
+        $request->validate(['prompt' => 'required|string|max:500']);
+
+        // chat_context already carries the system prompt + conversation
+        // history, built client-side in AIDesignChat.jsx — pass it through
+        // rather than reconstructing it here, so the two stay in sync by
+        // construction instead of by convention.
+        $prompt = $request->input('chat_context') ?: $request->input('prompt');
+
+        $text = $this->gemini->call($prompt, 400);
+        if (!$text) {
+            return response()->json(['chat_response' => null, 'error' => 'AI unavailable'], 503);
+        }
+
+        return response()->json(['chat_response' => trim($text)]);
     }
 
     // =========================================================================
@@ -568,7 +508,7 @@ PROMPT;
 
         // BUG-008: same reasoning as describeDesign() above — raised
         // preventively for the same thinking-token headroom issue.
-        $insight = $this->callGemini($prompt, 800);
+        $insight = $this->gemini->call($prompt, 800);
 
         return response()->json([
             'insight'  => $insight ?? 'Analytics summary unavailable.',
@@ -585,6 +525,8 @@ PROMPT;
         $g      = $order->garment_type  ?? 'garment';
         $c      = $order->collar_type   ?? 'standard';
         $s      = $order->sleeve_type   ?? 'standard';
+        $p      = $order->pocket_type   ?? 'none';
+        $qty    = $order->quantity_ordered ?? null;
         $color  = $order->color         ?? 'any';
         $notes  = $order->client_design_notes ?? '';
 
@@ -596,7 +538,8 @@ PROMPT;
 You are a materials specialist for VFRB Enterprise, a garment manufacturer in Bayanan, Muntinlupa, Philippines.
 
 Job order specs (design layout only — no formulas involved):
-- Garment: {$g} | Collar: {$c} | Sleeve: {$s} | Color: {$color}
+- Garment: {$g} | Collar: {$c} | Sleeve: {$s} | Pocket: {$p} | Color: {$color}
+- Quantity ordered: {$qty} pieces
 - Notes: {$notes}
 
 Here is VFRB's real materials catalog. Choose ONLY from this list —

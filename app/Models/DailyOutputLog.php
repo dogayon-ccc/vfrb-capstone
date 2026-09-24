@@ -11,12 +11,11 @@ class DailyOutputLog extends Model
         'order_id','stage','logged_by',
         'qty_xs','qty_s','qty_m','qty_l','qty_xl','qty_xxl','qty_xxxl','qty_custom',
         'defect_count','alteration_count','defect_notes',
-        'scanned_via_qr','log_date','notes','created_at','updated_at',
+        'log_date','notes','created_at','updated_at',
     ];
 
     protected $casts = [
         'log_date'       => 'date',
-        'scanned_via_qr' => 'boolean',
         'total_output'   => 'integer', // GENERATED ALWAYS — read-only
     ];
 

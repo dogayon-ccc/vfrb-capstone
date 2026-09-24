@@ -8,7 +8,6 @@
 //   is no Blade reset page. This custom notification overrides the URL to point
 //   to the React frontend: http://localhost:5173/reset-password?token=...&email=...
 //
-// SAP EQUIVALENT: SU53 / self-service credential recovery
 //
 // MAILTRAP: All outgoing mail in local env is caught by Mailtrap automatically
 //           because MAIL_MAILER=smtp points to sandbox.smtp.mailtrap.io in .env

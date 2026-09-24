@@ -14,8 +14,7 @@
 // RULES:
 //   - PK is user_id (NOT id)
 //   - No role column on users — use getRoleName() via model_has_roles + roles
-//   - Customer portal login: POST /api/login
-//   - Admin/staff portal login: POST /api/admin/login (same method, different guard check)
+//   - Sign-in for every role: POST /api/login (POST /api/admin/login kept as a staff-only alias)
 //   - me() returns the current user with role injected (for VerifyEmail.jsx)
 //
 // RESPONSE SHAPES (exactly what the JSX expects):
@@ -46,8 +45,8 @@ use Laravel\Socialite\Facades\Socialite;
 
 class AuthController extends Controller
 {
-    // ── POST /api/login — Customer portal ────────────────────────────────────
-    // auth/Login.jsx expects: { token, user: { ...fields, role } }
+    // ── POST /api/login — one sign-in for customer, staff and manager ─────────
+    // auth/Login.jsx expects: { token, user: { ...fields, role } } and routes by role.
     public function login(Request $request)
     {
         $request->validate([
@@ -65,13 +64,6 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
-        // Customer portal: reject staff/manager logins with clear message
-        if (in_array($role, ['staff', 'manager'])) {
-            return response()->json([
-                'message' => 'Staff accounts must use the Admin Portal at /admin/login.',
-            ], 403);
-        }
-
         $token = $this->createToken($user->user_id);
 
         return response()->json([
@@ -80,8 +72,7 @@ class AuthController extends Controller
         ]);
     }
 
-    // ── POST /api/admin/login — Admin portal ──────────────────────────────────
-    // admin/Login.jsx expects: { token, user: { ...fields, role } }
+    // ── POST /api/admin/login — kept for old clients/scripts; the UI now uses /api/login ──
     public function adminLogin(Request $request)
     {
         $request->validate([
@@ -235,8 +226,8 @@ class AuthController extends Controller
             // be logged in — or upgraded, or touched in any way — through
             // this customer-only flow. Reject clearly, issue no token.
             if ($role !== 'customer') {
-                return redirect($frontend . '/admin/login?google_error=' . urlencode(
-                    'This email belongs to a staff/manager account. Google sign-in here is for customers only — please use the regular staff/manager login.'
+                return redirect($frontend . '/login?google_error=' . urlencode(
+                    'This email belongs to a staff/manager account. Google sign-in here is for customers only — please sign in with your email and password instead.'
                 ));
             }
 

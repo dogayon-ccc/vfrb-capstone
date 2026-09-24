@@ -10,7 +10,7 @@
 //   daily_output_logs:       log_id, order_id, stage, logged_by,
 //                            qty_xs/s/m/l/xl/xxl/xxxl/custom (individual columns),
 //                            total_output (GENERATED — never insert),
-//                            defect_count, alteration_count, log_date, notes, scanned_via_qr
+//                            defect_count, alteration_count, log_date, notes
 //   qc_checklists:           check_id, order_id, checked_by, passed, items_checked, items_passed, items_failed
 //   notifications:           notif_id, user_id, order_id, message, type (varchar default 'general'),
 //                            title (varchar nullable), is_read, date_sent

@@ -21,7 +21,7 @@ class ApiThrottle
          * - Authenticated users → user ID
          * - Guests → IP address
          */
-        $identifier = $request->user()?->id ?? $request->ip();
+        $identifier = $request->user()?->user_id ?? $request->ip();
 
         // Final rate key (prevents collisions between route groups)
         $rateKey = "{$key}:{$identifier}";

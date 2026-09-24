@@ -27,13 +27,18 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class InventoryController extends Controller
 {
     // ── GET /api/admin/inventory (/api/admin/materials) ───────────────────────
     public function index(Request $request)
     {
-        return Cache::remember('materials_list', 300, function () use ($request) {
+        // Every write does Cache::forget('materials_list'), which rotates this version token.
+        $version = Cache::rememberForever('materials_list', fn () => (string) Str::uuid());
+        $key     = "materials_list:{$version}:" . md5($request->getQueryString() ?? '');
+
+        return Cache::remember($key, 300, function () use ($request) {
             $q        = $request->input('search', '');
             $category = $request->input('category', '');
             $lowStock = $request->boolean('low_stock', false);
@@ -50,13 +55,6 @@ class InventoryController extends Controller
                 $query->whereRaw('quantity_in_stock <= reorder_threshold');
             }
 
-            // FIX (Aug 1 2026 audit): was hardcoded paginate(20), ignoring
-            // any per_page request. With 22 real materials in the catalog,
-            // every dropdown built from this endpoint (PhysicalCount.jsx,
-            // PurchaseOrders.jsx RFQ picker, MaterialRates.jsx) silently
-            // lost the last 2 materials. Dropdowns now pass ?per_page=200
-            // to get everything; the paginated table view (Materials.jsx)
-            // still defaults to 20 since it has real pagination controls.
             $perPage = min((int) $request->input('per_page', 20), 200);
             $items = $query->orderBy('material_name')->paginate($perPage);
 
@@ -311,25 +309,30 @@ class InventoryController extends Controller
         $qty   = (float) $request->input('quantity');
         $delta = in_array($type, ['stock_out', 'wastage']) ? -abs($qty) : abs($qty);
 
-        $newStock = max(0, $material->quantity_in_stock + $delta);
+        // Locked transaction — was a read-modify-write race, concurrent
+        // adjustments on the same material could silently lose one.
+        $newStock = DB::transaction(function () use ($id, $delta, $type, $request) {
+            $locked = DB::table('materials')->where('material_id', $id)->lockForUpdate()->first();
+            $stock  = max(0, $locked->quantity_in_stock + $delta);
 
-        DB::table('materials')
-            ->where('material_id', $id)
-            ->update([
-                'quantity_in_stock' => $newStock,
+            DB::table('materials')->where('material_id', $id)->update([
+                'quantity_in_stock' => $stock,
                 'updated_at'        => now(),
             ]);
 
-        DB::table('inventory_logs')->insert([
-            'material_id' => $id,
-            'recorded_by' => Auth::id(),
-            'type'        => $type,
-            'change_qty'  => $delta,
-            'reason'      => $request->input('reason'),
-            'log_date'    => now(),
-            'created_at'  => now(),
-            'updated_at'  => now(),
-        ]);
+            DB::table('inventory_logs')->insert([
+                'material_id' => $id,
+                'recorded_by' => Auth::id(),
+                'type'        => $type,
+                'change_qty'  => $delta,
+                'reason'      => $request->input('reason'),
+                'log_date'    => now(),
+                'created_at'  => now(),
+                'updated_at'  => now(),
+            ]);
+
+            return $stock;
+        });
 
         Cache::forget('materials_list');
         Cache::forget('dashboard_stats');

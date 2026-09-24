@@ -16,6 +16,7 @@ class Order extends Model
         'estimated_completion_date','deadline_negotiated','quantity_ordered',
         'sizing_type','target_delivery_date','negotiated_delivery_date',
         'notes','client_design_notes','client_design_ref_file',
+        'client_design_preview_file',
         'po_reference','color',
         // New columns from migration
         'garment_type','collar_type','sleeve_type','pocket_type',

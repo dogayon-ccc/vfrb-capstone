@@ -81,6 +81,29 @@ class SalesTransactionController extends Controller
         return response()->json($txn);
     }
 
+    // Official Receipt PDF — proof of payment, distinct from the order invoice.
+    public function downloadReceiptPdf(int $id)
+    {
+        $txn = DB::table('sales_transactions')
+            ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
+            ->join('users',  'orders.user_id', '=', 'users.user_id')
+            ->where('sales_transactions.transaction_id', $id)
+            ->select('sales_transactions.*', 'orders.garment_type', 'orders.quantity_ordered',
+                     'users.name as customer_name', 'users.organization_name')
+            ->first();
+
+        if (!$txn) {
+            return response()->json(['message' => 'Transaction not found.'], 404);
+        }
+
+        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt', [
+            'txn'       => (array) $txn,
+            'printedAt' => now()->format('F d, Y g:i A'),
+        ])->setPaper('a4', 'portrait');
+
+        return $pdf->download("VFRB-Receipt-{$txn->or_number}.pdf");
+    }
+
     // ── POST /api/admin/transactions ──────────────────────────────────────────
     // SalesTransactions.jsx payment form
     // Frontend sends: { order_id, amount_paid, payment_method, payment_terms, or_number, notes }
@@ -107,75 +130,77 @@ class SalesTransactionController extends Controller
             'amount_total'   => 'nullable|numeric|min:0.01',
         ]);
 
-        $order = DB::table('orders')
-            ->where('order_id', $request->input('order_id'))
-            ->select('order_id', 'user_id', 'agreed_total')
-            ->first();
-
-        $existingTxn = DB::table('sales_transactions')
-            ->where('order_id', $order->order_id)
-            ->first();
-
         $newAmountPaid = (float) $request->input('amount_paid');
 
-        if (!$existingTxn) {
-            // First payment on this order — the negotiated total must be
-            // recorded now. VFRB has no pricing engine; this is the number
-            // Ma'am Fe/Roxanne already agreed with the client, typed in by
-            // staff — not calculated by this system.
-            $amountTotalInput = $request->input('amount_total');
-            if ($amountTotalInput === null || (float) $amountTotalInput <= 0) {
-                return response()->json([
-                    'message' => 'Record the order total (amount_total) on the first payment before recording additional payments.',
-                    'errors'  => ['amount_total' => ['The order total is required for an order\'s first payment.']],
-                ], 422);
-            }
-            $amountTotal = (float) $amountTotalInput;
+        // Locked transaction — was a read-modify-write race on amount_paid,
+        // could double-count on double-click/retry.
+        $result = DB::transaction(function () use ($request, $newAmountPaid) {
+            $order = DB::table('orders')
+                ->where('order_id', $request->input('order_id'))
+                ->select('order_id', 'user_id', 'agreed_total')
+                ->lockForUpdate()
+                ->first();
 
-            // Persist the negotiated total onto the order — read-only after this.
-            DB::table('orders')->where('order_id', $order->order_id)->update([
-                'agreed_total' => $amountTotal,
-                'updated_at'   => now(),
-            ]);
+            $existingTxn = DB::table('sales_transactions')
+                ->where('order_id', $order->order_id)
+                ->lockForUpdate()
+                ->first();
 
-            $cumulativePaid = $newAmountPaid;
-        } else {
-            // Subsequent payment on the SAME order — total is pulled from
-            // orders.agreed_total, never re-requested from the client.
-            if ($order->agreed_total === null) {
-                // Shouldn't happen (first payment always sets it), but the
-                // order total may have been cleared/edited elsewhere —
-                // fail loudly instead of guessing a number.
-                return response()->json([
-                    'message' => 'Record the order total on the first payment before recording additional payments.',
-                ], 422);
+            if (!$existingTxn) {
+                // First payment — total must be recorded now (no pricing engine here).
+                $amountTotalInput = $request->input('amount_total');
+                if ($amountTotalInput === null || (float) $amountTotalInput <= 0) {
+                    return ['error' => [
+                        'message' => 'Record the order total (amount_total) on the first payment before recording additional payments.',
+                        'errors'  => ['amount_total' => ['The order total is required for an order\'s first payment.']],
+                    ]];
+                }
+                $amountTotal = (float) $amountTotalInput;
+
+                DB::table('orders')->where('order_id', $order->order_id)->update([
+                    'agreed_total' => $amountTotal,
+                    'updated_at'   => now(),
+                ]);
+                $cumulativePaid = $newAmountPaid;
+            } else {
+                // Subsequent payment — total comes from orders.agreed_total, not the client.
+                if ($order->agreed_total === null) {
+                    return ['error' => ['message' => 'Record the order total on the first payment before recording additional payments.']];
+                }
+                $amountTotal    = (float) $order->agreed_total;
+                $cumulativePaid = (float) $existingTxn->amount_paid + $newAmountPaid;
             }
-            $amountTotal    = (float) $order->agreed_total;
-            $cumulativePaid = (float) $existingTxn->amount_paid + $newAmountPaid;
+
+            $balanceDue       = max(0, round($amountTotal - $cumulativePaid, 2));
+            $completionStatus = $balanceDue <= 0 ? 'completed' : 'processing';
+
+            // updateOrCreate keyed on order_id — same row reused across payments.
+            $txn = \App\Models\SalesTransaction::updateOrCreate(
+                ['order_id' => $order->order_id],
+                [
+                    'processed_by'      => Auth::id(),
+                    'amount_total'      => $amountTotal,
+                    'amount_paid'       => $cumulativePaid,
+                    'balance_due'       => $balanceDue,
+                    'payment_method'    => $request->input('payment_method'),
+                    'payment_terms'     => $request->input('payment_terms', 'full_payment'),
+                    'payment_date'      => now()->toDateString(),
+                    'or_number'         => $request->input('or_number'),
+                    'completion_status' => $completionStatus,
+                    'notes'             => $request->input('notes'),
+                    'date_processed'    => now(),
+                ]
+            );
+
+            return ['order' => $order, 'txn' => $txn, 'balanceDue' => $balanceDue];
+        });
+
+        if (isset($result['error'])) {
+            return response()->json($result['error'], 422);
         }
-
-        $balanceDue        = max(0, round($amountTotal - $cumulativePaid, 2));
-        $completionStatus  = $balanceDue <= 0 ? 'completed' : 'processing';
-
-        // updateOrCreate keyed on order_id: same transaction_id is reused
-        // across payments on one order, matching the unique-key schema —
-        // this is NOT a new row per payment.
-        $txn = \App\Models\SalesTransaction::updateOrCreate(
-            ['order_id' => $order->order_id],
-            [
-                'processed_by'      => Auth::id(),
-                'amount_total'      => $amountTotal,
-                'amount_paid'       => $cumulativePaid,
-                'balance_due'       => $balanceDue,
-                'payment_method'    => $request->input('payment_method'),
-                'payment_terms'     => $request->input('payment_terms', 'full_payment'),
-                'payment_date'      => now()->toDateString(),
-                'or_number'         => $request->input('or_number'),
-                'completion_status' => $completionStatus,
-                'notes'             => $request->input('notes'),
-                'date_processed'    => now(),
-            ]
-        );
+        $order      = $result['order'];
+        $txn        = $result['txn'];
+        $balanceDue = $result['balanceDue'];
 
         // Notify customer of payment recorded
         $now = now();

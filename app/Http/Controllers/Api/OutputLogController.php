@@ -7,7 +7,7 @@
 //     logged_by, qty_xs, qty_s, qty_m, qty_l, qty_xl, qty_xxl, qty_xxxl,
 //     qty_custom (all int), total_output (GENERATED ALWAYS — NEVER INSERT),
 //     defect_count (int), alteration_count (int), log_date (date),
-//     notes (text), scanned_via_qr (tinyint), created_at, updated_at
+//     notes (text), created_at, updated_at
 //
 // CRITICAL: total_output is GENERATED ALWAYS AS
 //   (qty_xs+qty_s+qty_m+qty_l+qty_xl+qty_xxl+qty_xxxl+qty_custom) STORED
@@ -17,7 +17,7 @@
 // write path (store()) for staff logging daily output.
 //
 // AS OF Aug 28 2026, store()'s actual stage-advance logic — including the
-// MIGO MT-261 goods-issue deduction on Pattern completion and auto-delivery
+// goods-issue deduction on Pattern completion and auto-delivery
 // creation on Packing completion — was extracted into
 // App\Services\ProductionStageService, shared with
 // ProductionController::logProgress(). See that service's file header for
@@ -60,7 +60,6 @@ class OutputLogController extends Controller
             'alteration_count' => 'nullable|integer|min:0',
             'defect_notes'     => 'nullable|string|max:1000',
             'notes'            => 'nullable|string|max:500',
-            'scanned_via_qr'   => 'nullable|boolean',
             // See ProductionController::logProgress() for the full comment
             // on why this is shape-only validation, not required_if.
             'material_actuals'               => 'nullable|array',
@@ -82,7 +81,7 @@ class OutputLogController extends Controller
 
         // CONSOLIDATED (Aug 28 2026): everything that used to run inline here
         // (unlocked read-modify-write of qty_completed, QC gate, auto-advance,
-        // MIGO MT-261 inventory deduction, auto-delivery creation, notify) now
+        // inventory deduction, auto-delivery creation, notify) now
         // lives in ProductionStageService::logOutput(), shared with
         // ProductionController::logProgress(). The real fix that comes along
         // with this merge for THIS endpoint specifically: the read-modify-write
@@ -115,7 +114,6 @@ class OutputLogController extends Controller
                 'defect_count'     => $request->input('defect_count',     0),
                 'alteration_count' => $request->input('alteration_count', 0),
                 'defect_notes'     => $request->input('defect_notes'),
-                'scanned_via_qr'   => $request->boolean('scanned_via_qr'),
             ],
             $request->input('material_actuals', [])
         );

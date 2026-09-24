@@ -72,9 +72,31 @@ class PurchaseOrderController extends Controller
             $query->where('purchase_orders.status', $status);
         }
 
-        return response()->json(
-            $query->orderByDesc('purchase_orders.created_at')->paginate($perPage)
-        );
+        $pos = $query->orderByDesc('purchase_orders.created_at')->paginate($perPage);
+
+        $itemsByPo = $this->itemsForPoIds($pos->pluck('po_id')->all());
+        $pos->getCollection()->transform(function ($po) use ($itemsByPo) {
+            $po->items = $itemsByPo[$po->po_id] ?? [];
+            return $po;
+        });
+
+        return response()->json($pos);
+    }
+
+    // Bulk-fetches purchase_order_items for a set of POs in one query,
+    // grouped by po_id — avoids an N+1 when attaching items to a list.
+    private function itemsForPoIds(array $poIds): array
+    {
+        if (!$poIds) return [];
+
+        return DB::table('purchase_order_items')
+            ->join('materials', 'purchase_order_items.material_id', '=', 'materials.material_id')
+            ->whereIn('purchase_order_items.po_id', $poIds)
+            ->select('purchase_order_items.*', 'materials.material_name', 'materials.unit')
+            ->get()
+            ->groupBy('po_id')
+            ->map(fn($rows) => $rows->values())
+            ->all();
     }
 
     // ── GET /api/admin/purchase-orders/{id} ──────────────────────────────────
@@ -93,9 +115,7 @@ class PurchaseOrderController extends Controller
             return response()->json(['message' => 'Purchase order not found.'], 404);
         }
 
-        if ($po->items) {
-            $po->items_parsed = json_decode($po->items, true);
-        }
+        $po->items = $this->itemsForPoIds([$po->po_id])[$po->po_id] ?? [];
 
         return response()->json($po);
     }
@@ -126,7 +146,6 @@ class PurchaseOrderController extends Controller
             'created_by'              => Auth::id(),
             'order_id'                => $request->input('order_id'),
             'status'                  => 'draft',
-            'items'                   => json_encode($request->input('items')),
             'total_amount'            => $total,
             'expected_delivery_date'  => $request->input('expected_delivery_date'),
             'order_color_hex'         => $request->input('order_color_hex'),
@@ -137,12 +156,24 @@ class PurchaseOrderController extends Controller
             'updated_at'              => now(),
         ]);
 
+        $now = now();
+        DB::table('purchase_order_items')->insert(
+            collect($request->input('items'))->map(fn($i) => [
+                'po_id'       => $id,
+                'material_id' => $i['material_id'],
+                'qty'         => $i['qty'],
+                'unit_cost'   => $i['unit_cost'],
+                'created_at'  => $now,
+                'updated_at'  => $now,
+            ])->all()
+        );
+
         Cache::forget('dashboard_stats');
 
-        return response()->json(
-            DB::table('purchase_orders')->where('po_id', $id)->first(),
-            201
-        );
+        $po = DB::table('purchase_orders')->where('po_id', $id)->first();
+        $po->items = $this->itemsForPoIds([$id])[$id] ?? [];
+
+        return response()->json($po, 201);
     }
 
     // ── PATCH /api/admin/purchase-orders/{id}/receive ────────────────────────
@@ -194,19 +225,17 @@ class PurchaseOrderController extends Controller
             DB::table('purchase_orders')->where('po_id', $id)->update($update);
 
             // Update stock for each item in the PO
-            $items = json_decode($po->items, true) ?? [];
+            $items = DB::table('purchase_order_items')->where('po_id', $id)->get();
             foreach ($items as $item) {
-                if (empty($item['material_id']) || empty($item['qty'])) continue;
-
                 DB::table('materials')
-                    ->where('material_id', $item['material_id'])
-                    ->increment('quantity_in_stock', $item['qty']);
+                    ->where('material_id', $item->material_id)
+                    ->increment('quantity_in_stock', $item->qty);
 
                 DB::table('inventory_logs')->insert([
-                    'material_id' => $item['material_id'],
+                    'material_id' => $item->material_id,
                     'recorded_by' => Auth::id(),
                     'type'        => 'stock_in',
-                    'change_qty'  => $item['qty'],
+                    'change_qty'  => $item->qty,
                     'reason'      => "Goods receipt — PO {$po->po_number}",
                     'log_date'    => now(),
                     'created_at'  => now(),
@@ -402,7 +431,6 @@ class PurchaseOrderController extends Controller
             return response()->json(['message' => 'Response does not belong to this RFQ.'], 422);
         }
 
-        $material = DB::table('materials')->where('material_id', $rfq->material_id)->first();
         $total    = $rfq->qty_needed * $response->unit_price;
         $poNumber = 'PO-' . now()->format('Ymd') . '-' . strtoupper(substr(uniqid(), -5));
 
@@ -411,13 +439,6 @@ class PurchaseOrderController extends Controller
             'supplier_id'            => $response->supplier_id,
             'created_by'             => Auth::id(),
             'status'                 => 'sent',
-            'items'                  => json_encode([[
-                'material_id' => $rfq->material_id,
-                'material_name' => $material->material_name ?? '',
-                'qty'         => $rfq->qty_needed,
-                'unit'        => $material->unit ?? '',
-                'unit_cost'   => $response->unit_price,
-            ]]),
             'total_amount'           => $total,
             'expected_delivery_date' => $request->input('expected_delivery_date'),
             'notes'                  => $request->input('notes'),
@@ -425,6 +446,15 @@ class PurchaseOrderController extends Controller
             'color_confirmed'        => 0,
             'created_at'             => now(),
             'updated_at'             => now(),
+        ]);
+
+        DB::table('purchase_order_items')->insert([
+            'po_id'       => $poId,
+            'material_id' => $rfq->material_id,
+            'qty'         => $rfq->qty_needed,
+            'unit_cost'   => $response->unit_price,
+            'created_at'  => now(),
+            'updated_at'  => now(),
         ]);
 
         // Close the RFQ

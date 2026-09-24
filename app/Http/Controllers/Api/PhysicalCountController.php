@@ -1,21 +1,7 @@
 <?php
-// app/Http/Controllers/Api/PhysicalCountController.php
-// VFRB Enterprise — Physical Count + Variance
-//
-// SCHEMA VERIFIED against vfrb_db.sql:
-//   physical_count_logs: count_id (PK), material_id, counted_by,
-//     system_qty (decimal), counted_qty (decimal),
-//     variance (GENERATED ALWAYS AS counted_qty - system_qty STORED),
-//     variance_pct (GENERATED ALWAYS AS ...),
-//     reconciled (tinyint default 0),
-//     reconciled_by (bigint nullable), reconciled_at (timestamp nullable),
-//     notes (text), counted_at (timestamp), created_at, updated_at
-//
-// CRITICAL: variance and variance_pct are GENERATED ALWAYS AS — NEVER INSERT.
-//   MySQL 8 throws an error if you include them in INSERT statements.
-//
-// materials: material_id, material_name, unit, quantity_in_stock,
-//            reorder_threshold, unit_cost   ← unit_cost not unit_price
+// physical_count_logs: count_id, material_id, counted_by, system_qty, physical_qty,
+// variance + variance_pct (GENERATED, never insert), reason, count_date (date),
+// reconciled, reconciled_by, reconciled_at, reconciliation_note, stock_adjusted.
 
 namespace App\Http\Controllers\Api;
 
@@ -54,7 +40,7 @@ class PhysicalCountController extends Controller
         }
 
         return response()->json(
-            $query->orderByDesc('physical_count_logs.counted_at')->paginate($perPage)
+            $query->orderByDesc('physical_count_logs.count_date')->orderByDesc('physical_count_logs.count_id')->paginate($perPage)
         );
     }
 
@@ -77,18 +63,14 @@ class PhysicalCountController extends Controller
         $systemQty  = (float) $material->quantity_in_stock;
         $countedQty = (float) $request->input('counted_qty');
 
-        // NEVER insert variance or variance_pct — they are GENERATED ALWAYS AS
-        // Actual columns: physical_qty (not counted_qty), count_date (not counted_at),
-        //                 reason (not notes), no counted_at column
         $id = DB::table('physical_count_logs')->insertGetId([
             'material_id' => $material->material_id,
             'counted_by'  => Auth::id(),
             'system_qty'  => $systemQty,
-            'physical_qty'=> $countedQty,      // physical_qty — confirmed from vfrb_db.sql
-            // variance + variance_pct auto-computed by MySQL GENERATED ALWAYS AS
+            'physical_qty'=> $countedQty,
             'reconciled'  => 0,
-            'reason'      => $request->input('notes'),   // 'reason' column (no 'notes' column)
-            'count_date'  => $request->input('counted_at', now()->toDateString()),  // count_date (date)
+            'reason'      => $request->input('notes'),
+            'count_date'  => $request->input('counted_at', now()->toDateString()),
             'created_at'  => now(),
             'updated_at'  => now(),
         ]);
@@ -233,7 +215,16 @@ class PhysicalCountController extends Controller
             ->orderBy('materials.material_name')
             ->get();
 
-        return response()->json(['count_sheet' => $countSheet]);
+        return response()->json([
+            'count_sheet'   => $countSheet,
+            // FIX (Aug 31 2026): these two were never in the response at
+            // all — PhysicalCount.jsx's print sheet has always been
+            // reading r.data.generated_at/generated_by, and both came
+            // back undefined because nothing on this side ever sent
+            // them. Not a rename like system_qty below, a genuine gap.
+            'generated_at'  => now()->format('n/j/y, g:i A'),
+            'generated_by'  => auth()->user()->name ?? 'Unknown',
+        ]);
     }
 
     // ── Private: manager notification ────────────────────────────────────────

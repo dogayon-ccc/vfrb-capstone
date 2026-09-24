@@ -41,21 +41,21 @@ class User extends Authenticatable
         'sales'      => ['sales', 'general'],
     ];
 
-    public function hasJobAccess(string $area): bool
+    // Raw query: Spatie hasRole() returns false for Sanctum-authenticated users (guard mismatch).
+    public function isManager(): bool
     {
-        // NOTE: can't use $this->hasRole('manager') here — Spatie's guard_name
-        // ('web') doesn't match Sanctum's guard ('api'), so getRoleNames()/
-        // hasRole() silently return false/empty for every Sanctum-authenticated
-        // user. Same bug RoleMiddleware.php already works around — matching
-        // that fix here rather than reintroducing the broken call.
-        $roleName = \Illuminate\Support\Facades\DB::table('model_has_roles as mr')
+        return \Illuminate\Support\Facades\DB::table('model_has_roles as mr')
             ->join('roles as r', 'r.id', '=', 'mr.role_id')
             ->where('mr.model_type', self::class)
             ->where('mr.model_id', $this->user_id)
-            ->value('r.name');
+            ->where('r.name', 'manager')
+            ->exists();
+    }
 
-        if ($roleName === 'manager') {
-            return true; // managers always see/do everything
+    public function hasJobAccess(string $area): bool
+    {
+        if ($this->isManager()) {
+            return true;
         }
         if (($this->job_function ?? 'general') === 'general') {
             return true; // unset/general staff keep today's full access
