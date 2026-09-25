@@ -58,7 +58,17 @@ class AIController extends Controller
             return response()->json(['message' => 'No materials catalog configured yet.'], 422);
         }
 
-        $prompt = $this->buildPrompt($order, $catalog);
+        // Customer's saved fabric preferences (Sept 16 migration added the
+        // table with the comment "not wired into AI recommendation defaults
+        // yet — later task"). Wiring it in now: it's context for the AI to
+        // weigh, not a default it can act on unchecked — buildPrompt() only
+        // ever lets the model pick material_id values that exist in the
+        // catalog passed to it, same as any other selection.
+        $fabricPrefs = \App\Models\CustomerFabricPreference::where('user_id', $user->user_id)
+            ->with('material:material_id,material_name')
+            ->get();
+
+        $prompt = $this->buildPrompt($order, $catalog, $fabricPrefs);
         // BUG-008: was 1200 — too tight once thinking tokens (unavoidable on
         // gemini-3.6-flash, see callGemini()) share this same budget with the
         // actual JSON answer. Raised with headroom for both.
@@ -520,15 +530,47 @@ PROMPT;
     // =========================================================================
     // PRIVATE HELPERS
     // =========================================================================
-    private function buildPrompt(Order $order, $catalog): string
+    // $fabricPrefs: CustomerFabricPreference rows (with 'material' eager-
+    // loaded), or null/empty when the customer hasn't saved any.
+    private function buildPrompt(Order $order, $catalog, $fabricPrefs = null): string
     {
-        $g      = $order->garment_type  ?? 'garment';
-        $c      = $order->collar_type   ?? 'standard';
-        $s      = $order->sleeve_type   ?? 'standard';
-        $p      = $order->pocket_type   ?? 'none';
-        $qty    = $order->quantity_ordered ?? null;
-        $color  = $order->color         ?? 'any';
-        $notes  = $order->client_design_notes ?? '';
+        $g     = $order->garment_type ?? 'garment';
+        $c     = $order->collar_type  ?? 'standard';
+        $s     = $order->sleeve_type  ?? 'standard';
+        $p     = $order->pocket_type  ?? 'none';
+        $color = $order->color        ?? 'any';
+        $notes = $order->client_design_notes ?? '';
+
+        // studio_config is cast to 'array' on the Order model — this is the
+        // actual Design Studio state (per-zone colors/patterns, whether a
+        // logo/text overlay was placed), not just the flat order columns
+        // above. Quantity is deliberately NOT read from anywhere here: it
+        // was previously included as prompt context even though nothing
+        // downstream used it, which only risked nudging the model toward
+        // quantity-flavored output the system explicitly forbids below.
+        $studio   = is_array($order->studio_config) ? $order->studio_config : [];
+        $colors   = collect($studio['colors']   ?? [])->filter();
+        $patterns = collect($studio['patterns'] ?? [])->filter();
+        $hasOverlayLine = (!empty($studio['overlays'])
+            || !empty($studio['frontOverlays'])
+            || !empty($studio['backOverlays'])) ? 'yes' : 'no';
+
+        $colorLine   = $colors->isNotEmpty()
+            ? $colors->map(fn($hex, $zone) => "{$zone}={$hex}")->implode(', ')
+            : $color;
+        $patternLine = $patterns->isNotEmpty()
+            ? $patterns->map(fn($pat, $zone) => "{$zone}={$pat}")->implode(', ')
+            : 'solid';
+
+        $prefLine = 'none saved';
+        if ($fabricPrefs && $fabricPrefs->isNotEmpty()) {
+            $prefLine = $fabricPrefs
+                ->map(fn($pref) => $pref->material
+                    ? $pref->material->material_name . ($pref->notes ? " ({$pref->notes})" : '')
+                    : null)
+                ->filter()
+                ->implode(', ');
+        }
 
         $catalogLines = $catalog->map(fn($m) =>
             "  {$m->material_id} | {$m->material_name} | category: {$m->category} | unit: {$m->unit}"
@@ -537,10 +579,13 @@ PROMPT;
         return <<<PROMPT
 You are a materials specialist for VFRB Enterprise, a garment manufacturer in Bayanan, Muntinlupa, Philippines.
 
-Job order specs (design layout only — no formulas involved):
-- Garment: {$g} | Collar: {$c} | Sleeve: {$s} | Pocket: {$p} | Color: {$color}
-- Quantity ordered: {$qty} pieces
-- Notes: {$notes}
+Design being ordered (layout only — no formulas or quantities involved):
+- Garment: {$g} | Collar: {$c} | Sleeve: {$s} | Pocket: {$p}
+- Colors by zone: {$colorLine}
+- Patterns by zone: {$patternLine}
+- Logo or text placed on the garment: {$hasOverlayLine}
+- Customer's previously saved fabric preferences: {$prefLine}
+- Customer notes: {$notes}
 
 Here is VFRB's real materials catalog. Choose ONLY from this list —
 do not invent a material that isn't here:
@@ -548,9 +593,11 @@ do not invent a material that isn't here:
 
 Your ONLY job is to decide which of these catalog materials are relevant to
 this design, and explain why in one short plain-language sentence each.
+Favor the customer's saved fabric preferences when one of them genuinely
+fits this design, but only if it's a real match — don't force it.
 
-Do NOT estimate or mention any quantity, yardage, weight, or formula —
-that is calculated separately by VFRB's own system, not by you.
+Do NOT estimate or mention any quantity, yardage, weight, formula, price,
+or a bill of materials — none of that is your job here.
 
 Return ONLY valid JSON (no markdown, no backticks):
 {

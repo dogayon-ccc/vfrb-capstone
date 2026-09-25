@@ -278,69 +278,83 @@ class OrderController extends Controller
             }
         }
 
-        $orderId = DB::table('orders')->insertGetId([
-            'user_id'               => Auth::id(),
-            'garment_type'          => $request->input('garment_type'),
-            'collar_type'           => $request->input('collar_type'),
-            'sleeve_type'           => $request->input('sleeve_type'),
-            'pocket_type'           => $request->input('pocket_type'),
-            'color'                 => $request->input('color'),
-            'quantity_ordered'      => (int) $request->input('quantity_ordered'),
-            'order_type'            => $request->input('order_type', 'direct'),
-            'sizing_type'           => $request->input('sizing_type', 'standard'),
-            'target_delivery_date'  => $request->input('deadline'),
-            'po_reference'          => $request->input('po_reference'),
-            'client_design_notes'   => $request->input('client_design_notes'),
-            'client_design_ref_file'=> $refFilePath,
-            'client_design_preview_file' => $previewFilePath,
-            'studio_config'         => $studioConfig,
-            'status'                => 'pending',
-            'ai_recommendation_status' => 'not_requested',
-            'qc_required'           => 1,
-            'notes'                 => $request->input('special_notes'),
-            'created_at'            => now(),
-            'updated_at'            => now(),
-        ]);
+        // TRANSACTION FIX (Sept 25 audit): the order insert, its two
+        // measurements inserts, and the manager-notification inserts used
+        // to run as separate, unwrapped statements. A failure partway
+        // through (e.g. the measurements insert) left a committed order row
+        // with no size/measurement data and no notification — an orphaned,
+        // effectively invisible order, since staff only ever get pointed at
+        // new orders via that notification. Wrapping the whole write in one
+        // transaction makes it all-or-nothing: any exception rolls every
+        // insert back and the customer sees the failure instead of a "sent"
+        // order nobody in the system knows exists.
+        $orderId = DB::transaction(function () use ($request, $refFilePath, $previewFilePath, $studioConfig, $sizesInput) {
+            $orderId = DB::table('orders')->insertGetId([
+                'user_id'               => Auth::id(),
+                'garment_type'          => $request->input('garment_type'),
+                'collar_type'           => $request->input('collar_type'),
+                'sleeve_type'           => $request->input('sleeve_type'),
+                'pocket_type'           => $request->input('pocket_type'),
+                'color'                 => $request->input('color'),
+                'quantity_ordered'      => (int) $request->input('quantity_ordered'),
+                'order_type'            => $request->input('order_type', 'direct'),
+                'sizing_type'           => $request->input('sizing_type', 'standard'),
+                'target_delivery_date'  => $request->input('deadline'),
+                'po_reference'          => $request->input('po_reference'),
+                'client_design_notes'   => $request->input('client_design_notes'),
+                'client_design_ref_file'=> $refFilePath,
+                'client_design_preview_file' => $previewFilePath,
+                'studio_config'         => $studioConfig,
+                'status'                => 'pending',
+                'ai_recommendation_status' => 'not_requested',
+                'qc_required'           => 1,
+                'notes'                 => $request->input('special_notes'),
+                'created_at'            => now(),
+                'updated_at'            => now(),
+            ]);
 
-        // Store per-size quantities in measurements table if provided
-        // (reuses $sizesInput, already decoded + validated above — no need to decode twice)
-        $sizes = $sizesInput;
-        if (is_array($sizes)) {
-            foreach ($sizes as $sizeLabel => $qty) {
-                if ($qty > 0) {
-                    DB::table('measurements')->insert([
-                        'order_id'    => $orderId,
-                        'user_id'     => Auth::id(),
-                        'type'        => 'standard',
-                        'size_label'  => strtoupper($sizeLabel),
-                        'qty'         => (int) $qty,
-                        'created_at'  => now(),
-                        'updated_at'  => now(),
-                    ]);
+            // Store per-size quantities in measurements table if provided
+            // (reuses $sizesInput, already decoded + validated above — no need to decode twice)
+            $sizes = $sizesInput;
+            if (is_array($sizes)) {
+                foreach ($sizes as $sizeLabel => $qty) {
+                    if ($qty > 0) {
+                        DB::table('measurements')->insert([
+                            'order_id'    => $orderId,
+                            'user_id'     => Auth::id(),
+                            'type'        => 'standard',
+                            'size_label'  => strtoupper($sizeLabel),
+                            'qty'         => (int) $qty,
+                            'created_at'  => now(),
+                            'updated_at'  => now(),
+                        ]);
+                    }
                 }
             }
-        }
 
-        // Store custom measurements if sizing_type = custom
-        $customMeasurements = json_decode($request->input('measurements', '{}'), true);
-        if (is_array($customMeasurements) && !empty($customMeasurements)) {
-            DB::table('measurements')->insert([
-                'order_id'      => $orderId,
-                'user_id'       => Auth::id(),
-                'type'          => 'custom',
-                'size_label'    => 'custom',
-                'chest'         => $customMeasurements['chest']        ?? null,
-                'waist'         => $customMeasurements['waist']        ?? null,
-                'hip'           => $customMeasurements['hip']          ?? null,
-                'sleeve_length' => $customMeasurements['sleeve_length']?? null,
-                'neck'          => $customMeasurements['neck']         ?? null,
-                'created_at'    => now(),
-                'updated_at'    => now(),
-            ]);
-        }
+            // Store custom measurements if sizing_type = custom
+            $customMeasurements = json_decode($request->input('measurements', '{}'), true);
+            if (is_array($customMeasurements) && !empty($customMeasurements)) {
+                DB::table('measurements')->insert([
+                    'order_id'      => $orderId,
+                    'user_id'       => Auth::id(),
+                    'type'          => 'custom',
+                    'size_label'    => 'custom',
+                    'chest'         => $customMeasurements['chest']        ?? null,
+                    'waist'         => $customMeasurements['waist']        ?? null,
+                    'hip'           => $customMeasurements['hip']          ?? null,
+                    'sleeve_length' => $customMeasurements['sleeve_length']?? null,
+                    'neck'          => $customMeasurements['neck']         ?? null,
+                    'created_at'    => now(),
+                    'updated_at'    => now(),
+                ]);
+            }
 
-        // Notify managers of new order
-        $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
+            // Notify managers of new order
+            $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
+
+            return $orderId;
+        });
 
         Cache::forget('dashboard_stats');
 
