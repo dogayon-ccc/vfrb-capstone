@@ -14,13 +14,19 @@ class GeminiClient
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
     public function call(string $prompt, int $maxTokens = 1500): ?string
     {
-        $keyCount = (int) config('services.gemini.key_count', 1);
-        $model    = config('services.gemini.model', 'gemini-1.5-flash');
+        // GEMINI_KEY_COUNT used to gate this loop directly — if it's unset
+        // or wrong on a given deploy (defaults to 1), key_2/key_3 are never
+        // tried even when configured. Derive the count from which keys are
+        // actually non-empty instead, so rotation can't silently degrade
+        // to one key from a missing/stale env var.
+        $keys = array_filter([
+            1 => config('services.gemini.key_1'),
+            2 => config('services.gemini.key_2'),
+            3 => config('services.gemini.key_3'),
+        ]);
+        $model = config('services.gemini.model', 'gemini-1.5-flash');
 
-        for ($i = 0; $i < $keyCount; $i++) {
-            $keyNum = $i + 1;
-            $key    = config("services.gemini.key_{$keyNum}");
-            if (!$key) continue;
+        foreach ($keys as $keyNum => $key) {
 
             $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$key}";
 
