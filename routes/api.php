@@ -295,6 +295,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // #1 ($id) must be of type int, string given.
     Route::get('/orders/garment-types', [OrderController::class, 'garmentTypes']);
     Route::get('/orders',      [OrderController::class, 'adminIndex']);
+
+    // ── Client master data (read-only) — CustomersMaster.jsx: GET /api/admin/customers
+    // Customers live in `users` (role 'customer'); staff + manager may view, nobody edits from here.
+    Route::get('/customers', [UserController::class, 'adminCustomers']);
     Route::get('/orders/{id}', [OrderController::class, 'adminShow']);
     // Invoice.jsx "Download PDF" button moved to the manager-only group
     // below (Sept 15 2026, QA account) — Invoice is manager-exclusive per

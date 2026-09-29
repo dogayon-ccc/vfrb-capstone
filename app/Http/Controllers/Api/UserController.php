@@ -77,6 +77,75 @@ class UserController extends Controller
         return response()->json($users);
     }
 
+    // ── GET /api/admin/customers ─────────────────────────────────────────────
+    // Client master data (read-only). Customers are `users` rows holding the
+    // 'customer' role — no separate table. Exposes ONLY profile fields and order
+    // aggregates; never password / google_id / remember_token / avatar.
+    // Query: search (name/email/organization/contact), client_type, per_page (max 100)
+    public function adminCustomers(Request $request)
+    {
+        $perPage = min(max((int) $request->input('per_page', 25), 1), 100);
+        $search  = trim((string) $request->input('search', ''));
+        $type    = $request->input('client_type');
+
+        $customerIds = DB::table('model_has_roles')
+            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('roles.name', 'customer')
+            ->select('model_has_roles.model_id');
+
+        $orderAgg = DB::table('orders')
+            ->select(
+                'user_id',
+                DB::raw('COUNT(*) as orders_count'),
+                DB::raw("SUM(CASE WHEN status NOT IN ('completed','cancelled') THEN 1 ELSE 0 END) as active_orders"),
+                DB::raw('MAX(created_at) as last_order_at')
+            )
+            ->groupBy('user_id');
+
+        $query = DB::table('users')
+            ->leftJoinSub($orderAgg, 'oa', 'oa.user_id', '=', 'users.user_id')
+            ->whereIn('users.user_id', $customerIds)
+            ->select(
+                'users.user_id', 'users.name', 'users.email', 'users.contact_number',
+                'users.organization_name', 'users.address', 'users.client_type',
+                'users.email_verified_at', 'users.created_at',
+                DB::raw('COALESCE(oa.orders_count, 0) as orders_count'),
+                DB::raw('COALESCE(oa.active_orders, 0) as active_orders'),
+                'oa.last_order_at'
+            );
+
+        if ($type && in_array($type, ['individual', 'corporate', 'school', 'medical'], true)) {
+            $query->where('users.client_type', $type);
+        }
+        if ($search !== '') {
+            $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $search) . '%';
+            $query->where(function ($q) use ($like) {
+                $q->where('users.name', 'like', $like)
+                  ->orWhere('users.email', 'like', $like)
+                  ->orWhere('users.organization_name', 'like', $like)
+                  ->orWhere('users.contact_number', 'like', $like);
+            });
+        }
+
+        $summary = DB::table('users')
+            ->whereIn('user_id', $customerIds)
+            ->select('client_type', DB::raw('COUNT(*) as total'))
+            ->groupBy('client_type')
+            ->pluck('total', 'client_type');
+
+        $page = $query->orderBy('users.name')->paginate($perPage);
+
+        return response()->json(array_merge($page->toArray(), [
+            'summary' => [
+                'total'      => (int) $summary->sum(),
+                'individual' => (int) ($summary['individual'] ?? 0),
+                'corporate'  => (int) ($summary['corporate'] ?? 0),
+                'school'     => (int) ($summary['school'] ?? 0),
+                'medical'    => (int) ($summary['medical'] ?? 0),
+            ],
+        ]));
+    }
+
     // ── POST /api/admin/users  AND  POST /api/admin/users/create ─────────────
     // UserManagement.jsx CreateModal sends: { name, email, password, password_confirmation, role, contact_number }
     // Register.jsx also uses /api/admin/users/create (same method, same route)
