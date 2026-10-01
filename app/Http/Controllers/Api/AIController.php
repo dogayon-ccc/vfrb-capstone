@@ -37,10 +37,22 @@ class AIController extends Controller
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
 
-        $order->update([
-            'ai_recommendation_status'       => 'generating',
-            'ai_recommendation_requested_at' => now(),
-        ]);
+        // Atomic claim: a second concurrent request for the same order (double-click, retry, dev double-mount)
+        // must not start another Gemini call that races on the delete+insert below. A 'generating' claim
+        // older than 2 minutes is treated as abandoned (crashed request) and may be re-claimed.
+        $claimed = Order::where('order_id', $order->order_id)
+            ->where(function ($q) {
+                $q->where('ai_recommendation_status', '!=', 'generating')
+                  ->orWhereNull('ai_recommendation_status')
+                  ->orWhere('ai_recommendation_requested_at', '<', now()->subMinutes(2));
+            })
+            ->update([
+                'ai_recommendation_status'       => 'generating',
+                'ai_recommendation_requested_at' => now(),
+            ]);
+        if (!$claimed) {
+            return response()->json(['message' => 'Recommendation is already being generated. Please wait a moment.'], 409);
+        }
 
         // FIX (Aug 1 2026 scope clarification): the AI's ONLY job is to look
         // at the real materials catalog and pick which ones apply to this
@@ -96,52 +108,65 @@ class AIController extends Controller
             return response()->json(['message' => 'Could not parse AI response. Try again.'], 422);
         }
 
-        // Defensive: only trust material_ids that actually exist in the
-        // catalog we sent — never trust an LLM-generated ID at face value.
-        $catalogById = $catalog->keyBy('material_id');
+        try {
+            // Defensive: only trust material_ids that actually exist in the
+            // catalog we sent — never trust an LLM-generated ID at face value.
+            $catalogById = $catalog->keyBy('material_id');
 
-        MaterialRecommendation::where('order_id', $order->order_id)->delete();
-        $i = 0;
-        foreach ($parsed['selections'] as $sel) {
-            $matId = (int) ($sel['material_id'] ?? 0);
-            $mat   = $catalogById->get($matId);
-            if (!$mat) continue; // hallucinated ID — skip rather than guess
+            MaterialRecommendation::where('order_id', $order->order_id)->delete();
+            $i = 0;
+            foreach ($parsed['selections'] as $sel) {
+                $matId = (int) ($sel['material_id'] ?? 0);
+                $mat   = $catalogById->get($matId);
+                if (!$mat) continue; // hallucinated ID — skip rather than guess
 
-            MaterialRecommendation::create([
-                'order_id'              => $order->order_id,
-                'material_name'         => $mat->material_name,
-                'material_id'           => $mat->material_id, // FIX: previously always null
-                'category'              => $mat->category ?? 'Other',
-                'unit'                  => $mat->unit,
-                // AI note is narration only — no numbers ever come from Gemini
-                'ai_note'               => $sel['reason'] ?? null,
-                'display_order'         => $i++,
-                'status'                => 'pending',
-                'created_at'            => now(),
-                'updated_at'            => now(),
+                MaterialRecommendation::create([
+                    'order_id'              => $order->order_id,
+                    'material_name'         => $mat->material_name,
+                    'material_id'           => $mat->material_id, // FIX: previously always null
+                    'category'              => $mat->category ?? 'Other',
+                    'unit'                  => $mat->unit,
+                    // AI note is narration only — no numbers ever come from Gemini
+                    'ai_note'               => $sel['reason'] ?? null,
+                    'display_order'         => $i++,
+                    'status'                => 'pending',
+                    'created_at'            => now(),
+                    'updated_at'            => now(),
+                ]);
+            }
+
+            if ($i === 0) {
+                // Every returned id was outside the catalog: nothing usable, so don't report 'ready' with an empty list.
+                $order->update(['ai_recommendation_status' => 'failed']);
+                return response()->json(['message' => 'AI returned no usable materials. Try again.'], 422);
+            }
+
+            $order->update(['ai_recommendation_status' => 'ready']);
+
+            // SCOPE CORRECTION (Aug 28 2026): estimated_range/total_estimated_range
+            // no longer exist on the create() call above at all — there is no
+            // formula/BOM anywhere in this system now. Automated inventory
+            // deduction still happens on Pattern completion, but the quantity
+            // comes from staff manually entering actual usage at that point (see
+            // ProductionStageService::issueMaterialsToProduction()), not from
+            // anything computed here. Gemini recommends material TYPES only —
+            // that was already the locked customer-facing rule (SCOPE-001); this
+            // makes it true internally as well, so makeHidden() below is now
+            // belt-and-suspenders rather than load-bearing (nothing to hide that
+            // wasn't already never written).
+            $materials = MaterialRecommendation::where('order_id', $order->order_id)
+                            ->orderBy('display_order')->get();
+
+            return response()->json([
+                'recommendation' => $parsed['narration'] ?? '',
+                'materials'      => $materials,
             ]);
+        } catch (\Throwable $e) {
+            // Without this, any exception after the claim leaves the order stuck on 'generating' until the 2-min expiry.
+            Log::error('Material recommendation save failed', ['order_id' => $order->order_id, 'msg' => $e->getMessage()]);
+            $order->update(['ai_recommendation_status' => 'failed']);
+            return response()->json(['message' => 'Could not save recommendations. Try again.'], 500);
         }
-
-        $order->update(['ai_recommendation_status' => 'ready']);
-
-        // SCOPE CORRECTION (Aug 28 2026): estimated_range/total_estimated_range
-        // no longer exist on the create() call above at all — there is no
-        // formula/BOM anywhere in this system now. Automated inventory
-        // deduction still happens on Pattern completion, but the quantity
-        // comes from staff manually entering actual usage at that point (see
-        // ProductionStageService::issueMaterialsToProduction()), not from
-        // anything computed here. Gemini recommends material TYPES only —
-        // that was already the locked customer-facing rule (SCOPE-001); this
-        // makes it true internally as well, so makeHidden() below is now
-        // belt-and-suspenders rather than load-bearing (nothing to hide that
-        // wasn't already never written).
-        $materials = MaterialRecommendation::where('order_id', $order->order_id)
-                        ->orderBy('display_order')->get();
-
-        return response()->json([
-            'recommendation' => $parsed['narration'] ?? '',
-            'materials'      => $materials,
-        ]);
     }
 
     // ── Customer chooses their own materials instead of accepting the AI's ──
