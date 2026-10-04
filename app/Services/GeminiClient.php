@@ -28,12 +28,11 @@ class GeminiClient
 
         foreach ($keys as $keyNum => $key) {
 
-            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent?key={$key}";
+            // Key goes in a header, not the query string, so it never lands in URL/access logs.
+            $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
             try {
-                $response = Http::timeout(30)->post($url, [
-                    'contents'         => [['parts' => [['text' => $prompt]]]],
-                    'generationConfig' => [
+                $generationConfig = [
                         'temperature'     => 0.3,
                         'maxOutputTokens' => $maxTokens,
                         // BUG-008 FIX (confirmed against Google's current docs,
@@ -51,7 +50,15 @@ class GeminiClient
                         // Do NOT add the legacy 'thinkingBudget' alongside
                         // this — 3.x models reject requests sending both.
                         'thinkingConfig'  => ['thinkingLevel' => 'minimal'],
-                    ],
+                ];
+                if ($jsonSchema !== null) {
+                    $generationConfig['responseMimeType']   = 'application/json';
+                    $generationConfig['responseJsonSchema'] = $jsonSchema;
+                }
+
+                $response = Http::withHeaders(['x-goog-api-key' => $key])->timeout(30)->post($url, [
+                    'contents'         => [['parts' => [['text' => $prompt]]]],
+                    'generationConfig' => $generationConfig,
                     'safetySettings'   => [
                         ['category' => 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold' => 'BLOCK_NONE'],
                     ],

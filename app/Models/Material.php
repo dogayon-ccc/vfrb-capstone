@@ -17,12 +17,16 @@ class Material extends Model
         'quantity_in_stock',
         'reorder_threshold',
         'unit_cost',
+        'ai_eligible',
+        'applies_to',
     ];
 
     protected $casts = [
         'quantity_in_stock' => 'float',
         'reorder_threshold' => 'float',
         'unit_cost'         => 'float',
+        'ai_eligible'       => 'boolean',
+        'applies_to'        => 'array',
     ];
 
     // ── Relationships ─────────────────────────────────────────────────────────

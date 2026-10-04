@@ -27,19 +27,17 @@ return [
         'redirect'      => env('GOOGLE_REDIRECT_URI'),
     ],
 
-    // ── Google Gemini AI (FREE — get key at aistudio.google.com/apikey) ───
-    // No credit card. No billing account. Just a Google account.
-    // Free tier: 15 requests/minute, 1,500 requests/day
-    // Model: gemini-3.6-flash — gemini-1.5-flash was HARD-CODED here before
-    // and is fully retired (Google's own docs: "All Gemini 1.0 models and
-    // Gemini 1.5 are already shutdown... requests return a 404 error" —
-    // confirmed via storage/logs/laravel.log: {"status":404,"key":1}).
-    // gemini-2.5-flash was considered but is itself scheduled for shutdown
-    // Oct 16 2026 — too close to rely on. gemini-3.6-flash is Google's own
-    // current example of a stable production model, no shutdown date
-    // announced as of this fix. Now reads from .env (GEMINI_MODEL) with
-    // this as the default, so the NEXT retirement is a one-line .env
-    // change, not another code deploy.
+    // Used for post-login redirects. Read via config() so it survives `php artisan config:cache`.
+    'frontend_url' => env('FRONTEND_URL', 'http://localhost:5173'),
+
+    // Set at deploy time; shown by GET /api/version.
+    'release' => [
+        'sha'       => env('APP_RELEASE'),
+        'deploy_id' => env('APP_DEPLOY_ID'),
+    ],
+
+    // Gemini model is env-driven so a retirement is a .env change, not a deploy.
+    // Billing: enable it on the Google AI Studio project that owns the keys and set a project spend cap there.
     // ── Google Gemini AI — 3-key rotation ─────────────────────────────────
     // .env must have GEMINI_KEY_1, GEMINI_KEY_2, GEMINI_KEY_3, GEMINI_KEY_COUNT=3
     // AIController reads config('services.gemini.key_1') etc.

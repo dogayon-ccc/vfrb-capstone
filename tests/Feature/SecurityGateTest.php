@@ -23,13 +23,16 @@ class SecurityGateTest extends TestCase
 
     private function design(int $sourceOrderId): int
     {
-        return DB::table('designs')->insertGetId([
+        $id = DB::table('designs')->insertGetId([
             'source_order_id' => $sourceOrderId,
             'design_name'     => 'sec-test',
             'garment_type'    => 'Polo Shirt',
             'created_at'      => now(),
             'updated_at'      => now(),
         ]);
+        // Ownership is orders.design_id (what archiveCompletedDesign sets), not designs.source_order_id.
+        DB::table('orders')->where('order_id', $sourceOrderId)->update(['design_id' => $id]);
+        return $id;
     }
 
     public function test_customer_reads_own_order_but_not_another_customers(): void

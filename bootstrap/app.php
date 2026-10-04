@@ -11,9 +11,9 @@
 //   - statefulApi()     → DISABLED (causes 419 with Sanctum token auth)
 //
 // Task EE additions:
-//   - trustProxies enabled for Railway.app load balancer
-//   - ValidationException → 422 JSON (explicit for Railway production env)
-//   - ModelNotFoundException → 404 JSON (explicit for Railway production env)
+//   - trustProxies enabled for the reverse proxy in front of the app (Cloudflare / Hostinger)
+//   - ValidationException → 422 JSON (explicit for production)
+//   - ModelNotFoundException → 404 JSON (explicit for production)
 //
 // BUG FIX (Aug 17 2026): redirectGuestsTo(fn () => null) added — see comment
 // below. Fixes "Route [login] not defined" 500 crash on unauthenticated
@@ -46,12 +46,11 @@ return Application::configure(basePath: dirname(__DIR__))
             \App\Http\Middleware\SanitizeInput::class,
         ]);
 
-        // ── Trust proxies — REQUIRED for Railway.app ─────────────────────────
-        // Railway sits behind a load balancer. Without trustProxies:
-        //   - HTTPS detection breaks (HTTP_X_FORWARDED_PROTO not trusted)
-        //   - IP-based rate limiting uses load balancer IP (not client IP)
-        //   - APP_URL generation produces http:// instead of https://
-        // '*' trusts all proxies — safe because Railway controls the network.
+        // -- Trust proxies ----------------------------------------------------
+        // The app sits behind Cloudflare and the host's web server. Without this, HTTPS detection,
+        // generated URLs and per-IP throttling see the proxy instead of the visitor.
+        // '*' is the usual setting behind Cloudflare; the trade-off is that a client who can reach the
+        // origin directly could forge X-Forwarded-For, so keep the origin behind Cloudflare.
         $middleware->trustProxies(at: '*');
 
         // ── statefulApi() DISABLED ────────────────────────────────────────────
@@ -102,8 +101,8 @@ return Application::configure(basePath: dirname(__DIR__))
 
         // ── Global JSON error handler for all API routes ──────────────────────
         // Without this, 404s and 500s on /api/* return HTML (Vite error overlay,
-        // or Railway's nginx 502 page) which React JSON.parse() crashes on.
-        // In production (Railway): 500 messages are sanitized to prevent info leak.
+        // or a proxy's 502 page) which React JSON.parse() crashes on.
+        // In production: 500 messages are sanitized to prevent info leak.
         $exceptions->render(function (\Throwable $e, $request) {
 
             // AuthenticationException already handled above — skip

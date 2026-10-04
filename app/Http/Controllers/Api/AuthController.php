@@ -208,7 +208,7 @@ class AuthController extends Controller
     // This is the one thing this method must never get wrong.
     public function googleCallback()
     {
-        $frontend = rtrim(env('FRONTEND_URL', 'http://localhost:5173'), '/');
+        $frontend = rtrim(config('services.frontend_url'), '/');
 
         try {
             $googleUser = Socialite::driver('google')->user();
