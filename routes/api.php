@@ -345,7 +345,6 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::post('/output-logs',                  [OutputLogController::class, 'store'])->middleware('jobfn:production');
     Route::get('/output-logs',                   [OutputLogController::class, 'index'])->middleware('jobfn:production');
     Route::get('/output-logs/{id}',              [OutputLogController::class, 'show'])->middleware('jobfn:production');
-    Route::delete('/output-logs/{id}',           [OutputLogController::class, 'destroy'])->middleware('jobfn:production');
 
     // ── Inventory ─────────────────────────────────────────────────
     // Inventory.jsx: GET /api/admin/inventory

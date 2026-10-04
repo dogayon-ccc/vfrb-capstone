@@ -64,6 +64,10 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
+        if (in_array($role, ['staff', 'manager'], true) && is_null($user->email_verified_at)) {
+            return response()->json(['message' => 'This account has been deactivated.'], 403);
+        }
+
         $token = $this->createToken($user->user_id);
 
         return response()->json([
@@ -89,6 +93,10 @@ class AuthController extends Controller
         }
 
         $role = $this->getRoleName($user->user_id);
+
+        if (in_array($role, ['staff', 'manager'], true) && is_null($user->email_verified_at)) {
+            return response()->json(['message' => 'This account has been deactivated.'], 403);
+        }
 
         // Admin portal: only staff and manager may log in here
         if (!in_array($role, ['staff', 'manager'])) {

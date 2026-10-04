@@ -28,6 +28,12 @@ class AIController extends Controller
     // AI LAYER 1 — Raw Material Recommendation
     // POST /api/customer/ai/recommend-materials
     // =========================================================================
+    private function materialsLocked(Order $order): bool
+    {
+        return in_array($order->status, ['completed', 'cancelled'], true)
+            || MaterialRecommendation::where('order_id', $order->order_id)->whereNotNull('issued_at')->exists();
+    }
+
     public function recommendMaterials(Request $request)
     {
         $request->validate(['order_id' => 'required|integer']);
@@ -36,6 +42,10 @@ class AIController extends Controller
         $order = Order::where('order_id', $request->order_id)
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
+
+        if ($this->materialsLocked($order)) {
+            return response()->json(['message' => 'Materials for this order are locked.'], 409);
+        }
 
         // Atomic claim: a second concurrent request for the same order (double-click, retry, dev double-mount)
         // must not start another Gemini call that races on the delete+insert below. A 'generating' claim
@@ -193,6 +203,10 @@ class AIController extends Controller
         $order = Order::where('order_id', $orderId)
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
+
+        if ($this->materialsLocked($order)) {
+            return response()->json(['message' => 'Materials for this order are locked.'], 409);
+        }
 
         $catalog = \App\Models\Material::whereIn('material_id', $request->material_ids)->get()->keyBy('material_id');
 
@@ -496,7 +510,7 @@ PROMPT;
     // reply rather than a JSON config.
     private function describeDesignChat(Request $request)
     {
-        $request->validate(['prompt' => 'required|string|max:500']);
+        $request->validate(['prompt' => 'required|string|max:500', 'chat_context' => 'nullable|string|max:12000']);
 
         // chat_context already carries the system prompt + conversation
         // history, built client-side in AIDesignChat.jsx — pass it through

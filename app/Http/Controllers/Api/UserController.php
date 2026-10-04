@@ -70,7 +70,7 @@ class UserController extends Controller
                 ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
                 ->where('model_has_roles.model_id', $user->user_id)
                 ->value('roles.name') ?? 'staff';
-            $user->is_active = !is_null($user->email_verified_at) || true; // all created users are active
+            $user->is_active = !is_null($user->email_verified_at);
             return $user;
         });
 
@@ -249,6 +249,16 @@ class UserController extends Controller
             return response()->json(['message' => 'You cannot deactivate your own account.'], 422);
         }
 
+        $isStaffOrManager = DB::table('model_has_roles')
+            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('model_has_roles.model_type', 'App\\Models\\User')
+            ->where('model_has_roles.model_id', $id)
+            ->whereIn('roles.name', ['staff', 'manager'])
+            ->exists();
+        if (!$isStaffOrManager) {
+            return response()->json(['message' => 'Only staff and manager accounts can be activated or deactivated.'], 422);
+        }
+
         // Toggle: if email_verified_at is set → clear it (deactivate); if null → set it (activate)
         $newVerified = $user->email_verified_at ? null : now();
 
@@ -258,6 +268,13 @@ class UserController extends Controller
                 'email_verified_at' => $newVerified,
                 'updated_at'        => now(),
             ]);
+
+        if (!$newVerified) {
+            DB::table('personal_access_tokens')
+                ->where('tokenable_type', 'App\\Models\\User')
+                ->where('tokenable_id', $id)
+                ->delete();
+        }
 
         return response()->json([
             'message'   => $newVerified ? 'User activated.' : 'User deactivated.',

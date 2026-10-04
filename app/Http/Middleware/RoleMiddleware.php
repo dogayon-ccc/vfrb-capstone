@@ -38,6 +38,12 @@ class RoleMiddleware
             $userRole = 'customer';
         }
 
+        // Staff/manager accounts are auto-verified on creation, so a null email_verified_at
+        // means a manager deactivated them (UserController::adminToggle).
+        if (in_array($userRole, ['staff', 'manager'], true) && is_null($user->email_verified_at)) {
+            return response()->json(['message' => 'This account has been deactivated.'], 403);
+        }
+
         foreach ($roles as $roleGroup) {
             $allowed = explode('|', $roleGroup);
             if (in_array($userRole, $allowed)) {
