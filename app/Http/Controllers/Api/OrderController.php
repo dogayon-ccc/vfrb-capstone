@@ -550,6 +550,13 @@ class OrderController extends Controller
             ->orderByDesc('date_processed')
             ->get();
 
+        // Customer-submitted size breakdown (measurements.order_id, size_label, qty).
+        // Read-only; lets admin review what was actually ordered per size.
+        $order->measurements = DB::table('measurements')
+            ->where('order_id', $id)
+            ->orderBy('measurement_id')
+            ->get(['measurement_id', 'type', 'size_label', 'qty', 'neck', 'chest', 'waist', 'hip', 'sleeve_length']);
+
         return $order;
     }
 
