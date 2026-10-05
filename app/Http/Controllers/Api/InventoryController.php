@@ -93,6 +93,7 @@ class InventoryController extends Controller
     public function store(Request $request)
     {
         $request->validate([
+            'material_code'     => ['nullable', 'string', 'max:20', 'regex:' . \App\Models\Material::CODE_REGEX, 'unique:materials,material_code'],
             'material_name'     => 'required|string|max:100',
             'category'          => 'required|string|max:50',
             'unit'              => 'required|string|max:20',
@@ -102,6 +103,7 @@ class InventoryController extends Controller
         ]);
 
         $id = DB::table('materials')->insertGetId([
+            'material_code'     => $request->input('material_code') ?: \App\Models\Material::nextCode($request->input('category')),
             'material_name'     => $request->input('material_name'),
             'category'          => $request->input('category'),
             'unit'              => $request->input('unit'),
@@ -132,6 +134,7 @@ class InventoryController extends Controller
         }
 
         $request->validate([
+            'material_code'     => ['sometimes', 'nullable', 'string', 'max:20', 'regex:' . \App\Models\Material::CODE_REGEX, "unique:materials,material_code,{$id},material_id"],
             'material_name'     => 'sometimes|string|max:100',
             'category'          => 'sometimes|string|max:50',
             'unit'              => 'sometimes|string|max:20',
@@ -141,7 +144,7 @@ class InventoryController extends Controller
         ]);
 
         $fields = collect($request->only([
-            'material_name', 'category', 'unit',
+            'material_code', 'material_name', 'category', 'unit',
             'quantity_in_stock', 'reorder_threshold', 'unit_cost',
         ]))->filter(fn($v) => !is_null($v))->toArray();
 
