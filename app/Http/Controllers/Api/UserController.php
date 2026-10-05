@@ -107,7 +107,7 @@ class UserController extends Controller
             ->whereIn('users.user_id', $customerIds)
             ->select(
                 'users.user_id', 'users.name', 'users.email', 'users.contact_number',
-                'users.organization_name', 'users.address', 'users.client_type',
+                'users.organization_name', 'users.business_registration_number', 'users.address', 'users.client_type',
                 'users.email_verified_at', 'users.created_at',
                 DB::raw('COALESCE(oa.orders_count, 0) as orders_count'),
                 DB::raw('COALESCE(oa.active_orders, 0) as active_orders'),
