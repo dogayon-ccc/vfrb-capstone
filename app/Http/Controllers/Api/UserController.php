@@ -5,7 +5,7 @@
 // SCHEMA VERIFIED against vfrb_db.sql:
 //   users: user_id (PK), name, email, password, google_id, avatar,
 //          contact_number, organization_name, address,
-//          client_type (enum: individual|corporate|school|medical),
+//          client_type (enum: corporate|school|government|medical|organization; legacy: individual),
 //          email_verified_at, remember_token
 //   model_has_roles: role_id, model_type ('App\Models\User'), model_id
 //   roles: id, name (customer|staff|manager)
@@ -315,7 +315,7 @@ class UserController extends Controller
             'contact_number'    => 'nullable|string|max:20',
             'address'           => 'nullable|string|max:255',
             'organization_name' => 'nullable|string|max:100',
-            'client_type'       => 'nullable|in:individual,corporate,school,medical',
+            'client_type'       => 'nullable|in:individual,corporate,school,medical,government,organization',
         ]);
 
         DB::table('users')

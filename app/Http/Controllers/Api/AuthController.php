@@ -5,7 +5,7 @@
 // SCHEMA VERIFIED against vfrb_db.sql:
 //   users: user_id (PK), name, email, password, google_id, avatar,
 //          contact_number, organization_name, address,
-//          client_type (enum: individual|corporate|school|medical),
+//          client_type (enum: corporate|school|government|medical|organization; legacy: individual),
 //          email_verified_at, remember_token
 //   password_reset_tokens: email, token, created_at
 //   model_has_roles: role_id, model_type, model_id
@@ -124,8 +124,8 @@ class AuthController extends Controller
             'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
             'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
             'contact_number'        => 'nullable|string|max:20',
-            'organization_name'     => 'nullable|string|max:100',
-            'client_type'           => 'nullable|in:individual,corporate,school,medical',
+            'organization_name'     => 'required|string|max:100',
+            'client_type'           => 'required|in:corporate,school,government,medical,organization',
         ], [
             'email.unique' => 'An account with this email already exists.',
             'email.email'  => 'Please enter a real, valid email address.',
@@ -138,7 +138,7 @@ class AuthController extends Controller
             'password'          => Hash::make($request->input('password')),
             'contact_number'    => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
-            'client_type'       => $request->input('client_type', 'individual'),
+            'client_type'       => $request->input('client_type'),
             'created_at'        => now(),
             'updated_at'        => now(),
         ]);
@@ -265,7 +265,7 @@ class AuthController extends Controller
                 'password'          => Hash::make(Str::random(40)),
                 'google_id'         => $googleUser->getId(),
                 'avatar'            => $googleUser->getAvatar(),
-                'client_type'       => 'individual',
+                'client_type'       => null,
                 'email_verified_at' => now(),
                 'created_at'        => now(),
                 'updated_at'        => now(),
