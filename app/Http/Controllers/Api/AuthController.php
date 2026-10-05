@@ -126,6 +126,7 @@ class AuthController extends Controller
             'contact_number'        => 'nullable|string|max:20',
             'organization_name'     => 'required|string|max:100',
             'client_type'           => 'required|in:corporate,school,government,medical,organization',
+            'business_registration_number' => ['nullable', 'string', 'max:30', 'regex:/^[A-Za-z0-9][A-Za-z0-9 \-]*$/'],
         ], [
             'email.unique' => 'An account with this email already exists.',
             'email.email'  => 'Please enter a real, valid email address.',
@@ -138,6 +139,7 @@ class AuthController extends Controller
             'password'          => Hash::make($request->input('password')),
             'contact_number'    => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
+            'business_registration_number' => $request->input('business_registration_number') ?: null,
             'client_type'       => $request->input('client_type'),
             'created_at'        => now(),
             'updated_at'        => now(),
