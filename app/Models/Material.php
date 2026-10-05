@@ -10,7 +10,10 @@ class Material extends Model
 {
     protected $primaryKey = 'material_id';
 
+    public const CODE_REGEX = '/^MAT-[A-Z]{3}-\\d{3,}$/';
+
     protected $fillable = [
+        'material_code',
         'material_name',
         'category',
         'unit',
@@ -28,6 +31,21 @@ class Material extends Model
         'ai_eligible'       => 'boolean',
         'applies_to'        => 'array',
     ];
+
+    public static function categoryKey(?string $category): string
+    {
+        $letters = strtoupper(preg_replace('/[^A-Za-z]/', '', (string) $category)) ?: 'GEN';
+        return str_pad(substr($letters, 0, 3), 3, 'X');
+    }
+
+    public static function nextCode(?string $category): string
+    {
+        $key  = self::categoryKey($category);
+        $last = \DB::table('materials')->where('material_code', 'like', "MAT-{$key}-%")
+            ->orderByRaw('CAST(SUBSTRING(material_code, 9) AS UNSIGNED) DESC')->value('material_code');
+        $n = $last ? (int) substr($last, 8) + 1 : 1;
+        return sprintf('MAT-%s-%03d', $key, $n);
+    }
 
     // ── Relationships ─────────────────────────────────────────────────────────
     public function inventoryLogs()
