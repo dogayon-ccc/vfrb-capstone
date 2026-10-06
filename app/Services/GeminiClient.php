@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Log;
 class GeminiClient
 {
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
-    public function call(string $prompt, int $maxTokens = 1500): ?string
+    public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null): ?string
     {
         // GEMINI_KEY_COUNT used to gate this loop directly — if it's unset
         // or wrong on a given deploy (defaults to 1), key_2/key_3 are never
@@ -117,8 +117,8 @@ class GeminiClient
 
                 return $text !== '' ? $text : null;
 
-            } catch (\Exception $e) {
-                Log::error('Gemini exception', ['msg' => $e->getMessage(), 'key' => $keyNum]);
+            } catch (\Throwable $e) {
+                Log::error('Gemini exception', ['msg' => $e->getMessage(), 'type' => get_class($e), 'key' => $keyNum]);
                 continue; // try next key rather than give up on one transient failure
             }
         }
