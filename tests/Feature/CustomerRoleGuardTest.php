@@ -3,7 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -14,13 +14,21 @@ use Tests\TestCase;
 // reverting both to 'customer'; this test is what should have caught it.
 class CustomerRoleGuardTest extends TestCase
 {
-    use RefreshDatabase;
+    use DatabaseTransactions;
+
+    private function makeUser(?string $role = null): User
+    {
+        $user = User::create(['name' => 'Guard Test', 'email' => uniqid('guard') . '@example.test', 'password' => bcrypt('secret-pass')]);
+        if ($role) {
+            Role::firstOrCreate(['name' => $role, 'guard_name' => 'web']);
+            $user->assignRole($role);
+        }
+        return $user;
+    }
 
     public function test_customer_role_is_authorized_on_customer_routes(): void
     {
-        Role::firstOrCreate(['name' => 'customer', 'guard_name' => 'web']);
-        $user = User::factory()->create();
-        $user->assignRole('customer');
+        $user = $this->makeUser('customer');
 
         $this->actingAs($user, 'sanctum')
             ->getJson('/api/customer/designs')
@@ -34,9 +42,7 @@ class CustomerRoleGuardTest extends TestCase
 
     public function test_unrelated_role_is_rejected_on_customer_routes(): void
     {
-        Role::firstOrCreate(['name' => 'manager', 'guard_name' => 'web']);
-        $user = User::factory()->create();
-        $user->assignRole('manager');
+        $user = $this->makeUser('manager');
 
         $this->actingAs($user, 'sanctum')
             ->getJson('/api/customer/designs')
@@ -46,7 +52,7 @@ class CustomerRoleGuardTest extends TestCase
     public function test_roleless_user_falls_back_to_customer_not_client(): void
     {
         // No assignRole() call — exercises RoleMiddleware's fallback path.
-        $user = User::factory()->create();
+        $user = $this->makeUser();
 
         $this->actingAs($user, 'sanctum')
             ->getJson('/api/customer/designs')

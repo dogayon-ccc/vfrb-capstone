@@ -31,10 +31,25 @@ class AIController extends Controller
     // AI LAYER 1 — Raw Material Recommendation
     // POST /api/customer/ai/recommend-materials
     // =========================================================================
+    private const LOCKED_STATUSES = ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing', 'completed', 'cancelled'];
+
     private function materialsLocked(Order $order): bool
     {
-        return in_array($order->status, ['completed', 'cancelled'], true)
-            || MaterialRecommendation::where('order_id', $order->order_id)->whereNotNull('issued_at')->exists();
+        return in_array($order->status, self::LOCKED_STATUSES, true)
+            || MaterialRecommendation::where('order_id', $order->order_id)
+                ->where(fn ($q) => $q->whereNotNull('issued_at')->orWhereNotNull('linked_at'))
+                ->exists();
+    }
+
+    private function locked()
+    {
+        return response()->json(['message' => 'Materials for this order are locked.'], 409);
+    }
+
+    private function failRecommendation(Order $order, string $message, int $status)
+    {
+        $order->update(['ai_recommendation_status' => 'failed']);
+        return response()->json(['message' => $message], $status);
     }
 
     public function recommendMaterials(Request $request)
@@ -47,12 +62,11 @@ class AIController extends Controller
                       ->firstOrFail();
 
         if ($this->materialsLocked($order)) {
-            return response()->json(['message' => 'Materials for this order are locked.'], 409);
+            return $this->locked();
         }
 
-        // Atomic claim: a second concurrent request for the same order (double-click, retry, dev double-mount)
-        // must not start another Gemini call that races on the delete+insert below. A 'generating' claim
-        // older than 2 minutes is treated as abandoned (crashed request) and may be re-claimed.
+        // Atomic claim: a concurrent request for the same order must not race on the delete+insert below.
+        // A 'generating' claim older than 2 minutes is treated as abandoned and may be re-claimed.
         $claimed = Order::where('order_id', $order->order_id)
             ->where(function ($q) {
                 $q->where('ai_recommendation_status', '!=', 'generating')
@@ -67,47 +81,44 @@ class AIController extends Controller
             return response()->json(['message' => 'Recommendation is already being generated. Please wait a moment.'], 409);
         }
 
-        // The AI only ever sees catalog rows VFRB approved for this garment (materials.ai_eligible / applies_to),
-        // and every reply is re-validated against that same list before anything is stored.
-        $catalog = \App\Models\Material::all();
-        if ($catalog->isEmpty()) {
-            $order->update(['ai_recommendation_status' => 'failed']);
-            return response()->json(['message' => 'No materials catalog configured yet.'], 422);
-        }
-
-        $eligible = $this->matcher->eligible($catalog->map->toArray()->all(), $this->garmentOf($order));
-        if (!$eligible) {
-            $order->update(['ai_recommendation_status' => 'failed']);
-            return response()->json(['message' => 'No approved materials are configured for this garment yet.'], 422);
-        }
-
-        $fabricPrefs = \App\Models\CustomerFabricPreference::where('user_id', $user->user_id)
-            ->with('material:material_id,material_name')
-            ->get();
-
-        $prompt = $this->buildPrompt($order, $eligible, $fabricPrefs);
-        // 3000: thinking tokens on gemini-3.x share this budget with the JSON answer (BUG-008).
-        $aiText = $this->gemini->call($prompt, 3000, $this->matcher->schema($eligible));
-
-        if (!$aiText) {
-            $order->update(['ai_recommendation_status' => 'failed']);
-            return response()->json(['message' => 'AI service unavailable. Try again.'], 503);
-        }
-
-        $decoded = json_decode(trim(preg_replace('/```json|```/i', '', $aiText)), true);
-        $result  = $this->matcher->normalize(is_array($decoded) ? $decoded : null, $eligible);
-
-        if (!$result['selections']) {
-            Log::warning('Gemini material-rec produced no usable selection', [
-                'order_id' => $order->order_id,
-                'dropped'  => $result['dropped'],
-                'raw'      => $aiText,
-            ]);
-            $order->update(['ai_recommendation_status' => 'failed']);
-            return response()->json(['message' => 'AI returned no usable materials. Try again.'], 422);
-        }
-
         try {
+            // The AI only sees catalog rows VFRB approved for this garment; every reply is re-validated against that list.
+            $catalog = \App\Models\Material::all();
+            if ($catalog->isEmpty()) {
+                return $this->failRecommendation($order, 'No materials catalog configured yet.', 422);
+            }
+
+            $eligible = $this->matcher->eligible($catalog->map->toArray()->all(), $this->garmentOf($order));
+            if (!$eligible) {
+                return $this->failRecommendation($order, 'No approved materials are configured for this garment yet.', 422);
+            }
+
+            $fabricPrefs = \App\Models\CustomerFabricPreference::where('user_id', $user->user_id)
+                ->with('material:material_id,material_name')
+                ->get();
+
+            // 3000: thinking tokens on gemini-3.x share this budget with the JSON answer.
+            $aiText = $this->gemini->call(
+                $this->buildPrompt($order, $eligible, $fabricPrefs),
+                3000,
+                $this->matcher->schema($eligible)
+            );
+            if (!$aiText) {
+                return $this->failRecommendation($order, 'AI service unavailable. Try again.', 503);
+            }
+
+            $decoded = json_decode(trim(preg_replace('/```json|```/i', '', $aiText)), true);
+            $result  = $this->matcher->normalize(is_array($decoded) ? $decoded : null, $eligible);
+
+            if (!$result['selections']) {
+                Log::warning('Gemini material-rec produced no usable selection', [
+                    'order_id' => $order->order_id,
+                    'dropped'  => $result['dropped'],
+                    'raw'      => $aiText,
+                ]);
+                return $this->failRecommendation($order, 'AI returned no usable materials. Try again.', 502);
+            }
+
             DB::transaction(function () use ($order, $result, $eligible) {
                 MaterialRecommendation::where('order_id', $order->order_id)->delete();
                 foreach ($result['selections'] as $i => $sel) {
@@ -136,13 +147,12 @@ class AIController extends Controller
 
             return response()->json([
                 'recommendation' => $result['narration'],
-                'materials'      => MaterialRecommendation::where('order_id', $order->order_id)->orderBy('display_order')->get(),
+                'materials'      => MaterialRecommendation::where('order_id', $order->order_id)
+                    ->orderBy('display_order')->get(MaterialRecommendation::CUSTOMER_COLUMNS),
             ]);
         } catch (\Throwable $e) {
-            // Without this, an exception after the claim leaves the order on 'generating' until the 2-min expiry.
-            Log::error('Material recommendation save failed', ['order_id' => $order->order_id, 'msg' => $e->getMessage()]);
-            $order->update(['ai_recommendation_status' => 'failed']);
-            return response()->json(['message' => 'Could not save recommendations. Try again.'], 500);
+            Log::error('Material recommendation failed', ['order_id' => $order->order_id, 'msg' => $e->getMessage()]);
+            return $this->failRecommendation($order, 'Could not generate recommendations. Try again.', 500);
         }
     }
 
@@ -180,7 +190,7 @@ class AIController extends Controller
                       ->firstOrFail();
 
         if ($this->materialsLocked($order)) {
-            return response()->json(['message' => 'Materials for this order are locked.'], 409);
+            return $this->locked();
         }
 
         $catalog = \App\Models\Material::whereIn('material_id', $request->material_ids)->get()->keyBy('material_id');
@@ -244,6 +254,10 @@ class AIController extends Controller
         $order = Order::where('order_id', $orderId)
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
+
+        if ($this->materialsLocked($order)) {
+            return $this->locked();
+        }
 
         // BUG FIX (pre-deployment audit): this update is correctly scoped to
         // status='pending', which makes the DB write itself idempotent — a
@@ -326,6 +340,10 @@ class AIController extends Controller
         $order = Order::where('order_id', $orderId)
                       ->where('user_id', $user->user_id)
                       ->firstOrFail();
+
+        if ($this->materialsLocked($order)) {
+            return $this->locked();
+        }
 
         // BUG FIX (pre-deployment audit): same idempotency + $fillable issue
         // as acceptRecommendation() — gate on affected-row count and use
@@ -450,7 +468,7 @@ Customer described: "{$request->description}"
 Return ONLY valid JSON (no markdown, no backticks):
 {
   "garmentType": "Top" or "Bottom",
-  "category": "Medical / Scrubs" | "School Uniform" | "Corporate" | "PE/Sports",
+  "category": "Medical / Scrubs" | "School Uniform" | "Corporate" | "Hospitality / Service" | "Industrial / Work",
   "collarType": "V-Neck" | "Polo Collar" | "Round Neck" | "Mandarin",
   "sleeveType": "Short Sleeve" | "Long Sleeve" | "3/4 Sleeve" | "Sleeveless",
   "pocketType": "none" | "left_chest" | "side_x2" | "both",
@@ -462,21 +480,63 @@ Return ONLY valid JSON (no markdown, no backticks):
 }
 PROMPT;
 
-        // BUG-008: same thinking-token headroom issue as recommendMaterials()
-        // — was 400, too tight on gemini-3.6-flash. Not confirmed broken by a
-        // logged failure yet, but it shares callGemini() and is even smaller,
-        // so it's exposed to the identical failure mode. Raised preventively.
         $text = $this->gemini->call($prompt, 1000);
-        if (!$text) return response()->json(['error' => 'AI unavailable'], 503);
+        if (!$text) {
+            return response()->json(['error' => 'AI unavailable', 'message' => 'AI unavailable'], 503);
+        }
 
-        $clean  = preg_replace('/```json|```/i', '', $text);
-        $config = json_decode(trim($clean), true);
-        if (!$config) return response()->json(['error' => 'Parse error'], 422);
+        $config = $this->cleanDesignConfig(json_decode(trim(preg_replace('/```json|```/i', '', $text)), true));
+        if (!$config) {
+            return response()->json(['error' => 'AI returned an unusable design. Try rephrasing.', 'message' => 'AI returned an unusable design. Try rephrasing.'], 502);
+        }
 
         return response()->json([
             'config'      => $config,
             'description' => $config['description_summary'] ?? $request->description,
         ]);
+    }
+
+    private const DESIGN_ENUMS = [
+        'garmentType' => ['Top', 'Bottom'],
+        'category'    => ['Medical / Scrubs', 'School Uniform', 'Corporate', 'Hospitality / Service', 'Industrial / Work'],
+        'collarType'  => ['V-Neck', 'Polo Collar', 'Round Neck', 'Mandarin'],
+        'sleeveType'  => ['Short Sleeve', 'Long Sleeve', '3/4 Sleeve', 'Sleeveless'],
+        'pocketType'  => ['none', 'left_chest', 'side_x2', 'both'],
+        'pattern'     => ['solid', 'h-stripe', 'v-stripe', 'pinstripe', 'grid', 'dots'],
+    ];
+
+    // Keeps only values the prompt allows; null when nothing usable survives.
+    private function cleanDesignConfig($raw): ?array
+    {
+        if (!is_array($raw)) {
+            return null;
+        }
+
+        $out = [];
+        foreach (self::DESIGN_ENUMS as $key => $allowed) {
+            if (isset($raw[$key]) && in_array($raw[$key], $allowed, true)) {
+                $out[$key] = $raw[$key];
+            }
+        }
+
+        $hex = fn ($v) => is_string($v) && preg_match('/^#[0-9a-fA-F]{6}$/', $v) ? $v : null;
+        $colors = array_filter([
+            'body'   => $hex($raw['colors']['body'] ?? null),
+            'accent' => $hex($raw['colors']['accent'] ?? null),
+        ]);
+        if ($colors) {
+            $out['colors'] = $colors;
+        }
+        if (!$out) {
+            return null;
+        }
+
+        $clean = fn ($v, int $max) => is_string($v) && trim($v) !== '' ? mb_substr(strip_tags(trim($v)), 0, $max) : null;
+        $out['textContent']         = $clean($raw['textContent'] ?? null, 40);
+        $out['textBold']            = ($raw['textBold'] ?? false) === true;
+        $out['description_summary'] = $clean($raw['description_summary'] ?? null, 200);
+
+        return $out;
     }
 
     // Chat-mode branch of describeDesign(): free-form Q&A for the floating
@@ -509,8 +569,9 @@ PROMPT;
     {
         $now       = now();
         $thisMonth = Order::whereMonth('created_at', $now->month)->whereYear('created_at', $now->year)->count();
-        $lastMonth = Order::whereMonth('created_at', $now->copy()->subMonth()->month)->count();
-        $revenue   = \App\Models\SalesTransaction::whereMonth('created_at', $now->month)->sum('amount_paid');
+        $prev      = $now->copy()->subMonthNoOverflow();
+        $lastMonth = Order::whereMonth('created_at', $prev->month)->whereYear('created_at', $prev->year)->count();
+        $revenue   = \App\Models\SalesTransaction::whereMonth('created_at', $now->month)->whereYear('created_at', $now->year)->sum('amount_paid');
         $lowStock  = \App\Models\Material::whereRaw('quantity_in_stock <= reorder_threshold')->count();
         $pending   = Order::where('status', 'pending')->count();
         $accepted  = Order::where('ai_recommendation_status', 'accepted')->count();
@@ -530,13 +591,16 @@ Write professionally. Note what needs immediate attention and one actionable rec
 No bullet points.
 PROMPT;
 
-        // BUG-008: same reasoning as describeDesign() above — raised
-        // preventively for the same thinking-token headroom issue.
         $insight = $this->gemini->call($prompt, 800);
+        $metrics = compact('thisMonth', 'lastMonth', 'trend', 'revenue', 'lowStock', 'pending', 'accepted');
+
+        if (!$insight) {
+            return response()->json(['message' => 'AI summary unavailable.', 'insight' => null, 'metrics' => $metrics], 503);
+        }
 
         return response()->json([
-            'insight'  => $insight ?? 'Analytics summary unavailable.',
-            'metrics'  => compact('thisMonth','lastMonth','trend','revenue','lowStock','pending','accepted'),
+            'insight'      => $insight,
+            'metrics'      => $metrics,
             'generated_at' => now()->toIso8601String(),
         ]);
     }

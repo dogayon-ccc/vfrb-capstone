@@ -63,14 +63,14 @@ class OrderLifecycleTest extends TestCase
         $this->assertSame('pending', $row->status);
 
         $detail = $this->getJson("/api/customer/orders/{$id}")->assertOk();
-        $cfg = $detail->json('studio_config');
+        $cfg = $detail->json('order.studio_config');
         $this->assertSame('Polo Shirt', $cfg['garment']);
         $this->assertSame('#1e3a5f', $cfg['colors']['body']);
         $this->assertSame('#c8a96e', $cfg['colors']['collar']);
         $this->assertSame('FRONT-MARK', $cfg['frontOverlays'][0]['text']);
         $this->assertSame('BACK-MARK', $cfg['backOverlays'][0]['text']);
         $this->assertArrayNotHasKey('previewPng', $cfg);
-        $this->assertNotEmpty($detail->json('design_preview_url'));
+        $this->assertNotEmpty($detail->json('order.design_preview_url'));
     }
 
     public function test_size_breakdown_is_stored_per_size_under_the_authenticated_user(): void
@@ -92,6 +92,46 @@ class OrderLifecycleTest extends TestCase
         $this->getJson("/api/customer/orders/{$id}")->assertNotFound();
         $ids = collect($this->getJson('/api/customer/orders?per_page=100')->json('data'))->pluck('order_id')->all();
         $this->assertNotContains($id, $ids);
+    }
+
+    public function test_negative_or_fractional_size_quantities_are_rejected_and_nothing_is_written(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $before = DB::table('orders')->count();
+
+        foreach ([['S' => 150, 'M' => -50], ['S' => 50.5, 'M' => 49.5], ['S' => 'abc', 'M' => 100]] as $sizes) {
+            $this->post('/api/customer/orders', $this->payload(['sizes' => json_encode($sizes)]), ['Accept' => 'application/json'])->assertStatus(422);
+        }
+        $this->post('/api/customer/orders', $this->payload(['sizes' => 'not json']), ['Accept' => 'application/json'])->assertStatus(422);
+
+        $this->assertSame($before, DB::table('orders')->count());
+    }
+
+    public function test_unreadable_studio_design_is_rejected_instead_of_silently_dropped(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $before = DB::table('orders')->count();
+
+        foreach (['{broken json', '"just a string"', '42'] as $bad) {
+            $this->post('/api/customer/orders', $this->payload(['studio_config' => $bad]), ['Accept' => 'application/json'])->assertStatus(422);
+        }
+        $this->assertSame($before, DB::table('orders')->count());
+
+        // The rejections released the debounce lock, so a corrected resubmit goes straight through.
+        $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201);
+    }
+
+    public function test_upload_only_order_without_a_studio_design_still_submits(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+
+        $res = $this->post('/api/customer/orders', $this->payload(['studio_config' => '']), ['Accept' => 'application/json']);
+
+        $res->assertStatus(201);
+        $this->assertNull(DB::table('orders')->where('order_id', $res->json('order.order_id'))->value('studio_config'));
     }
 
     public function test_size_mismatch_is_rejected_and_nothing_is_written(): void

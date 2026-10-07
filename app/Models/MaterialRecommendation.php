@@ -6,6 +6,11 @@ use Illuminate\Database\Eloquent\Model;
 class MaterialRecommendation extends Model
 {
     protected $primaryKey = 'rec_id';
+
+    public const CUSTOMER_COLUMNS = [
+        'rec_id','order_id','material_id','material_name','category','unit','ai_note',
+        'display_order','status','customer_accepted','accepted_at','customer_note','created_at','updated_at',
+    ];
     // NOTE (Aug 28 2026 scope correction): estimated_range/total_estimated_range
     // removed from $fillable — no formula/BOM exists in this system, nothing
     // computes or writes these anymore. DB columns intentionally left in

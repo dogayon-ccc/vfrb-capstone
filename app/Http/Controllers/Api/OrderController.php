@@ -16,9 +16,7 @@
 //   measurements: measurement_id, user_id, order_id, type, size_label,
 //     neck, chest, waist, hip, sleeve_length
 //
-//   material_recommendations: rec_id, order_id, material_name, category,
-//     estimated_range, total_estimated_range, unit, ai_note,
-//     display_order, status, customer_accepted, accepted_at
+//   material_recommendations (customer view = MaterialRecommendation::CUSTOMER_COLUMNS; no quantity columns)
 //
 // DELETED FOREVER: material_formulas, order_size_breakdown — zero references here.
 //
@@ -143,7 +141,7 @@ class OrderController extends Controller
         $recommendations = DB::table('material_recommendations')
             ->where('order_id', $id)
             ->orderBy('display_order')
-            ->get();
+            ->get(\App\Models\MaterialRecommendation::CUSTOMER_COLUMNS);
 
         // Attach production tracking per stage
         $tracking = DB::table('order_production_tracking')
@@ -234,7 +232,19 @@ class OrderController extends Controller
         // a mismatched breakdown never reaches the database at all.
         $sizingType = $request->input('sizing_type', 'standard');
         $sizesInput = json_decode($request->input('sizes', '{}'), true);
-        if ($sizingType === 'standard' && is_array($sizesInput) && !empty($sizesInput)) {
+
+        $invalid = null;
+        if (!is_array($sizesInput) || collect($sizesInput)->contains(fn ($q) => !is_numeric($q) || $q < 0 || (int) $q != $q)) {
+            $invalid = 'Size breakdown must be a JSON object of whole, non-negative quantities.';
+        } elseif ($request->filled('studio_config') && !is_array(json_decode($request->input('studio_config'), true))) {
+            $invalid = 'The saved design could not be read. Re-open it in Design Studio and try again.';
+        }
+        if ($invalid) {
+            $lock->release();
+            return response()->json(['message' => $invalid], 422);
+        }
+
+        if ($sizingType === 'standard' && !empty($sizesInput)) {
             $sizeSum = array_sum(array_map('intval', $sizesInput));
             $qtyOrdered = (int) $request->input('quantity_ordered');
             if ($sizeSum !== $qtyOrdered) {
@@ -268,14 +278,10 @@ class OrderController extends Controller
         // Parse studio_config JSON string
         $studioConfig = null;
         if ($request->filled('studio_config')) {
+            // previewPng duplicates the stored preview file; keeping it bloats a column adminIndex() decodes per row.
             $decoded = json_decode($request->input('studio_config'), true);
-            if (json_last_error() === JSON_ERROR_NONE) {
-                // previewPng is a base64 data URL of the same image now stored
-                // in $previewFilePath. Keeping both would put a ~150-500KB blob
-                // in a column adminIndex() selects and decodes on every row.
-                unset($decoded['previewPng']);
-                $studioConfig = json_encode($decoded);
-            }
+            unset($decoded['previewPng']);
+            $studioConfig = json_encode($decoded);
         }
 
         // TRANSACTION FIX (Sept 25 audit): the order insert, its two
@@ -560,6 +566,11 @@ class OrderController extends Controller
         return $order;
     }
 
+    private const ADMIN_STATUS_TRANSITIONS = [
+        'pending'   => ['confirmed', 'cancelled'],
+        'confirmed' => ['cancelled'],
+    ];
+
     // ── PATCH /api/admin/orders/{id} ─────────────────────────────────────────
     // Admin updates order status (confirm, cancel)
     public function adminUpdate(Request $request, int $id)
@@ -580,8 +591,19 @@ class OrderController extends Controller
             'agreed_total' => 'nullable|numeric|min:0',
         ]);
 
+        if (in_array($order->status, ['completed', 'cancelled'], true)) {
+            return response()->json(['message' => "Order #{$id} is {$order->status} and can no longer be changed."], 409);
+        }
+
+        $target = $request->input('status');
+        if ($target !== null && $target !== $order->status
+            && !in_array($target, self::ADMIN_STATUS_TRANSITIONS[$order->status] ?? [], true)) {
+            return response()->json(['message' => "A {$order->status} order cannot be set to {$target} here. Use the production steps to advance it."], 422);
+        }
+
         $fields = collect($request->only(['status', 'negotiated_delivery_date', 'notes']))
             ->filter(fn($v) => !is_null($v))
+            ->reject(fn($v, $k) => $k === 'status' && $v === $order->status)
             ->toArray();
 
         // agreed_total is write-once: later changes go through payments.

@@ -24,7 +24,12 @@ class GeminiClient
             2 => config('services.gemini.key_2'),
             3 => config('services.gemini.key_3'),
         ]);
-        $model = config('services.gemini.model', 'gemini-1.5-flash');
+        $model = config('services.gemini.model', 'gemini-3.6-flash');
+
+        if (!$keys) {
+            Log::error('Gemini: no API keys configured');
+            return null;
+        }
 
         foreach ($keys as $keyNum => $key) {
 
@@ -74,15 +79,18 @@ class GeminiClient
                 // like 429; a genuine 4xx request-shape error (400) or a
                 // 5xx on Google's end would fail identically on every key,
                 // so those still stop the loop rather than retry pointlessly.
+                $reason = mb_substr((string) $response->json('error.message', ''), 0, 200);
+
                 if (in_array($response->status(), [429, 401, 403])) {
                     Log::warning("Gemini key #{$keyNum} failed ({$response->status()}), trying next", [
                         'status' => $response->status(),
+                        'reason' => $reason,
                     ]);
                     continue;
                 }
 
                 if (!$response->successful()) {
-                    Log::error('Gemini error', ['status' => $response->status(), 'key' => $keyNum]);
+                    Log::error('Gemini error', ['status' => $response->status(), 'key' => $keyNum, 'reason' => $reason]);
                     return null;
                 }
 
