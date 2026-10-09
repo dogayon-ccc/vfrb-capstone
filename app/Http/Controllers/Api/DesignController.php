@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\FileUrl;
 use App\Models\Design;
 use App\Models\DesignShowcaseAudit;
 use Illuminate\Http\Request;
@@ -26,7 +27,7 @@ class DesignController extends Controller
     private function resolvePhotoUrl(?string $rawPath): ?string
     {
         if (!$rawPath) return null;
-        return Storage::disk($this->designRefDisk())->url($rawPath);
+        return FileUrl::for($this->designRefDisk(), $rawPath);
     }
 
     // InspoGallery.jsx: GET /api/customer/designs

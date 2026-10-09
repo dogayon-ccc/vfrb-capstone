@@ -33,6 +33,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\FileUrl;
 use App\Models\CompanySetting;
 use App\Models\NotificationPreference;
 use Illuminate\Http\Request;
@@ -90,7 +91,7 @@ class SettingsController extends Controller
 
         return response()->json([
             'company_name'   => $settings->company_name,
-            'logo_url'       => $settings->logo_path ? Storage::disk($this->logoDisk())->url($settings->logo_path) : null,
+            'logo_url'       => FileUrl::for($this->logoDisk(), $settings->logo_path),
             'address'        => $settings->address,
             'contact_number' => $settings->contact_number,
             'contact_email'  => $settings->contact_email,
@@ -147,7 +148,7 @@ class SettingsController extends Controller
 
         return response()->json([
             'message'  => 'Logo uploaded.',
-            'logo_url' => Storage::disk($disk)->url($path),
+            'logo_url' => FileUrl::for($disk, $path),
         ]);
     }
 

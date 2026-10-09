@@ -31,6 +31,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\FileUrl;
 use App\Models\User;
 use App\Notifications\OrderStatusNotification;
 use Illuminate\Http\Request;
@@ -66,7 +67,7 @@ class OrderController extends Controller
         if (!$rawPath) {
             return null;
         }
-        return Storage::disk($this->designRefDisk())->url($rawPath);
+        return FileUrl::for($this->designRefDisk(), $rawPath);
     }
 
     // Resolves the Design Studio preview image for one order. Orders created
