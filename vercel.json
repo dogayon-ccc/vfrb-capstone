@@ -1,5 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "echo \"skip npm install (API only; composer runs in the PHP runtime)\"",
+  "buildCommand": "echo \"skip vite build (API only)\"",
+  "outputDirectory": "public",
   "functions": {
     "api/index.php": {
       "runtime": "vercel-php@0.8.0",
