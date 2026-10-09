@@ -44,6 +44,14 @@ class RoleMiddleware
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
+        // Clients confirm their email before using client features (/api/user, resend and logout stay open).
+        if ($userRole === 'customer' && is_null($user->email_verified_at)) {
+            return response()->json([
+                'message' => 'Please verify your email address to continue.',
+                'code'    => 'email_unverified',
+            ], 403);
+        }
+
         foreach ($roles as $roleGroup) {
             $allowed = explode('|', $roleGroup);
             if (in_array($userRole, $allowed)) {
