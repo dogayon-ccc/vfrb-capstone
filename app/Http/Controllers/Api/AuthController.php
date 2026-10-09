@@ -55,7 +55,7 @@ class AuthController extends Controller
         ]);
 
         $user = DB::table('users')
-            ->where('email', $request->input('email'))
+            ->whereRaw('LOWER(email) = ?', [strtolower(trim($request->input('email')))]) // Postgres compares case-sensitively
             ->first();
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
@@ -85,7 +85,7 @@ class AuthController extends Controller
         ]);
 
         $user = DB::table('users')
-            ->where('email', $request->input('email'))
+            ->whereRaw('LOWER(email) = ?', [strtolower(trim($request->input('email')))]) // Postgres compares case-sensitively
             ->first();
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
@@ -143,7 +143,7 @@ class AuthController extends Controller
             'client_type'       => $request->input('client_type'),
             'created_at'        => now(),
             'updated_at'        => now(),
-        ]);
+        ], 'user_id');
 
         // Assign customer role via Spatie model_has_roles
         $customerRoleId = DB::table('roles')->where('name', 'customer')->value('id');
@@ -227,7 +227,7 @@ class AuthController extends Controller
             ));
         }
 
-        $existing = DB::table('users')->where('email', $email)->first();
+        $existing = DB::table('users')->whereRaw('LOWER(email) = ?', [strtolower(trim($email))])->first();
 
         if ($existing) {
             $role = $this->getRoleName($existing->user_id);
@@ -271,7 +271,7 @@ class AuthController extends Controller
                 'email_verified_at' => now(),
                 'created_at'        => now(),
                 'updated_at'        => now(),
-            ]);
+            ], 'user_id');
 
             $customerRoleId = DB::table('roles')->where('name', 'customer')->value('id');
             if ($customerRoleId) {

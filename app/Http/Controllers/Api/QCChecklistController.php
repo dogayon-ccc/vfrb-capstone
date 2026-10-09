@@ -138,7 +138,7 @@ class QCChecklistController extends Controller
             'checked_at'   => now(),
             'created_at'   => now(),
             'updated_at'   => now(),
-        ]);
+        ], 'check_id');
 
         // If passed, update qc_passed_at on the order
         if ($passed) {

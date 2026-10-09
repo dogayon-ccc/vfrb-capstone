@@ -73,7 +73,7 @@ class PhysicalCountController extends Controller
             'count_date'  => $request->input('counted_at', now()->toDateString()),
             'created_at'  => now(),
             'updated_at'  => now(),
-        ]);
+        ], 'count_id');
 
         $log = DB::table('physical_count_logs')
             ->where('count_id', $id)

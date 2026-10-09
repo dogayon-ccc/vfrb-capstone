@@ -5,6 +5,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use App\Support\Sql;
 
 class Material extends Model
 {
@@ -42,7 +43,7 @@ class Material extends Model
     {
         $key  = self::categoryKey($category);
         $last = \DB::table('materials')->where('material_code', 'like', "MAT-{$key}-%")
-            ->orderByRaw('CAST(SUBSTRING(material_code, 9) AS UNSIGNED) DESC')->value('material_code');
+            ->orderByRaw(Sql::toInt('SUBSTRING(material_code, 9)') . ' DESC')->value('material_code');
         $n = $last ? (int) substr($last, 8) + 1 : 1;
         return sprintf('MAT-%s-%03d', $key, $n);
     }

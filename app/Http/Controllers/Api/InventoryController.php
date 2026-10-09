@@ -23,6 +23,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -46,7 +47,7 @@ class InventoryController extends Controller
             $query = DB::table('materials');
 
             if ($q) {
-                $query->where('material_name', 'like', "%{$q}%");
+                $query->where('material_name', Sql::like(), "%{$q}%");
             }
             if ($category) {
                 $query->where('category', $category);
@@ -112,7 +113,7 @@ class InventoryController extends Controller
             'unit_cost'         => $request->input('unit_cost'),
             'created_at'        => now(),
             'updated_at'        => now(),
-        ]);
+        ], 'material_id');
 
         Cache::forget('materials_list');
         Cache::forget('dashboard_stats');
@@ -261,12 +262,12 @@ class InventoryController extends Controller
                 'il.created_at',
                 'u.name as recorded_by_name',
                 // Nest material info so Inventory.jsx l.material?.material_name works
-                DB::raw("JSON_OBJECT(
-                    'material_id',   m.material_id,
-                    'material_name', m.material_name,
-                    'unit',          m.unit,
-                    'category',      m.category
-                ) as material")
+                DB::raw(Sql::jsonObject([
+                    'material_id'   => 'm.material_id',
+                    'material_name' => 'm.material_name',
+                    'unit'          => 'm.unit',
+                    'category'      => 'm.category',
+                ]) . ' as material')
             )
             ->orderByDesc('il.log_date')
             ->orderByDesc('il.log_id')

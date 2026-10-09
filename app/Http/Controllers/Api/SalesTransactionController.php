@@ -22,6 +22,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -54,9 +55,9 @@ class SalesTransactionController extends Controller
 
         if ($search) {
             $query->where(function ($q) use ($search) {
-                $q->where('users.name', 'like', "%{$search}%")
-                  ->orWhere('users.organization_name', 'like', "%{$search}%")
-                  ->orWhere('sales_transactions.or_number', 'like', "%{$search}%");
+                $q->where('users.name', Sql::like(), "%{$search}%")
+                  ->orWhere('users.organization_name', Sql::like(), "%{$search}%")
+                  ->orWhere('sales_transactions.or_number', Sql::like(), "%{$search}%");
             });
         }
 

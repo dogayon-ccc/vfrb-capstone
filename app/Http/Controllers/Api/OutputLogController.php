@@ -175,7 +175,7 @@ class OutputLogController extends Controller
                 DB::raw('MAX(log_date)         as last_logged')
             )
             ->groupBy('stage')
-            ->orderByRaw("FIELD(stage,'pattern','segregation','cutting','sewing','qc','pressing','packing')")
+            ->orderByRaw("CASE stage WHEN 'pattern' THEN 1 WHEN 'segregation' THEN 2 WHEN 'cutting' THEN 3 WHEN 'sewing' THEN 4 WHEN 'qc' THEN 5 WHEN 'pressing' THEN 6 WHEN 'packing' THEN 7 END")
             ->get();
 
         return response()->json([

@@ -32,6 +32,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\Sql;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Cache;
 
@@ -82,14 +83,14 @@ class AdminReportController extends Controller
             // ── 6-month order trends ──────────────────────────────────────────
             $trends = DB::table('orders')
                 ->selectRaw("
-                    DATE_FORMAT(created_at,'%b %Y') as month,
-                    DATE_FORMAT(created_at,'%Y%m')  as sort_key,
+                    " . Sql::monthLabel('created_at') . " as month,
+                    " . Sql::monthKey('created_at') . "  as sort_key,
                     COUNT(*) as orders,
                     SUM(quantity_ordered) as pieces,
                     SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed
                 ")
                 ->where('created_at', '>=', now()->subMonths(6))
-                ->groupByRaw("DATE_FORMAT(created_at,'%b %Y'), DATE_FORMAT(created_at,'%Y%m')")
+                ->groupByRaw(Sql::monthLabel('created_at') . ", " . Sql::monthKey('created_at'))
                 ->orderBy('sort_key')
                 ->get()
                 ->map(fn($r) => [
@@ -172,8 +173,8 @@ class AdminReportController extends Controller
     {
         $txns = DB::table('sales_transactions')
             ->selectRaw("
-                DATE_FORMAT(payment_date,'%b %Y') as month,
-                DATE_FORMAT(payment_date,'%Y%m')  as sort_key,
+                " . Sql::monthLabel('payment_date') . " as month,
+                " . Sql::monthKey('payment_date') . "  as sort_key,
                 SUM(amount_paid)  as collected,
                 SUM(amount_total) as billed,
                 SUM(balance_due)  as outstanding,
@@ -181,7 +182,7 @@ class AdminReportController extends Controller
             ")
             ->whereNotNull('payment_date')
             ->where('payment_date', '>=', now()->subMonths(6))
-            ->groupByRaw("DATE_FORMAT(payment_date,'%b %Y'), DATE_FORMAT(payment_date,'%Y%m')")
+            ->groupByRaw(Sql::monthLabel('payment_date') . ", " . Sql::monthKey('payment_date'))
             ->orderBy('sort_key')
             ->get()
             ->map(fn($r) => [

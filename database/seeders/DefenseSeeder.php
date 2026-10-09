@@ -480,7 +480,7 @@ class DefenseSeeder extends Seeder
             $orderId = DB::table('orders')->insertGetId(array_merge($orderData, [
                 'created_at' => now()->subDays(rand(1, 14)),
                 'updated_at' => now(),
-            ]));
+            ]), 'order_id');
 
             $orderIds[] = ['id' => $orderId, 'status' => $orderData['status'], 'qty' => $orderData['quantity_ordered']];
             $this->command->line("  ✅ Order #{$orderId} — {$orderData['status']} — {$orderData['garment_type']} ({$orderData['color']})");

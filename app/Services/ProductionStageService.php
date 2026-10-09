@@ -178,7 +178,7 @@ class ProductionStageService
                 'notes'            => $notes,
                 'created_at'       => now(),
                 'updated_at'       => now(),
-            ]);
+            ], 'log_id');
 
             $loggedRow = DB::table('daily_output_logs')->where('log_id', $logId)->first(['log_id', 'total_output']);
 
@@ -591,7 +591,7 @@ class ProductionStageService
             'is_active'             => 1,
             'created_at'            => now(),
             'updated_at'            => now(),
-        ]);
+        ], 'design_id');
 
         if (!$order->design_id) {
             DB::table('orders')->where('order_id', $orderId)->update(['design_id' => $designId]);
