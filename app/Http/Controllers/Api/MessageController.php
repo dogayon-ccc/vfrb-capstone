@@ -104,7 +104,7 @@ class MessageController extends Controller
             'sent_at'    => now(),
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ], 'message_id');
 
         $msg = DB::table('order_messages')
             ->join('users', 'order_messages.sender_id', '=', 'users.user_id')
@@ -233,7 +233,7 @@ class MessageController extends Controller
             'sent_at'    => now(),
             'created_at' => now(),
             'updated_at' => now(),
-        ]);
+        ], 'message_id');
 
         $msg = DB::table('order_messages')
             ->join('users', 'order_messages.sender_id', '=', 'users.user_id')

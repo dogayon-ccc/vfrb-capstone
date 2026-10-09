@@ -71,7 +71,7 @@ class ActivityLogController extends Controller
 
             DB::table('qc_checklists')
                 ->selectRaw("'qc_checked' as action_type, checked_by as actor_user_id,
-                    CONCAT('QC ', IF(passed=1,'passed','failed'), ' — ', items_passed, '/', items_checked, ' items — order #', order_id) as description,
+                    CONCAT('QC ', CASE WHEN passed=1 THEN 'passed' ELSE 'failed' END, ' — ', items_passed, '/', items_checked, ' items — order #', order_id) as description,
                     CONCAT('order:', order_id) as target, COALESCE(checked_at, created_at) as occurred_at"),
 
             DB::table('physical_count_logs')
@@ -81,14 +81,14 @@ class ActivityLogController extends Controller
 
             DB::table('physical_count_logs')
                 ->selectRaw("'count_reconciled' as action_type, reconciled_by as actor_user_id,
-                    CONCAT('Reconciled count for material #', material_id, IF(stock_adjusted=1, ' (stock adjusted)', '')) as description,
+                    CONCAT('Reconciled count for material #', material_id, CASE WHEN stock_adjusted=1 THEN ' (stock adjusted)' ELSE '' END) as description,
                     CONCAT('material:', material_id) as target, reconciled_at as occurred_at")
                 ->where('reconciled', 1)
                 ->whereNotNull('reconciled_by'),
 
             DB::table('inventory_logs')
                 ->selectRaw("CONCAT('inventory_', type) as action_type, recorded_by as actor_user_id,
-                    CONCAT(type, ' ', change_qty, ' — material #', material_id, IF(reason IS NOT NULL, CONCAT(' (', reason, ')'), '')) as description,
+                    CONCAT(type, ' ', change_qty, ' — material #', material_id, CASE WHEN reason IS NOT NULL THEN CONCAT(' (', reason, ')') ELSE '' END) as description,
                     CONCAT('material:', material_id) as target, log_date as occurred_at"),
 
             DB::table('delivery_tracking')

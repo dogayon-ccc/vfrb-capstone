@@ -26,6 +26,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -57,8 +58,8 @@ class UserController extends Controller
 
         if ($search) {
             $query->where(function ($q) use ($search) {
-                $q->where('name', 'like', "%{$search}%")
-                  ->orWhere('email', 'like', "%{$search}%");
+                $q->where('name', Sql::like(), "%{$search}%")
+                  ->orWhere('email', Sql::like(), "%{$search}%");
             });
         }
 
@@ -120,10 +121,10 @@ class UserController extends Controller
         if ($search !== '') {
             $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $search) . '%';
             $query->where(function ($q) use ($like) {
-                $q->where('users.name', 'like', $like)
-                  ->orWhere('users.email', 'like', $like)
-                  ->orWhere('users.organization_name', 'like', $like)
-                  ->orWhere('users.contact_number', 'like', $like);
+                $q->where('users.name', Sql::like(), $like)
+                  ->orWhere('users.email', Sql::like(), $like)
+                  ->orWhere('users.organization_name', Sql::like(), $like)
+                  ->orWhere('users.contact_number', Sql::like(), $like);
             });
         }
 
@@ -178,7 +179,7 @@ class UserController extends Controller
             'email_verified_at' => in_array($request->input('role'), ['staff','manager']) ? now() : null,
             'created_at'        => now(),
             'updated_at'        => now(),
-        ]);
+        ], 'user_id');
 
         // Assign role via Spatie model_has_roles
         $roleId = DB::table('roles')

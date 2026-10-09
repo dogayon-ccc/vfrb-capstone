@@ -22,6 +22,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\Sql;
 use App\Models\KpiDailySnapshot;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -124,7 +125,7 @@ class AdminDashboardController extends Controller
                 ->whereRaw('quantity_in_stock <= reorder_threshold')
                 ->select('material_id', 'material_name', 'quantity_in_stock',
                          'reorder_threshold', 'unit', 'unit_cost')
-                ->orderByRaw('quantity_in_stock / reorder_threshold ASC')
+                ->orderByRaw('quantity_in_stock / NULLIF(reorder_threshold, 0) ASC')
                 ->limit(5)
                 ->get()
                 ->map(function ($m) {
@@ -195,13 +196,13 @@ class AdminDashboardController extends Controller
             // ── Monthly revenue — last 6 months, for the Dashboard.jsx bar chart ──
             $monthlySales = DB::table('sales_transactions')
                 ->selectRaw("
-                    DATE_FORMAT(payment_date,'%b %Y') as month,
-                    DATE_FORMAT(payment_date,'%Y%m')  as sort_key,
+                    " . Sql::monthLabel('payment_date') . " as month,
+                    " . Sql::monthKey('payment_date') . "  as sort_key,
                     SUM(amount_paid) as total
                 ")
                 ->whereNotNull('payment_date')
                 ->where('payment_date', '>=', $now->copy()->subMonths(6)->toDateString())
-                ->groupByRaw("DATE_FORMAT(payment_date,'%b %Y'), DATE_FORMAT(payment_date,'%Y%m')")
+                ->groupByRaw(Sql::monthLabel('payment_date') . ", " . Sql::monthKey('payment_date'))
                 ->orderBy('sort_key')
                 ->get()
                 ->map(fn($r) => ['month' => $r->month, 'total' => (float) $r->total])
@@ -212,12 +213,12 @@ class AdminDashboardController extends Controller
             // two charts stay consistent with each other.
             $orderTrends = DB::table('orders')
                 ->selectRaw("
-                    DATE_FORMAT(created_at,'%b %Y') as month,
-                    DATE_FORMAT(created_at,'%Y%m')  as sort_key,
+                    " . Sql::monthLabel('created_at') . " as month,
+                    " . Sql::monthKey('created_at') . "  as sort_key,
                     COUNT(*) as orders
                 ")
                 ->where('created_at', '>=', $now->copy()->subMonths(6)->toDateString())
-                ->groupByRaw("DATE_FORMAT(created_at,'%b %Y'), DATE_FORMAT(created_at,'%Y%m')")
+                ->groupByRaw(Sql::monthLabel('created_at') . ", " . Sql::monthKey('created_at'))
                 ->orderBy('sort_key')
                 ->get()
                 ->map(fn($r) => ['month' => $r->month, 'orders' => (int) $r->orders])
@@ -320,7 +321,7 @@ class AdminDashboardController extends Controller
         $lowStockMaterials = DB::table('materials')
             ->whereRaw('quantity_in_stock <= reorder_threshold')
             ->select('material_id','material_name','quantity_in_stock','reorder_threshold','unit')
-            ->orderByRaw('quantity_in_stock / reorder_threshold ASC')
+            ->orderByRaw('quantity_in_stock / NULLIF(reorder_threshold, 0) ASC')
             ->limit(5)->get();
 
         // "Urgent" = same delayed-stage definition the manager dashboard

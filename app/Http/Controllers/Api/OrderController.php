@@ -317,7 +317,7 @@ class OrderController extends Controller
                 'notes'                 => $request->input('special_notes'),
                 'created_at'            => now(),
                 'updated_at'            => now(),
-            ]);
+            ], 'order_id');
 
             // Store per-size quantities in measurements table if provided
             // (reuses $sizesInput, already decoded + validated above — no need to decode twice)

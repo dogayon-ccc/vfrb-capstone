@@ -154,7 +154,7 @@ class PurchaseOrderController extends Controller
             'notes'                   => $request->input('notes'),
             'created_at'              => now(),
             'updated_at'              => now(),
-        ]);
+        ], 'po_id');
 
         $now = now();
         DB::table('purchase_order_items')->insert(
@@ -354,7 +354,7 @@ class PurchaseOrderController extends Controller
             'created_by'     => Auth::id(),
             'created_at'     => now(),
             'updated_at'     => now(),
-        ]);
+        ], 'rfq_id');
 
         $rfq = DB::table('rfq_requests')
             ->join('materials', 'rfq_requests.material_id', '=', 'materials.material_id')
@@ -395,7 +395,7 @@ class PurchaseOrderController extends Controller
             'responded_at'   => now(),
             'created_at'     => now(),
             'updated_at'     => now(),
-        ]);
+        ], 'response_id');
 
         return response()->json(
             DB::table('rfq_responses')
@@ -446,7 +446,7 @@ class PurchaseOrderController extends Controller
             'color_confirmed'        => 0,
             'created_at'             => now(),
             'updated_at'             => now(),
-        ]);
+        ], 'po_id');
 
         DB::table('purchase_order_items')->insert([
             'po_id'       => $poId,
@@ -530,7 +530,7 @@ class PurchaseOrderController extends Controller
             'is_active'                   => 1,
             'created_at'                  => now(),
             'updated_at'                  => now(),
-        ]);
+        ], 'supplier_id');
 
         return response()->json(
             DB::table('suppliers')->where('supplier_id', $id)->first(),

@@ -114,7 +114,7 @@ class DeliveryController extends Controller
             'notes'                   => $request->input('notes'),
             'created_at'              => now(),
             'updated_at'              => now(),
-        ]);
+        ], 'tracking_id');
 
         return response()->json(
             DB::table('delivery_tracking')->where('tracking_id', $id)->first(),
