@@ -49,17 +49,17 @@ class AuthController extends Controller
     // auth/Login.jsx expects: { token, user: { ...fields, role } } and routes by role.
     public function login(Request $request)
     {
+        // `login` is a username or an email; `email` is still accepted from older clients.
         $request->validate([
-            'email'    => 'required|email',
+            'login'    => 'required_without:email|nullable|string|max:100',
+            'email'    => 'required_without:login|nullable|string|max:100',
             'password' => 'required|string',
         ]);
 
-        $user = DB::table('users')
-            ->whereRaw('LOWER(email) = ?', [strtolower(trim($request->input('email')))]) // Postgres compares case-sensitively
-            ->first();
+        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
-            return response()->json(['message' => 'Invalid email or password.'], 401);
+            return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
@@ -79,17 +79,17 @@ class AuthController extends Controller
     // ── POST /api/admin/login — kept for old clients/scripts; the UI now uses /api/login ──
     public function adminLogin(Request $request)
     {
+        // `login` is a username or an email; `email` is still accepted from older clients.
         $request->validate([
-            'email'    => 'required|email',
+            'login'    => 'required_without:email|nullable|string|max:100',
+            'email'    => 'required_without:login|nullable|string|max:100',
             'password' => 'required|string',
         ]);
 
-        $user = DB::table('users')
-            ->whereRaw('LOWER(email) = ?', [strtolower(trim($request->input('email')))]) // Postgres compares case-sensitively
-            ->first();
+        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
-            return response()->json(['message' => 'Invalid email or password.'], 401);
+            return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
@@ -116,8 +116,10 @@ class AuthController extends Controller
     // ── POST /api/register — Customer self-registration ───────────────────────
     public function register(Request $request)
     {
+        $request->merge(['username' => strtolower(trim((string) $request->input('username')))]);
         $request->validate([
             'name'                  => 'required|string|max:100',
+            'username'              => ['required', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
             // rfc,dns: not just syntactically valid — the domain must actually
             // have a mail-exchanger record, so 'a@b.com' with a domain that
             // doesn't receive mail is rejected here, not after signup.
@@ -129,12 +131,15 @@ class AuthController extends Controller
             'business_registration_number' => ['nullable', 'string', 'max:30', 'regex:/^[A-Za-z0-9][A-Za-z0-9 \-]*$/'],
         ], [
             'email.unique' => 'An account with this email already exists.',
+            'username.unique' => 'That username is taken.',
+            'username.regex'  => 'Use 3-30 letters, numbers, dots or underscores.',
             'email.email'  => 'Please enter a real, valid email address.',
             'password.min' => 'Password must be at least 8 characters.',
         ]);
 
         $userId = DB::table('users')->insertGetId([
             'name'              => $request->input('name'),
+            'username'          => $request->input('username'),
             'email'             => $request->input('email'),
             'password'          => Hash::make($request->input('password')),
             'contact_number'    => $request->input('contact_number'),
@@ -373,17 +378,6 @@ class AuthController extends Controller
             return response()->json(['message' => 'Email already verified.'], 409);
         }
 
-        // For local dev, auto-verify the email so day-to-day testing isn't
-        // blocked on Mailtrap round-trips — unchanged, this was already
-        // working as intended.
-        if (app()->environment('local')) {
-            DB::table('users')
-                ->where('user_id', $user->user_id)
-                ->update(['email_verified_at' => now(), 'updated_at' => now()]);
-
-            return response()->json(['message' => 'Email verified (local dev auto-verify).']);
-        }
-
         // Real send (Aug 25 2026) — this used to be a stub that returned a
         // fake success message ("Verification email sent.") without
         // actually sending anything at all in non-local environments. Now
@@ -442,6 +436,18 @@ class AuthController extends Controller
     // ── Private: getRoleName ──────────────────────────────────────────────────
     // Always use a direct DB query — never $user->role (column doesn't exist)
     // This bypasses Spatie guard mismatch that occurs with auth:api vs web guard
+    // Username or email, case-insensitive. Usernames cannot contain "@", so the column is unambiguous.
+    private function findByLogin(?string $login): ?object
+    {
+        $login = strtolower(trim((string) $login));
+        if ($login === '') {
+            return null;
+        }
+        return DB::table('users')
+            ->where(str_contains($login, '@') ? DB::raw('LOWER(email)') : 'username', $login)
+            ->first();
+    }
+
     private function getRoleName(int $userId): string
     {
         return DB::table('model_has_roles')
@@ -468,6 +474,7 @@ class AuthController extends Controller
     {
         return [
             'user_id'           => $user->user_id,
+            'username'          => $user->username ?? null,
             'name'              => $user->name,
             'email'             => $user->email,
             'role'              => $role,
