@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Order;
 use App\Models\MaterialRecommendation;
+use App\Models\RecommendationGuidance;
 use App\Models\User;
 use App\Services\GeminiClient;
 use App\Services\MaterialCatalogMatcher;
@@ -628,13 +629,27 @@ PROMPT;
         $studio = is_array($order->studio_config) ? $order->studio_config : [];
         $str    = fn ($v, $d) => is_string($v) && trim($v) !== '' ? trim($v) : $d;
 
+        $garment  = $this->garmentOf($order) ?? 'garment';
+        $category = $str($studio['category'] ?? null, 'unspecified');
+
+        // Manager guidance for this use/garment, and materials staff rejected for this garment before.
+        $guidance = RecommendationGuidance::applicable($category, $garment)
+            ->orderBy('guidance_id')->limit(12)->pluck('rule')->all();
+        $avoid = MaterialRecommendation::query()
+            ->join('orders', 'orders.order_id', '=', 'material_recommendations.order_id')
+            ->where('material_recommendations.staff_feedback', 'reject')
+            ->whereRaw('lower(orders.garment_type) = ?', [mb_strtolower($garment)])
+            ->whereIn('material_recommendations.material_id', array_keys($eligible))
+            ->orderByDesc('material_recommendations.staff_feedback_at')->limit(50)
+            ->pluck('material_recommendations.material_name')->unique()->take(8)->values()->all();
+
         $prefs = collect($fabricPrefs ?? [])
             ->filter(fn ($pref) => $pref->material && isset($eligible[$pref->material->material_id]));
 
         return [
-            'garment'  => $this->garmentOf($order) ?? 'garment',
+            'garment'  => $garment,
             'family'   => $str($studio['garmentFamily'] ?? $studio['family'] ?? null, 'unspecified'),
-            'category' => $str($studio['category'] ?? null, 'unspecified'),
+            'category' => $category,
             'fit'      => $str($studio['fit'] ?? null, 'unspecified'),
             'collar'   => $order->collar_type ?? 'standard',
             'sleeve'   => $order->sleeve_type ?? 'standard',
@@ -646,6 +661,8 @@ PROMPT;
             'preferences'            => $prefs->map(fn ($p) => $p->material->material_name . ($p->notes ? " ({$p->notes})" : ''))->values()->all(),
             'preferred_material_ids' => $prefs->map(fn ($p) => (int) $p->material->material_id)->values()->all(),
             'catalog'  => array_values($eligible),
+            'guidance' => $guidance,
+            'avoid'    => $avoid,
         ];
     }
 
@@ -656,6 +673,8 @@ PROMPT;
         $patternLine = $kv($ctx['patterns']);
         $overlayLine = $ctx['overlay'] ? 'yes' : 'no';
         $prefLine    = $ctx['preferences'] ? implode(', ', $ctx['preferences']) : 'none saved';
+        $guideLines  = $ctx['guidance'] ? implode("\n", array_map(fn ($r) => "- {$r}", $ctx['guidance'])) : '- none';
+        $avoidLine   = $ctx['avoid'] ? implode(', ', $ctx['avoid']) : 'none';
 
         $catalogLines = collect($ctx['catalog'])->map(fn ($m) =>
             "  {$m['material_id']} | {$m['material_code']} | {$m['material_name']} | {$m['category']} | unit: {$m['unit']}"
@@ -675,6 +694,10 @@ Design being ordered (layout only):
 
 VFRB's approved materials for this garment (id | code | name | category | unit). Choose ONLY ids from this list:
 {$catalogLines}
+
+VFRB's own guidance for this kind of order (written by VFRB managers; follow it when it applies):
+{$guideLines}
+Materials VFRB staff rejected for this garment on earlier orders (avoid unless the design clearly needs them): {$avoidLine}
 
 Pick the materials from this list that this design needs (for example the main fabric, the matching thread, and any
 trim, closure, or lining the design's features call for), and give one short plain-language reason for each,
