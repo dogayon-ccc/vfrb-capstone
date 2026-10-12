@@ -357,8 +357,11 @@ class OrderController extends Controller
                 ]);
             }
 
-            // Notify managers of new order
-            $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
+            // Notify managers of new order (in-app now, email after the response)
+            $managerIds = $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
+            \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+                "New VFRB order #{$orderId}", ["A customer submitted order #{$orderId}. It is waiting for review and confirmation."],
+                'Review order', "/admin/orders/{$orderId}"));
 
             return $orderId;
         });
@@ -657,7 +660,7 @@ class OrderController extends Controller
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
-    private function notifyManagers(int $orderId, string $message): void
+    private function notifyManagers(int $orderId, string $message): array
     {
         $now = now();
         $managers = DB::table('model_has_roles')
@@ -677,6 +680,7 @@ class OrderController extends Controller
                 'updated_at' => $now,
             ]);
         }
+        return $managers->all();
     }
 
     private function notifyCustomer(int $userId, int $orderId, string $message): void

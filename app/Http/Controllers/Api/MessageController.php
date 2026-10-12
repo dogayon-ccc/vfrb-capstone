@@ -130,6 +130,9 @@ class MessageController extends Controller
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
+            $oid = (int) $request->input('order_id');
+            \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\PortalMailNotification(
+                "New message about your VFRB order #{$oid}", ["VFRB sent you a message about order #{$oid}."], 'Read the message', "/messages?order={$oid}"));
         }
 
         return response()->json(['message' => $msg], 201);
@@ -261,6 +264,8 @@ class MessageController extends Controller
                 'updated_at' => $now,
             ]);
         }
+        \App\Support\EmailNotify::users($staffIds, new \App\Notifications\PortalMailNotification(
+            "New customer message on order #{$orderId}", ["A customer sent a message about order #{$orderId}."], 'Open messages', "/admin/messages?order={$orderId}"));
 
         return response()->json(['message' => $msg], 201);
     }

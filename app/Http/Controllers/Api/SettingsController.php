@@ -171,10 +171,11 @@ class SettingsController extends Controller
     // ── PATCH /api/settings/notifications ────────────────────────────
     public function notificationUpdate(Request $request)
     {
+        // SMS has no gateway: the preference may only be saved as off.
         $request->validate([
             'email_enabled' => 'sometimes|boolean',
-            'sms_enabled'   => 'sometimes|boolean',
-        ]);
+            'sms_enabled'   => 'sometimes|boolean|declined',
+        ], ['sms_enabled.declined' => 'SMS needs a gateway; not enabled.']);
 
         $pref = NotificationPreference::firstOrNew(['user_id' => $request->user()->user_id]);
         $pref->fill($request->only(['email_enabled', 'sms_enabled']));

@@ -339,6 +339,8 @@ class ProductionController extends Controller
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+        // Same email as confirming from Order Detail (OrderController::adminUpdate).
+        \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\OrderStatusNotification((int) $orderId, 'confirmed'));
 
         Cache::forget('dashboard_stats');
 
