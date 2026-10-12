@@ -59,7 +59,7 @@ class MaterialCatalogMatcherTest extends TestCase
             'narration' => 'Cotton fabric and elastic suit these pants.',
         ], $e);
         $this->assertSame([1, 4], array_column($r['selections'], 'material_id'));
-        $this->assertSame(['unknown' => 3, 'duplicate' => 1, 'sanitized' => 0], $r['dropped']);
+        $this->assertSame(['unknown' => 3, 'duplicate' => 1, 'sanitized' => 0, 'forbidden_field' => 0], $r['dropped']);
     }
 
     public function test_quantity_and_price_language_is_replaced(): void
@@ -104,5 +104,35 @@ class MaterialCatalogMatcherTest extends TestCase
         $e = $this->m->eligible($this->catalog(), 'Pants');
         $this->assertSame([], $this->m->normalize(null, $e)['selections']);
         $this->assertSame('', $this->m->normalize(['selections' => 'nope'], $e)['narration']);
+    }
+
+    public function test_quantity_and_price_fields_are_rejected(): void
+    {
+        $e = $this->m->eligible($this->catalog(), 'Polo Shirt');
+        $r = $this->m->normalize(['selections' => [
+            ['material_id' => 1, 'reason' => 'a', 'quantity' => 3],
+            ['material_id' => 2, 'reason' => 'b', 'unit_price' => 9],
+            ['material_id' => 5, 'reason' => 'c'],
+        ], 'narration' => 'n'], $e);
+        $this->assertSame([5], array_column($r['selections'], 'material_id'));
+        $this->assertSame(2, $r['dropped']['forbidden_field']);
+
+        $r = $this->m->normalize(['selections' => [['material_id' => 1, 'reason' => 'a']], 'narration' => 'n', 'yardage' => 2], $e);
+        $this->assertSame([], $r['selections']);
+    }
+
+    public function test_fallback_is_deterministic_and_quantity_free(): void
+    {
+        $e  = $this->m->eligible($this->catalog(), 'Polo Shirt');
+        $fb = $this->m->fallback($e);
+        $this->assertSame([1, 2], array_column($fb['selections'], 'material_id'));
+        $this->assertFalse($this->m->hasForbiddenTerms($fb['narration'] . ' ' . implode(' ', array_column($fb['selections'], 'reason'))));
+        $this->assertSame([], $this->m->fallback([])['selections']);
+    }
+
+    public function test_design_hash_ignores_key_order(): void
+    {
+        $this->assertSame($this->m->designHash(['a' => 1, 'b' => ['y' => 2, 'x' => 1]]), $this->m->designHash(['b' => ['x' => 1, 'y' => 2], 'a' => 1]));
+        $this->assertNotSame($this->m->designHash(['fit' => 'slim']), $this->m->designHash(['fit' => 'regular']));
     }
 }

@@ -7,6 +7,8 @@ namespace App\Services;
  *   eligible()  -> which catalog rows the AI may even see for this garment
  *   schema()    -> JSON schema that limits material_id to those rows
  *   normalize() -> re-validates the reply; nothing the model says is trusted
+ *   fallback()  -> deterministic picks when Gemini fails or times out
+ *   designHash()-> cache key for one design context
  * Works on plain arrays only (no Eloquent) so it can be unit-tested in isolation.
  */
 final class MaterialCatalogMatcher
@@ -14,10 +16,12 @@ final class MaterialCatalogMatcher
     public const MAX_SELECTIONS   = 8;
     public const MAX_REASON_CHARS = 280;
     public const MAX_NARRATION    = 600;
+    // Any reply key matching this is a quantity/price/formula field the AI must never produce.
+    public const FORBIDDEN_KEY = '/qty|quantit|price|cost|amount|total|yard|meter|metre|length|weight|bom|quota|formula|estimat|usage/i';
 
     /**
      * @param  iterable<array<string,mixed>> $materials rows from `materials` (toArray())
-     * @return array<int,array{material_id:int,material_name:string,category:string,unit:string}> keyed by material_id
+     * @return array<int,array{material_id:int,material_code:string,material_name:string,category:string,unit:string}> keyed by material_id
      */
     public function eligible(iterable $materials, ?string $garment): array
     {
@@ -29,6 +33,7 @@ final class MaterialCatalogMatcher
             }
             $out[$id] = [
                 'material_id'   => $id,
+                'material_code' => (string) ($m['material_code'] ?? ''),
                 'material_name' => (string) ($m['material_name'] ?? ''),
                 'category'      => (string) ($m['category'] ?? 'Other'),
                 'unit'          => (string) ($m['unit'] ?? ''),
@@ -62,17 +67,24 @@ final class MaterialCatalogMatcher
     }
 
     /**
-     * @return array{selections:array<int,array{material_id:int,reason:string}>,narration:string,dropped:array{unknown:int,duplicate:int,sanitized:int}}
+     * @return array{selections:array<int,array{material_id:int,reason:string}>,narration:string,dropped:array{unknown:int,duplicate:int,sanitized:int,forbidden_field:int}}
      */
     public function normalize(?array $parsed, array $eligible): array
     {
-        $dropped    = ['unknown' => 0, 'duplicate' => 0, 'sanitized' => 0];
+        $dropped    = ['unknown' => 0, 'duplicate' => 0, 'sanitized' => 0, 'forbidden_field' => 0];
         $selections = [];
         $seen       = [];
         $names      = array_column($eligible, 'material_name');
 
+        // A quantity/price field anywhere at the top level voids the whole reply.
+        if (is_array($parsed) && $this->forbiddenKeys($parsed)) {
+            $dropped['forbidden_field']++;
+            return ['selections' => [], 'narration' => '', 'dropped' => $dropped];
+        }
+
         foreach ((array) ($parsed['selections'] ?? []) as $sel) {
             if (!is_array($sel)) { $dropped['unknown']++; continue; }
+            if ($this->forbiddenKeys($sel)) { $dropped['forbidden_field']++; continue; }
             $id = $sel['material_id'] ?? null;
             if (!is_int($id) && !(is_string($id) && ctype_digit($id))) { $dropped['unknown']++; continue; }
             $id = (int) $id;
@@ -98,6 +110,60 @@ final class MaterialCatalogMatcher
         }
 
         return ['selections' => $selections, 'narration' => $narration, 'dropped' => $dropped];
+    }
+
+    /**
+     * Deterministic picks for when Gemini fails: one main fabric and one thread from the eligible rows,
+     * the customer's saved preferences first, then lowest material_id. Never a quantity.
+     * @param  int[] $preferredIds
+     * @return array{selections:array<int,array{material_id:int,reason:string}>,narration:string}
+     */
+    public function fallback(array $eligible, array $preferredIds = []): array
+    {
+        $rank = array_flip(array_map('intval', $preferredIds));
+        $rows = array_values($eligible);
+        usort($rows, fn ($a, $b) => [isset($rank[$a['material_id']]) ? 0 : 1, $a['material_id']]
+                                  <=> [isset($rank[$b['material_id']]) ? 0 : 1, $b['material_id']]);
+
+        $picks = [];
+        foreach (['fabric', 'thread'] as $kind) {
+            foreach ($rows as $m) {
+                if (str_contains(mb_strtolower($m['category']), $kind)) { $picks[$m['material_id']] = $m; break; }
+            }
+        }
+        if (!$picks && $rows) { $picks[$rows[0]['material_id']] = $rows[0]; }
+
+        $selections = [];
+        foreach ($picks as $id => $m) {
+            $selections[] = [
+                'material_id' => $id,
+                'reason'      => 'Standard ' . strtolower($m['category'] ?: 'material') . " from VFRB's approved list for this garment.",
+            ];
+        }
+        return [
+            'selections' => $selections,
+            'narration'  => $selections
+                ? "AI suggestions are unavailable right now, so these are VFRB's default approved materials for this garment. Our team will confirm them."
+                : '',
+        ];
+    }
+
+    /** Stable cache key for one design context; key order does not matter. */
+    public function designHash(array $context): string
+    {
+        $sort = function (array $a) use (&$sort): array {
+            if (!array_is_list($a)) { ksort($a); }
+            return array_map(fn ($v) => is_array($v) ? $sort($v) : $v, $a);
+        };
+        return hash('sha256', json_encode($sort($context), JSON_UNESCAPED_UNICODE));
+    }
+
+    private function forbiddenKeys(array $obj): bool
+    {
+        foreach (array_keys($obj) as $k) {
+            if (is_string($k) && preg_match(self::FORBIDDEN_KEY, $k)) { return true; }
+        }
+        return false;
     }
 
     /** True when text states a quantity, price, or formula, which the AI must never produce. Catalog names are ignored. */
