@@ -163,9 +163,20 @@ class SettingsController extends Controller
             'sms_enabled'   => $pref?->sms_enabled ?? false,
             // Frontend caveat flags — sent from backend so the "not real yet"
             // warning can't drift out of sync between FE and BE independently.
-            'email_provider_live' => false, // Mailtrap sandbox only as of this build
+            'email_provider_live' => self::emailProviderLive(),
             'sms_provider_live'   => false, // no SMS gateway configured anywhere
         ]);
+    }
+
+    // Real delivery: an SMTP/API mailer whose host is not a sandbox inbox (sandbox hosts catch every message; log/array write nowhere).
+    public static function emailProviderLive(): bool
+    {
+        $mailer = (string) config('mail.default');
+        if (in_array($mailer, ['log', 'array'], true)) {
+            return false;
+        }
+        $host = strtolower((string) config("mail.mailers.{$mailer}.host", ''));
+        return !preg_match('/mailtrap|sandbox|mailhog|mailpit|localhost|127\.0\.0\.1/', $host);
     }
 
     // ── PATCH /api/settings/notifications ────────────────────────────

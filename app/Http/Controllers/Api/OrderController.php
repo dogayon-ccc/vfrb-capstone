@@ -584,8 +584,9 @@ class OrderController extends Controller
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
-        if ($request->hasAny(['status', 'agreed_total']) && !$request->user()->isManager()) {
-            return response()->json(['message' => 'Only a manager can change order status or total.'], 403);
+        // Every field this endpoint changes is a manager decision (review & confirm, cancel with a reason).
+        if ($request->hasAny(['status', 'agreed_total', 'negotiated_delivery_date', 'notes']) && !$request->user()->isManager()) {
+            return response()->json(['message' => 'Only a manager can change the order status, total, delivery date or review notes.'], 403);
         }
 
         $request->validate([
@@ -605,7 +606,8 @@ class OrderController extends Controller
             return response()->json(['message' => "A {$order->status} order cannot be set to {$target} here. Use the production steps to advance it."], 422);
         }
 
-        $fields = collect($request->only(['status', 'negotiated_delivery_date', 'notes']))
+        // `notes` is the manager's message to the customer (sent with the status change below); orders.notes keeps the customer's own notes.
+        $fields = collect($request->only(['status', 'negotiated_delivery_date']))
             ->filter(fn($v) => !is_null($v))
             ->reject(fn($v, $k) => $k === 'status' && $v === $order->status)
             ->toArray();
@@ -621,7 +623,8 @@ class OrderController extends Controller
         if (isset($fields['status'])) {
             $statusMessage = $fields['status'] === 'cancelled' && $request->filled('notes')
                 ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
-                : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . ".";
+                : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . "."
+                    . ($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
             $this->notifyCustomer($order->user_id, $id, $statusMessage);
 
             // Real email (Aug 25 2026) — deliberately restricted to only
