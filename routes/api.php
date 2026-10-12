@@ -31,6 +31,7 @@
 //   No supplier portal — ever.
 
 use App\Http\Controllers\Api\AIController;
+use App\Http\Controllers\Api\RecommendationGuidanceController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\ActivityLogController;
@@ -253,6 +254,9 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
 // actively during a normal work shift. Still low enough to stop a
 // scripted scrape or a runaway retry loop.
 Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
+
+    // AI recommendation feedback (Oct 13 2026): staff accept/reject per recommended line.
+    Route::patch('/material-recommendations/{recId}/feedback', [RecommendationGuidanceController::class, 'feedback'])->whereNumber('recId');
 
     // ── Dashboard ────────────────────────────────────────────────
     // Dashboard.jsx: GET /api/admin/dashboard
@@ -495,6 +499,11 @@ Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])-
     Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
 
     // ── Design showcase moderation (Sept 18 2026) ──────────────────
+    // ── AI recommendation guidance (Oct 13 2026): manager-written prompt grounding ──
+    Route::get('/recommendation-guidance',      [RecommendationGuidanceController::class, 'index']);
+    Route::post('/recommendation-guidance',     [RecommendationGuidanceController::class, 'store']);
+    Route::put('/recommendation-guidance/{id}', [RecommendationGuidanceController::class, 'update'])->whereNumber('id');
+
     Route::get('/designs/showcase-queue',        [DesignController::class, 'adminShowcaseQueue']);
     Route::post('/designs/{id}/showcase-approve', [DesignController::class, 'adminShowcaseApprove']);
     Route::post('/designs/{id}/showcase-reject',  [DesignController::class, 'adminShowcaseReject']);

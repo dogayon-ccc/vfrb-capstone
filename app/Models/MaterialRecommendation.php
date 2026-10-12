@@ -22,12 +22,14 @@ class MaterialRecommendation extends Model
         'display_order','status','customer_accepted','accepted_at',
         'customer_note','linked_by','linked_at','actual_qty_issued',
         'issued_at','created_at','updated_at',
+        'staff_feedback','staff_feedback_note','staff_feedback_by','staff_feedback_at',
     ];
     protected $casts = [
         'customer_accepted' => 'boolean',
         'accepted_at'       => 'datetime',
         'linked_at'         => 'datetime',
         'issued_at'         => 'datetime',
+        'staff_feedback_at' => 'datetime',
     ];
     public function order()    { return $this->belongsTo(Order::class, 'order_id', 'order_id'); }
     public function material() { return $this->belongsTo(Material::class, 'material_id', 'material_id'); }
