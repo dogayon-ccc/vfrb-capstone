@@ -32,10 +32,11 @@ namespace App\Notifications;
 use Illuminate\Bus\Queueable;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
+use App\Notifications\Concerns\RespectsEmailPreference;
 
 class OrderStatusNotification extends Notification
 {
-    use Queueable;
+    use Queueable, RespectsEmailPreference;
 
     /**
      * @param int         $orderId The order this notification is about.
@@ -54,13 +55,12 @@ class OrderStatusNotification extends Notification
 
     public function via(object $notifiable): array
     {
-        return ['mail'];
+        return $this->mailChannels($notifiable);
     }
 
     public function toMail(object $notifiable): MailMessage
     {
-        $frontendUrl = rtrim(config('app.frontend_url', 'http://localhost:5173'), '/');
-        $orderUrl    = $frontendUrl . '/customer/orders/' . $this->orderId;
+        $orderUrl    = $this->portalUrl('/orders/' . $this->orderId);
 
         $mail = (new MailMessage)
             ->greeting('Hello, ' . $notifiable->name . '!');

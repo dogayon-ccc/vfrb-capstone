@@ -311,9 +311,10 @@ class UserController extends Controller
     // Profile.jsx saveProfile(): { name, contact_number, address, organization_name, client_type }
     public function customerUpdateProfile(Request $request)
     {
+        $request->merge(['contact_number' => \App\Rules\PhMobile::normalize($request->input('contact_number'))]);
         $request->validate([
             'name'              => 'required|string|max:100',
-            'contact_number'    => 'nullable|string|max:20',
+            'contact_number'    => ['nullable', 'string', 'max:20', new \App\Rules\PhMobile],
             'address'           => 'nullable|string|max:255',
             'organization_name' => 'nullable|string|max:100',
             'client_type'       => 'nullable|in:individual,corporate,school,medical,government,organization',

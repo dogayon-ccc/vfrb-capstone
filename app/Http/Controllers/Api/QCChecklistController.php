@@ -149,6 +149,23 @@ class QCChecklistController extends Controller
 
         $checklist = DB::table('qc_checklists')->where('check_id', $id)->first();
 
+        // QC result to managers: in-app (existing 'order_update' type) and by email.
+        $pct = round($passRate * 100, 1);
+        $qcMessage = $passed
+            ? "QC passed on order #{$orderId} ({$itemsPassed}/{$itemsChecked} pieces, {$pct}%)."
+            : "QC not passed on order #{$orderId} ({$pct}%, {$itemsFailed} failed). Corrections needed before pressing.";
+        $managerIds = DB::table('model_has_roles')->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('roles.name', 'manager')->pluck('model_has_roles.model_id');
+        $now = now();
+        foreach ($managerIds as $uid) {
+            DB::table('notifications')->insert([
+                'user_id' => $uid, 'order_id' => $orderId, 'message' => $qcMessage, 'type' => 'order_update',
+                'is_read' => 0, 'date_sent' => $now, 'created_at' => $now, 'updated_at' => $now,
+            ]);
+        }
+        \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+            ($passed ? 'QC passed' : 'QC not passed') . " on order #{$orderId}", [$qcMessage], 'Open order', "/admin/orders/{$orderId}"));
+
         return response()->json([
             'checklist' => $checklist,
             'passed'    => (bool) $passed,

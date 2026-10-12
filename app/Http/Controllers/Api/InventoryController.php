@@ -393,6 +393,9 @@ class InventoryController extends Controller
                 'updated_at' => $now,
             ]);
         }
+        // Same 24-hour dedupe as the in-app alert above.
+        \App\Support\EmailNotify::users($managers, new \App\Notifications\PortalMailNotification(
+            "Low stock: {$materialName}", [$message, 'Reorder or record incoming stock to clear this alert.'], 'Open inventory', '/admin/inventory'));
     }
 
     // ratesIndex()/ratesUpsert()/ratesDestroy() removed Aug 28 2026 — no

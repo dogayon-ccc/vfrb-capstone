@@ -63,10 +63,11 @@ class ShippingAddressController extends Controller
 
     private function validated(Request $request): array
     {
+        $request->merge(['contact_number' => \App\Rules\PhMobile::normalize($request->input('contact_number'))]);
         return $request->validate([
             'label'          => 'required|string|max:50',
             'recipient_name' => 'required|string|max:100',
-            'contact_number' => 'required|string|max:20',
+            'contact_number' => ['required', 'string', 'max:20', new \App\Rules\PhMobile],
             'address_line'   => 'required|string|max:255',
             'city'           => 'required|string|max:100',
             'province'       => 'required|string|max:100',
