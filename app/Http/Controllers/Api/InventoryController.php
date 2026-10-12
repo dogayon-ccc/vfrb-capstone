@@ -317,7 +317,11 @@ class InventoryController extends Controller
         // adjustments on the same material could silently lose one.
         $newStock = DB::transaction(function () use ($id, $delta, $type, $request) {
             $locked = DB::table('materials')->where('material_id', $id)->lockForUpdate()->first();
-            $stock  = max(0, $locked->quantity_in_stock + $delta);
+            // A removal larger than the stock is refused (nothing written), so the log always reconciles with the stock.
+            if ($locked->quantity_in_stock + $delta < 0) {
+                return ['short' => (float) $locked->quantity_in_stock];
+            }
+            $stock  = $locked->quantity_in_stock + $delta;
 
             DB::table('materials')->where('material_id', $id)->update([
                 'quantity_in_stock' => $stock,
@@ -337,6 +341,14 @@ class InventoryController extends Controller
 
             return $stock;
         });
+
+        if (is_array($newStock)) {
+            $fmt = fn ($n) => rtrim(rtrim(number_format((float) $n, 2, '.', ''), '0'), '.');
+            return response()->json([
+                'message' => "Only {$fmt($newStock['short'])} {$material->unit} in stock; cannot remove {$fmt($qty)}.",
+                'quantity_in_stock' => $newStock['short'],
+            ], 422);
+        }
 
         Cache::forget('materials_list');
         Cache::forget('dashboard_stats');

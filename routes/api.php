@@ -469,6 +469,9 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // Settings.jsx: GET /api/admin/settings/company
     Route::get('/settings/company', [SettingsController::class, 'companyShow']);
 
+    // Own password (Settings.jsx Password panel): same rules and current-password check as the customer route.
+    Route::put('/profile/password', [UserController::class, 'adminUpdatePassword']);
+
 });
 
 // ══════════════════════════════════════════════════════════════

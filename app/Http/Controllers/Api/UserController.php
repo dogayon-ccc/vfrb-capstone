@@ -338,6 +338,19 @@ class UserController extends Controller
     // Profile.jsx savePw(): { current_password, password, password_confirmation }
     public function customerUpdatePassword(Request $request)
     {
+        return $this->changeOwnPassword($request);
+    }
+
+    // ── PUT /api/admin/profile/password ───────────────────────────────────────
+    // Staff and managers change their own password with the same rules as customers.
+    public function adminUpdatePassword(Request $request)
+    {
+        return $this->changeOwnPassword($request);
+    }
+
+    // The signed-in user's own password: current password must match; new one >= 8 with mixed case, a number and a symbol.
+    private function changeOwnPassword(Request $request)
+    {
         $request->validate([
             'current_password' => 'required|string',
             'password'         => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
