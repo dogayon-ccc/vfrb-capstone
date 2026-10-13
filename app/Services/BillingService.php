@@ -164,6 +164,9 @@ class BillingService
             if ($order->status === 'cancelled') {
                 return ['error' => ['A cancelled order cannot be invoiced.', 409]];
             }
+            if (!$this->reachedDelivery($orderId)) {
+                return ['error' => ['The invoice is issued once the order reaches Delivery. Record down payments as receipts until then.', 422]];
+            }
             if ($order->agreed_total === null || (float) $order->agreed_total <= 0) {
                 return ['error' => ['Set the order\'s agreed total before issuing an invoice.', 422]];
             }
@@ -247,6 +250,12 @@ class BillingService
         $invoice->update(['status' => 'void', 'voided_at' => now()]);
         PaymentReceipt::where('invoice_id', $invoice->invoice_id)->update(['invoice_id' => null]);
         return ['invoice' => $invoice->fresh()];
+    }
+
+    /** Delivery starts when Packing completes and its delivery record is created. */
+    public function reachedDelivery(int $orderId): bool
+    {
+        return DB::table('delivery_tracking')->where('order_id', $orderId)->exists();
     }
 
     /** Recorded payments to date (sales_transactions keeps the cumulative figure). */

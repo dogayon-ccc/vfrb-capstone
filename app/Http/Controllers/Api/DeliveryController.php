@@ -16,6 +16,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\ProductionStageService;
+use App\Support\SmsNotify;
+use App\Support\StudioSet;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -131,6 +134,7 @@ class DeliveryController extends Controller
             'courier_name'         => 'nullable|string|max:100',
             'tracking_number'      => 'nullable|string|max:100',
             'actual_delivery_date' => 'nullable|date',
+            'delivery_address'     => 'nullable|string|max:500',
             'notes'                => 'nullable|string|max:1000',
         ]);
 
@@ -140,6 +144,26 @@ class DeliveryController extends Controller
         }
 
         $newStatus = $request->input('delivery_status');
+        if ($request->filled('delivery_address')) {
+            $row->delivery_address = trim($request->input('delivery_address'));
+        }
+
+        // Delivered acts on the whole uniform set; every piece must pass the same checks before any is marked.
+        $setRows = collect();
+        if ($newStatus === 'delivered' && $row->delivery_status !== 'delivered') {
+            $siblings    = StudioSet::siblingIds((int) $row->order_id);
+            $siblingRows = DB::table('delivery_tracking')->whereIn('order_id', $siblings)->get()->keyBy('order_id');
+            $missing     = array_filter($siblings, fn ($o) => !isset($siblingRows[$o]));
+            if ($missing) {
+                return response()->json(['message' => 'Order #' . implode(', #', $missing) . ' in the same uniform set has not reached delivery yet. Deliver the set together.'], 422);
+            }
+            $setRows = $siblingRows->where('delivery_status', '!=', 'delivered')->values();
+            foreach ([$row, ...$setRows] as $r) {
+                if ($blocker = $this->deliveryBlocker($r)) {
+                    return response()->json(['message' => $blocker], 422);
+                }
+            }
+        }
 
         $update = [
             'delivery_status' => $newStatus,   // delivery_status — never "status"
@@ -151,41 +175,57 @@ class DeliveryController extends Controller
         if ($request->filled('tracking_number'))      $update['tracking_number']      = $request->input('tracking_number');
         if ($request->filled('actual_delivery_date')) $update['actual_delivery_date'] = $request->input('actual_delivery_date');
         if ($request->filled('notes'))                $update['notes']                = $request->input('notes');
+        if ($request->filled('delivery_address'))     $update['delivery_address']     = $row->delivery_address;
 
         // Auto-set actual_delivery_date when delivered
         if ($newStatus === 'delivered' && empty($update['actual_delivery_date'])) {
             $update['actual_delivery_date'] = now()->toDateString();
         }
 
-        DB::table('delivery_tracking')->where('tracking_id', $id)->update($update);
+        DB::transaction(function () use ($id, $update, $newStatus, $row, $setRows) {
+            DB::table('delivery_tracking')->where('tracking_id', $id)->update($update);
+            if ($newStatus !== 'delivered') return;
 
-        // Notify customer when delivered
-        if ($newStatus === 'delivered') {
-            $order = DB::table('orders')
-                ->where('order_id', $row->order_id)
-                ->select('user_id', 'garment_type', 'quantity_ordered')
-                ->first();
+            DB::table('delivery_tracking')->whereIn('tracking_id', $setRows->pluck('tracking_id'))->update([
+                'delivery_status'      => 'delivered',
+                'actual_delivery_date' => $update['actual_delivery_date'],
+                'updated_by'           => $update['updated_by'],
+                'updated_at'           => now(),
+            ]);
 
-            if ($order) {
-                $this->notifyCustomer(
-                    $order->user_id,
-                    $row->order_id,
-                    "Your order of {$order->quantity_ordered} {$order->garment_type} has been delivered. Thank you!"
-                );
-
-                // Update order status to completed
-                DB::table('orders')
-                    ->where('order_id', $row->order_id)
-                    ->update(['status' => 'completed', 'updated_at' => now()]);
+            // Notify customer and close each delivered order (the set's other pieces included).
+            foreach ([(int) $row->order_id, ...$setRows->pluck('order_id')->map(fn ($v) => (int) $v)] as $orderId) {
+                $order = DB::table('orders')->where('order_id', $orderId)->select('user_id', 'garment_type', 'quantity_ordered')->first();
+                if (!$order) continue;
+                $this->notifyCustomer($order->user_id, $orderId, "Your order of {$order->quantity_ordered} {$order->garment_type} has been delivered. Thank you!");
+                SmsNotify::users([$order->user_id], 'status_changed', "VFRB: Your order #{$orderId} has been delivered. Thank you!");
+                DB::table('orders')->where('order_id', $orderId)->update(['status' => 'completed', 'updated_at' => now()]);
             }
-        }
+        });
 
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'         => 'Delivery status updated.',
-            'delivery_status' => $newStatus,
+            'message'           => $setRows->isNotEmpty()
+                ? 'Delivered, together with order #' . $setRows->pluck('order_id')->implode(', #') . ' (same uniform set).'
+                : 'Delivery status updated.',
+            'delivery_status'   => $newStatus,
+            'set_delivered_ids' => $setRows->pluck('order_id')->map(fn ($v) => (int) $v)->all(),
         ]);
+    }
+
+    // Why this delivery can't be marked Delivered yet, or null: production must be finished and a drop-off address on file.
+    private function deliveryBlocker(object $row): ?string
+    {
+        $open = (new ProductionStageService())->incompleteStages((int) $row->order_id, 'packing', true);
+        if ($open) {
+            return "Order #{$row->order_id} is still in production (" . implode(', ', $open) . '). Finish every stage before marking it delivered.';
+        }
+        $address = trim((string) $row->delivery_address);
+        if ($row->delivery_method !== 'pickup' && ($address === '' || strcasecmp($address, 'Address pending') === 0)) {
+            return "Order #{$row->order_id} has no delivery address. Add the address before marking it delivered.";
+        }
+        return null;
     }
 
     // ── PATCH /api/admin/deliveries/{id}/delivered ──────────────────────────────

@@ -30,6 +30,28 @@ class DesignController extends Controller
         return FileUrl::for($this->designRefDisk(), $rawPath);
     }
 
+    // What the showcase may publish of a design: garment shape, colours, patterns and details only. Never the design name,
+    // overlays (the client's printed names and logos), the uniform set (its order links) or the order's rendered preview photo.
+    public const SHOWCASE_KEYS = ['garment', 'fit', 'sleeve', 'category', 'colors', 'patterns', 'patternParams', 'details', 'templateId'];
+    public static function showcaseConfig(?string $json): ?array
+    {
+        $c = $json ? json_decode($json, true) : null;
+        return is_array($c) ? array_intersect_key($c, array_flip(self::SHOWCASE_KEYS)) : null;
+    }
+
+    // One public shape for the showcase and for the manager's review, so what is approved is exactly what is published.
+    private function showcaseDto(Design $d, string $label): array
+    {
+        return ['id' => $d->design_id, 'label' => $label, 'garment' => $d->garment_type, 'sleeve' => $d->sleeve_type, 'photo_path' => null,
+                'config' => self::showcaseConfig($d->custom_builder_config)];
+    }
+
+    // Latest moderation note per design (the reason a manager gave when rejecting), for the owner only.
+    private function showcaseNotes(array $ids): array
+    {
+        return DesignShowcaseAudit::whereIn('design_id', $ids)->where('action', 'rejected')->orderBy('log_id')->pluck('note', 'design_id')->all();
+    }
+
     // InspoGallery.jsx: GET /api/customer/designs
     // Returns starter catalog templates (source_order_id null) plus this
     // customer's own past designs (auto-archived on order completion —
@@ -46,6 +68,8 @@ class DesignController extends Controller
             ->orderByDesc('created_at')
             ->get();
 
+        $notes = $this->showcaseNotes($designs->where('showcase_status', 'rejected')->pluck('design_id')->all());
+
         return response()->json($designs->map(fn (Design $d) => [
             'id'          => $d->design_id,
             'label'       => $d->design_name,
@@ -56,6 +80,7 @@ class DesignController extends Controller
             'config'      => $d->custom_builder_config ? json_decode($d->custom_builder_config, true) : null,
             'is_archived' => (bool) $d->source_order_id,
             'showcase_status' => $d->showcase_status,
+            'showcase_note'   => $d->showcase_status === 'rejected' ? ($notes[$d->design_id] ?? null) : null,
         ]));
     }
 
@@ -92,7 +117,11 @@ class DesignController extends Controller
             return response()->json(['message' => 'Design not found.'], 404);
         }
 
-        $design->update(['is_active' => 0]);
+        // Deleting a design also withdraws it from the showcase: consent ends with the design.
+        if (in_array($design->showcase_status, ['submitted', 'approved'])) {
+            DesignShowcaseAudit::create(['design_id' => $id, 'actor_user_id' => Auth::id(), 'action' => 'removed', 'note' => 'Deleted by the customer']);
+        }
+        $design->update(['is_active' => 0, 'showcase_status' => in_array($design->showcase_status, ['submitted', 'approved']) ? 'none' : $design->showcase_status]);
         return response()->json(['success' => true]);
     }
 
@@ -114,39 +143,47 @@ class DesignController extends Controller
         return response()->json(['success' => true]);
     }
 
-    // Public across all customers — DTO allowlist only, no user_id/config leak.
-    public function customerShowcaseIndex()
+    // Customer withdraws consent: a submitted or approved design goes back to private at once.
+    public function customerWithdrawShowcase(int $id)
     {
-        $designs = Design::where('showcase_status', 'approved')->orderByDesc('showcase_approved_at')->get();
+        $design = $this->findOwnArchivedDesign($id);
+        if (!$design) {
+            return response()->json(['message' => 'Design not found.'], 404);
+        }
+        if (!in_array($design->showcase_status, ['submitted', 'approved'])) {
+            return response()->json(['message' => 'This design is not in the showcase.'], 409);
+        }
 
-        return response()->json($designs->map(fn (Design $d) => [
-            'id'         => $d->design_id,
-            'label'      => $d->showcase_label,
-            'garment'    => $d->garment_type,
-            'sleeve'     => $d->sleeve_type,
-            'photo_path' => $this->resolvePhotoUrl($d->photo_path),
-            'config'     => $d->custom_builder_config ? json_decode($d->custom_builder_config, true) : null,
-        ]));
+        $design->update(['showcase_status' => 'none']);
+        DesignShowcaseAudit::create(['design_id' => $id, 'actor_user_id' => Auth::id(), 'action' => 'removed', 'note' => 'Withdrawn by the customer']);
+
+        return response()->json(['success' => true, 'showcase_status' => 'none']);
     }
 
-    public function adminShowcaseQueue()
+    // Visible to every customer: approved, still-active designs, published through the allowlist only (showcaseDto).
+    public function customerShowcaseIndex()
     {
-        $designs = Design::where('showcase_status', 'submitted')->orderBy('created_at')->get();
+        $designs = Design::where('showcase_status', 'approved')->where('is_active', 1)->orderByDesc('showcase_approved_at')->get();
 
-        return response()->json($designs->map(fn (Design $d) => [
-            'id'       => $d->design_id,
-            'label'    => $d->design_name,
-            'garment'  => $d->garment_type,
-            'sleeve'   => $d->sleeve_type,
-            'config'   => $d->custom_builder_config ? json_decode($d->custom_builder_config, true) : null,
-        ]));
+        return response()->json($designs->map(fn (Design $d) => $this->showcaseDto($d, (string) $d->showcase_label))->values());
+    }
+
+    // Manager review: the same public shape the showcase will publish, plus the internal design name for reference.
+    // ?status=approved lists what is published now, so a manager can take a design down (showcase-remove).
+    public function adminShowcaseQueue(Request $request)
+    {
+        $status = $request->query('status') === 'approved' ? 'approved' : 'submitted';
+        $designs = Design::where('showcase_status', $status)->where('is_active', 1)
+            ->orderBy($status === 'approved' ? 'showcase_approved_at' : 'created_at')->get();
+
+        return response()->json($designs->map(fn (Design $d) => $this->showcaseDto($d, (string) ($status === 'approved' ? $d->showcase_label : $d->design_name)))->values());
     }
 
     public function adminShowcaseApprove(Request $request, int $id)
     {
         $validated = $request->validate(['showcase_label' => 'required|string|max:80']);
 
-        $design = Design::where('showcase_status', 'submitted')->find($id);
+        $design = Design::where('showcase_status', 'submitted')->where('is_active', 1)->find($id);
         if (!$design) {
             return response()->json(['message' => 'Design not found or not pending.'], 404);
         }

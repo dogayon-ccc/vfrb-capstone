@@ -21,6 +21,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Support\SmsNotify;
+use App\Support\UploadDisk;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -82,7 +84,8 @@ class MessageController extends Controller
                 'users.avatar as sender_avatar'
             )
             ->orderBy('order_messages.sent_at')
-            ->get();
+            ->get()
+            ->each(fn ($m) => $m->sender_avatar = UploadDisk::url($m->sender_avatar));
 
         return response()->json(['messages' => $messages]);
     }
@@ -133,6 +136,7 @@ class MessageController extends Controller
             $oid = (int) $request->input('order_id');
             \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\PortalMailNotification(
                 "New message about your VFRB order #{$oid}", ["VFRB sent you a message about order #{$oid}."], 'Read the message', "/messages?order={$oid}"));
+            SmsNotify::users([$order->user_id], 'new_message', "VFRB: You have a new message about order #{$oid}. Open the VFRB portal to read it.");
         }
 
         return response()->json(['message' => $msg], 201);
@@ -201,7 +205,8 @@ class MessageController extends Controller
                 'users.avatar as sender_avatar'
             )
             ->orderBy('order_messages.sent_at')
-            ->get();
+            ->get()
+            ->each(fn ($m) => $m->sender_avatar = UploadDisk::url($m->sender_avatar));
 
         return response()->json(['messages' => $messages]);
     }
@@ -266,6 +271,7 @@ class MessageController extends Controller
         }
         \App\Support\EmailNotify::users($staffIds, new \App\Notifications\PortalMailNotification(
             "New customer message on order #{$orderId}", ["A customer sent a message about order #{$orderId}."], 'Open messages', "/admin/messages?order={$orderId}"));
+        SmsNotify::users($staffIds, 'new_message', "VFRB: New customer message on order #{$orderId}.");
 
         return response()->json(['message' => $msg], 201);
     }

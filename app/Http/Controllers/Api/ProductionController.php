@@ -37,7 +37,7 @@
 //     Aug 29 2026 after being found missing from this branch).
 //   - stages() returns aggregate per stage for ProductionTracking.jsx pipeline display
 //   - advance() is a direct manager override (bypasses qty check, keeps gate for QC)
-//     — this one still uses checkQCGate()/notifyStageAdvance() locally below,
+//     — gated by ProductionStageService::qcBlocked() (same rule as output logging); notifyStageAdvance() stays local,
 //     since it's a different operation (force-advance with no qty write) that
 //     was never part of the two-path duplication being merged here.
 
@@ -46,6 +46,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\User;
 use App\Notifications\StageAdvancedNotification;
+use App\Services\ProductionStageService;
+use App\Support\StudioSet;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
@@ -66,7 +68,6 @@ class ProductionController extends Controller
     ];
 
     // QC pass threshold (80% per master prompt interview)
-    const QC_PASS_THRESHOLD = 0.80;
 
     // ── GET /api/admin/orders/{id}/production ─────────────────────────────────
     // Returns per-stage aggregate data for ProductionTracking.jsx pipeline display.
@@ -141,10 +142,19 @@ class ProductionController extends Controller
             return response()->json(['message' => "Order status '{$order->status}' cannot be advanced."], 422);
         }
 
-        // QC gate still applies for manager override too
-        if ($order->status === 'qc' && $this->checkQCGate($orderId)) {
+        // Override skips the auto-advance timing, never the counts: the current stage and every earlier one must be complete.
+        $open = (new ProductionStageService())->incompleteStages((int) $orderId, $order->status, true);
+        if ($open) {
             return response()->json([
-                'message'    => 'QC checklist has not passed the 80% threshold. Submit a passing QC checklist before advancing to Pressing.',
+                'message'           => 'Finish logging output before advancing: ' . implode(', ', $open) . '.',
+                'incomplete_stages' => $open,
+            ], 422);
+        }
+
+        // QC gate still applies for manager override too
+        if ($order->status === 'qc' && \App\Services\ProductionStageService::qcBlocked($order)) {
+            return response()->json([
+                'message'    => 'The latest QC checklist has not passed. Submit a passing QC checklist before advancing to Pressing.',
                 'qc_blocked' => true,
             ], 422);
         }
@@ -163,52 +173,13 @@ class ProductionController extends Controller
         }
 
         $this->notifyStageAdvance($orderId, $order->user_id, $order->status, $nextStage);
+        \App\Support\SmsNotify::orderStatus((int) $orderId, (int) $order->user_id, $order->status, $nextStage);
         Cache::forget('dashboard_stats');
 
         return response()->json([
             'message'   => "Order #{$orderId} advanced to " . ucfirst($nextStage) . ".",
             'new_stage' => $nextStage,
         ]);
-    }
-
-    // ── QC Gate: 80/20 rule ───────────────────────────────────────────────────
-    // Returns true if QC is BLOCKED (not passed), false if clear to advance.
-    private function checkQCGate(int $orderId): bool
-    {
-        // QC not required = always passes
-        $order = DB::table('orders')
-            ->where('order_id', $orderId)
-            ->select('qc_required')
-            ->first();
-        if (!$order || !$order->qc_required) {
-            return false;
-        }
-
-        // Get latest QC checklist for this order
-        $checklist = DB::table('qc_checklists')
-            ->where('order_id', $orderId)
-            ->orderByDesc('checked_at')
-            ->first();
-
-        if (!$checklist) {
-            // No checklist submitted yet = blocked
-            return true;
-        }
-
-        // Hard passed flag: explicit pass
-        if ($checklist->passed) {
-            return false;
-        }
-
-        // 80/20 rule: items_passed / items_checked >= 0.80
-        if ($checklist->items_checked > 0) {
-            $passRate = $checklist->items_passed / $checklist->items_checked;
-            if ($passRate >= self::QC_PASS_THRESHOLD) {
-                return false; // passes the 80% threshold
-            }
-        }
-
-        return true; // blocked
     }
 
     // ── Notify: stage advance ─────────────────────────────────────────────────
@@ -341,12 +312,15 @@ class ProductionController extends Controller
         ]);
         // Same email as confirming from Order Detail (OrderController::adminUpdate).
         \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\OrderStatusNotification((int) $orderId, 'confirmed'));
+        \App\Support\SmsNotify::orderStatus((int) $orderId, (int) $order->user_id, 'pending', 'confirmed');
 
+        $setConfirmed = StudioSet::confirmPendingSiblings((int) $orderId);
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'   => "Order #{$orderId} confirmed.",
-            'new_stage' => 'confirmed',
+            'message'          => "Order #{$orderId} confirmed." . ($setConfirmed ? ' Same uniform set: order #' . implode(', #', $setConfirmed) . ' confirmed too.' : ''),
+            'new_stage'        => 'confirmed',
+            'set_confirmed_ids'=> $setConfirmed,
         ]);
     }
 }

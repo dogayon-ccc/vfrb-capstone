@@ -210,6 +210,10 @@ class UserController extends Controller
         if (!$user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
+        // A customer account is never promoted into staff or manager from here.
+        if (!$this->isStaffOrManager($id)) {
+            return response()->json(['message' => 'Only staff and manager accounts can be edited here.'], 422);
+        }
 
         $request->validate([
             'role'         => 'required|in:staff,manager',
@@ -250,13 +254,7 @@ class UserController extends Controller
             return response()->json(['message' => 'You cannot deactivate your own account.'], 422);
         }
 
-        $isStaffOrManager = DB::table('model_has_roles')
-            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
-            ->where('model_has_roles.model_type', 'App\\Models\\User')
-            ->where('model_has_roles.model_id', $id)
-            ->whereIn('roles.name', ['staff', 'manager'])
-            ->exists();
-        if (!$isStaffOrManager) {
+        if (!$this->isStaffOrManager($id)) {
             return response()->json(['message' => 'Only staff and manager accounts can be activated or deactivated.'], 422);
         }
 
@@ -303,6 +301,7 @@ class UserController extends Controller
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('model_has_roles.model_id', $userId)
             ->value('roles.name') ?? 'client';
+        $user->avatar = \App\Support\UploadDisk::url($user->avatar); // stored path → URL, same as /api/user
 
         return response()->json(['user' => $user]);
     }
@@ -370,5 +369,15 @@ class UserController extends Controller
             ]);
 
         return response()->json(['message' => 'Password changed successfully.']);
+    }
+
+    private function isStaffOrManager(int $id): bool
+    {
+        return DB::table('model_has_roles')
+            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('model_has_roles.model_type', 'App\\Models\\User')
+            ->where('model_has_roles.model_id', $id)
+            ->whereIn('roles.name', ['staff', 'manager'])
+            ->exists();
     }
 }

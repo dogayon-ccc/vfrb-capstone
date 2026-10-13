@@ -4,7 +4,7 @@ namespace App\Services;
 
 /**
  * Keeps the AI inside VFRB's controlled materials catalog.
- *   eligible()  -> which catalog rows the AI may even see for this garment
+ *   eligible()  -> which catalog rows the AI may even see for this garment and design colour
  *   schema()    -> JSON schema that limits material_id to those rows
  *   normalize() -> re-validates the reply; nothing the model says is trusted
  *   fallback()  -> deterministic picks when Gemini fails or times out
@@ -19,16 +19,32 @@ final class MaterialCatalogMatcher
     // Any reply key matching this is a quantity/price/formula field the AI must never produce.
     public const FORBIDDEN_KEY = '/qty|quantit|price|cost|amount|total|yard|meter|metre|length|weight|bom|quota|formula|estimat|usage/i';
 
+    // Colour words in catalog names and order colours -> family; first match wins, so multi-word names come first.
+    private const COLOUR_WORDS = [
+        'custom color' => 'any', 'custom colour' => 'any', 'matching color' => 'any', 'matching colour' => 'any',
+        'old rose' => 'pink', 'ultra violet' => 'purple', 'light blue' => 'blue', 'sky blue' => 'blue', 'royal blue' => 'blue',
+        'navy' => 'navy', 'black' => 'black', 'charcoal' => 'black', 'gray' => 'gray', 'grey' => 'gray', 'ash' => 'gray', 'silver' => 'gray',
+        'white' => 'white', 'cream' => 'white', 'ivory' => 'white', 'maroon' => 'maroon', 'burgundy' => 'maroon', 'wine' => 'maroon',
+        'red' => 'red', 'magenta' => 'pink', 'fuchsia' => 'pink', 'pink' => 'pink', 'rose' => 'pink', 'violet' => 'purple',
+        'purple' => 'purple', 'lavender' => 'purple', 'camel' => 'brown', 'khaki' => 'brown', 'brown' => 'brown', 'beige' => 'brown',
+        'tan' => 'brown', 'mustard' => 'yellow', 'yellow' => 'yellow', 'green' => 'green', 'emerald' => 'green', 'blue' => 'blue',
+    ];
+
     /**
      * @param  iterable<array<string,mixed>> $materials rows from `materials` (toArray())
+     * @param  array<string,mixed> $designColours zone => hex or colour name (body first); empty = no colour filter
      * @return array<int,array{material_id:int,material_code:string,material_name:string,category:string,unit:string}> keyed by material_id
      */
-    public function eligible(iterable $materials, ?string $garment): array
+    public function eligible(iterable $materials, ?string $garment, array $designColours = []): array
     {
+        $families = array_filter(array_map(fn ($c) => is_string($c) ? $this->colourFamily($c) : null, $designColours));
+        $body     = $families['body'] ?? $families['all'] ?? reset($families) ?: null;
+
         $out = [];
         foreach ($materials as $m) {
             $id = (int) ($m['material_id'] ?? 0);
-            if ($id <= 0 || !$this->isAiEligible($m['ai_eligible'] ?? null) || !$this->appliesTo($m['applies_to'] ?? null, $garment)) {
+            if ($id <= 0 || !$this->isAiEligible($m['ai_eligible'] ?? null) || !$this->appliesTo($m['applies_to'] ?? null, $garment)
+                || !$this->colourFits($m, $body, $families)) {
                 continue;
             }
             $out[$id] = [
@@ -198,6 +214,53 @@ final class MaterialCatalogMatcher
             if (is_string($g) && $this->norm($g) === $want) { return true; }
         }
         return false;
+    }
+
+    // Fabric must be the body's colour family and thread one of the design's; "any" and colourless rows always fit.
+    private function colourFits(array $m, ?string $body, array $families): bool
+    {
+        $cat = mb_strtolower((string) ($m['category'] ?? ''));
+        $isFabric = str_contains($cat, 'fabric');
+        if (!$body || (!$isFabric && !str_contains($cat, 'thread'))) { return true; }
+
+        $own = $this->colourFamily((string) ($m['material_name'] ?? ''));
+        if ($own === null || $own === 'any') { return true; }
+        return $isFabric ? $own === $body : in_array($own, $families, true);
+    }
+
+    /** Colour family of a hex (#rrggbb) or a colour name; null when no colour can be read. */
+    public function colourFamily(string $colour): ?string
+    {
+        $c = mb_strtolower(trim($colour));
+        if (preg_match('/^#([0-9a-f]{6})$/', $c, $hex)) { return $this->hexFamily($hex[1]); }
+        foreach (self::COLOUR_WORDS as $word => $family) {
+            if (preg_match('/(?<![a-z])' . preg_quote($word, '/') . 's?(?![a-z])/', $c)) { return $family; }
+        }
+        return null;
+    }
+
+    // Low saturation -> black/gray/white by lightness; otherwise hue buckets, with dark red = maroon and dark blue = navy.
+    private function hexFamily(string $hex): string
+    {
+        [$r, $g, $b] = array_map(fn ($p) => hexdec($p) / 255, str_split($hex, 2));
+        $max = max($r, $g, $b); $min = min($r, $g, $b); $l = ($max + $min) / 2; $d = $max - $min;
+        $s = $d == 0 ? 0 : $d / (1 - abs(2 * $l - 1));
+
+        if ($s < 0.15 || $l < 0.08) { return $l < 0.25 ? 'black' : ($l > 0.85 ? 'white' : 'gray'); }
+        $h = match (true) {
+            $max == $r => fmod(($g - $b) / $d + 6, 6) * 60,
+            $max == $g => (($b - $r) / $d + 2) * 60,
+            default    => (($r - $g) / $d + 4) * 60,
+        };
+        return match (true) {
+            $h < 15 || $h >= 345 => $l < 0.35 ? 'maroon' : 'red',
+            $h < 50  => 'brown',
+            $h < 70  => 'yellow',
+            $h < 170 => 'green',
+            $h < 255 => $l < 0.30 && $h >= 200 ? 'navy' : 'blue',
+            $h < 290 => 'purple',
+            default  => 'pink',
+        };
     }
 
     private function norm(string $s): string

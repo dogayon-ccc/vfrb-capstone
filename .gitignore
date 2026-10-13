@@ -24,4 +24,4 @@ yarn-error.log
 .env.mysql.bak
 .env.vercel
 .claude/
-CLAUDE.md
+CLAUDE.md/vendor

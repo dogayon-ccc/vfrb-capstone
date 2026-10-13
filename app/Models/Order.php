@@ -50,6 +50,22 @@ class Order extends Model
     public function qcChecklists()    { return $this->hasMany(QCChecklist::class, 'order_id', 'order_id'); }
     public function outputLogs()      { return $this->hasMany(DailyOutputLog::class, 'order_id', 'order_id'); }
 
+    // ── Design facts the material matcher reads ───────────────────────────────
+    // Order columns first, then the Design Studio snapshot, so studio-only orders still match applies_to.
+    public function garmentName(): ?string
+    {
+        $studio = is_array($this->studio_config) ? $this->studio_config : [];
+        $g = $this->garment_type ?: ($studio['garment'] ?? $studio['garmentType'] ?? null);
+        return is_string($g) && $g !== '' ? $g : null;
+    }
+
+    // Design Studio zone colours, else the order's colour.
+    public function designColours(): array
+    {
+        $studio = is_array($this->studio_config) ? $this->studio_config : [];
+        return collect($studio['colors'] ?? [])->filter()->all() ?: ['all' => $this->color ?? 'any'];
+    }
+
     // ── Scopes ────────────────────────────────────────────────────────────────
     public function scopeForCustomer($q, $userId) { return $q->where('user_id', $userId); }
     public function scopeActive($q) {

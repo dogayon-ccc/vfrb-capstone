@@ -32,6 +32,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Support\FileUrl;
+use App\Support\StudioSet;
 use App\Models\User;
 use App\Notifications\OrderStatusNotification;
 use Illuminate\Http\Request;
@@ -50,10 +51,7 @@ class OrderController extends Controller
     // as the last resort — same three-way priority, not a new mechanism.
     private function designRefDisk(): string
     {
-        if (config('filesystems.disks.cloudinary.cloud')) {
-            return 'cloudinary';
-        }
-        return config('filesystems.default') === 's3' ? 's3' : 'public';
+        return \App\Support\UploadDisk::name();
     }
 
     // Resolves a stored design_ref_file path into a real, loadable URL on
@@ -362,6 +360,8 @@ class OrderController extends Controller
             \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
                 "New VFRB order #{$orderId}", ["A customer submitted order #{$orderId}. It is waiting for review and confirmation."],
                 'Review order', "/admin/orders/{$orderId}"));
+            \App\Support\SmsNotify::users($managerIds, 'order_submitted', "VFRB: New order #{$orderId} is waiting for review.");
+            \App\Support\SmsNotify::users([Auth::id()], 'order_submitted', "VFRB: We received your order #{$orderId}. We will confirm it soon.");
 
             return $orderId;
         });
@@ -654,6 +654,11 @@ class OrderController extends Controller
                 } catch (\Throwable $e) {
                     \Log::warning("OrderStatusNotification failed for order #{$id}: " . $e->getMessage());
                 }
+            }
+
+            \App\Support\SmsNotify::orderStatus($id, (int) $order->user_id, $order->status, $fields['status']);
+            if ($fields['status'] === 'confirmed') {
+                StudioSet::confirmPendingSiblings($id);
             }
         }
 
