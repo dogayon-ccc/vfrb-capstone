@@ -23,3 +23,5 @@ yarn-error.log
 /.zed
 .env.mysql.bak
 .env.vercel
+.claude/
+CLAUDE.md

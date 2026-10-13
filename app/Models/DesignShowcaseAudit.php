@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class DesignShowcaseAudit extends Model
 {
     public $timestamps = false; // schema has created_at only, no updated_at
+    protected $table = 'design_showcase_audit'; // singular in the schema; Eloquent would guess the plural
     protected $primaryKey = 'log_id';
 
     protected $fillable = ['design_id', 'actor_user_id', 'action', 'note'];

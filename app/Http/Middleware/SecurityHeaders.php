@@ -32,7 +32,8 @@ class SecurityHeaders
         $response->headers->set('Permissions-Policy',      'camera=(), microphone=(), geolocation=()');
 
         // API responses are JSON — not HTML/JS — so block all content sources
-        if ($request->is('api/*')) {
+        // A response that sets its own (narrower) policy keeps it — e.g. billing HTML documents.
+        if ($request->is('api/*') && !$response->headers->has('Content-Security-Policy')) {
             $response->headers->set(
                 'Content-Security-Policy',
                 "default-src 'none'; frame-ancestors 'none'"

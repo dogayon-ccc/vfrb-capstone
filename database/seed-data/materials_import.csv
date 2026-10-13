@@ -1,0 +1,33 @@
+﻿sheet_id,material_name,category,unit,supplier,unit_cost_low,unit_cost_high,unit_cost_midpoint,supplier_moq,quantity_in_stock,reorder_threshold,location,notes
+F-001,Airstretch Fabric - Maroon,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"1,201 yards",1152,300,Fabric Storage Room,Primary scrub fabric. 4-way stretch knit. Supplied by OTG for subcontract orders.
+F-002,Airstretch Fabric - Black,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"1,201 yards",1153,300,Fabric Storage Room,Same as Maroon variant.
+F-003,Airstretch Fabric - Magenta,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"2,402 yards",0,,,High-demand color.
+F-004,Airstretch Fabric - Old Rose,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"2,402 yards",0,,,
+F-005,Airstretch Fabric - Ultra Violet,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"2,402 yards",0,,,
+F-006,Airstretch Fabric - Camel,Fabric / Stretch Knit,yards,OTG (On The Go) Scrubs,,,0,"2,402 yards",0,,,
+F-007,TC Poplin 65/35 - White,Fabric / Woven,yards,Asiatex Manufacturing,55.0,80.0,67.5,50 yards,0,,,"School polo, corporate polo, office blouse. 58-60 inch width. Most common woven fabric."
+F-008,TC Poplin 65/35 - Light Blue,Fabric / Woven,yards,Asiatex Manufacturing,55.0,80.0,67.5,50 yards,0,,,"DepEd uniform, school blouse."
+F-009,TC Poplin 65/35 - Navy Blue,Fabric / Woven,yards,Asiatex Manufacturing,55.0,80.0,67.5,50 yards,0,,,"School pants, corporate polo, skirts."
+F-010,TC Twill 65/35 - Dark Navy,Fabric / Woven,yards,Asiatex Manufacturing,65.0,90.0,77.5,50 yards,0,,,"Work pants, school slacks, skirts. Twill weave = more durable than poplin."
+F-011,TC Twill 65/35 - Black,Fabric / Woven,yards,Asiatex Manufacturing,65.0,90.0,77.5,50 yards,0,,,Corporate and government utility pants.
+F-012,CVC 65/35 - White,Fabric / Woven,yards,GFT Textile (Gold Fortune Textile),60.0,85.0,72.5,50 yards,0,,,"Lab gown, nursing dress. CVC = Chief Value Cotton, softer hand feel than TC Poplin."
+F-013,Polyester Interlock / Dry-fit - Navy,Fabric / Knit,yards,GFT Textile (Gold Fortune Textile),70.0,100.0,85.0,50 yards,0,,,"PE uniform, corporate polo (alternative). Moisture-wicking."
+F-014,Polyester Interlock / Dry-fit - Custom colors,Fabric / Knit,yards,GFT Textile (Gold Fortune Textile),70.0,100.0,85.0,50 yards,0,,,"Sports jersey, PE shorts. Colors per client specification."
+T-001,Polyester Thread - Black (Industrial),Thread,kgs,Manila Bay Thread Corporation,120.0,180.0,150.0,1 kg,12,2,Thread Cabinet,General sewing + overlock. Used for dark-colored scrubs and pants.
+T-002,Polyester Thread - Maroon (Industrial),Thread,kgs,Manila Bay Thread Corporation,120.0,180.0,150.0,1 kg,12,2,Thread Cabinet,Color-matched thread for maroon scrubs.
+T-003,Polyester Thread - White (Industrial),Thread,kgs,Manila Bay Thread Corporation,120.0,180.0,150.0,1 kg,0,,,"School polo, lab gown, nursing dress."
+T-004,Polyester Thread - Navy Blue (Industrial),Thread,kgs,Manila Bay Thread Corporation,120.0,180.0,150.0,1 kg,0,,,"School pants, corporate polo, navy scrubs."
+T-005,Polyester Thread - Matching color (per order),Thread,kgs,Manila Bay Thread Corporation,140.0,200.0,170.0,1 kg,0,,,For colored garments requiring exact color match. Request via MB ColorSync service.
+A-001,Elastic Band - 2-inch wide,Accessory / Elastic,meters,(unnamed local store - no supplier record),15.0,25.0,20.0,20 meters,12,20,Accessories Box,"Waistband for scrub pants, PE shorts, school pants. Flat woven elastic."
+A-002,Elastic Band - 1-inch wide,Accessory / Elastic,meters,(unnamed local store - no supplier record),10.0,18.0,14.0,20 meters,0,,,"Cuff band, neckline finish for some designs."
+A-003,Drawstring Cord - White/Color,Accessory,yards,OTG (On The Go) Scrubs,8.0,15.0,11.5,50 yards,0,,,Scrub pants waistband drawstring. Flat or round cord. Color matches garment.
+A-004,Ribbings / Rib Knit Collar Band,Accessory / Knit Trim,pieces,OTG (On The Go) Scrubs,8.0,20.0,14.0,50 pieces,0,,,1 piece per scrub top collar. Stretch rib knit trim around V-neck or collar.
+A-005,Flat Button - 12mm (White),Accessory / Button,pieces,(unnamed local store - no supplier record),0.5,1.5,1.0,100 pieces,0,,,"School polo placket buttons, lab gown buttons. Flat 2-hole or 4-hole."
+A-006,Flat Button - 12mm (matching color),Accessory / Button,pieces,(unnamed local store - no supplier record),0.8,2.0,1.4,100 pieces,0,,,"Corporate polo, office blouse buttons. Color matched."
+A-007,Zipper - 22cm Invisible or Concealed,Accessory / Zipper,pieces,Wellmanson Sewing Notion Inc.,15.0,35.0,25.0,20 pieces,0,,,"School skirt side zipper, work slacks fly. YKK or equivalent quality."
+A-008,Zipper - 20cm Metal Trouser,Accessory / Zipper,pieces,Wellmanson Sewing Notion Inc.,20.0,45.0,32.5,20 pieces,0,,,"School pants, work pants fly. Brass metal or nickel."
+A-009,Fusible Interlining - Medium weight,Accessory / Interlining,yards,(unnamed local store - no supplier record),30.0,50.0,40.0,20 yards,0,,,"Collar stiffening, waistband reinforcement for woven garments (polo, pants)."
+L-001,VFRB / OTG Logo Patch (embroidered),Label / Logo,pieces,OTG (On The Go) Scrubs,,,0,"3,700 pieces",1500,500,Labels Drawer,"Provided by OTG for subcontract orders. For direct VFRB orders, use VFRB-branded patch."
+L-002,Size Label (woven),Label,pieces,OTG (On The Go) Scrubs,0.5,2.0,1.25,"3,700 pieces",1500,500,Labels Drawer,Sewn inside collar. OTG provides for subcontract. Direct orders need separate sourcing.
+L-003,Care Label (wash instructions),Label,pieces,(unnamed local store - no supplier record),0.5,1.5,1.0,100 pieces,0,,,Required for all garments. Philippine standard laundry symbols.
+L-004,Garment Bag / Poly Bag,Packaging,pieces,(unnamed local store - no supplier record),5.0,15.0,10.0,100 pieces,0,,,Individual garment packaging for delivery. Clear poly bag with header card.
