@@ -25,8 +25,8 @@
 //   order_production_tracking: tracking_id, order_id, stage, qty_target,
 //                               qty_completed, updated_by, notes
 //   daily_output_logs:         total_output is GENERATED — never insert it
-//   qc_checklists:             passed (explicit flag) OR items_passed/
-//                               items_checked >= 80% — either clears the gate
+//   qc_checklists:             the latest row's passed flag clears the gate (set by QCChecklistController:
+//                               80% of the sample AND every required check passes)
 //   material_recommendations:  actual_qty_issued, issued_at — written here,
 //                               now from staff-entered actual usage (see
 //                               issueMaterialsToProduction()), not a parsed
@@ -157,62 +157,81 @@ class ProductionStageService
                 ];
             }
 
-            // ── 1. Write to daily_output_logs (per-size audit trail) ─────────
-            // total_output is GENERATED ALWAYS — never insert it.
-            $logId = DB::table('daily_output_logs')->insertGetId([
-                'order_id'         => $orderId,
-                'stage'            => $stage,
-                'logged_by'        => $staffId,
-                'log_date'         => $logDate,
-                'qty_xs'           => $qtyXs,
-                'qty_s'            => $qtyS,
-                'qty_m'            => $qtyM,
-                'qty_l'            => $qtyL,
-                'qty_xl'           => $qtyXl,
-                'qty_xxl'          => $qtyXxl,
-                'qty_xxxl'         => $qtyXxxl,
-                'qty_custom'       => $qtyCustom,
-                'defect_count'     => (int) ($meta['defect_count'] ?? 0),
-                'alteration_count' => (int) ($meta['alteration_count'] ?? 0),
-                'defect_notes'     => $meta['defect_notes'] ?? null,
-                'notes'            => $notes,
-                'created_at'       => now(),
-                'updated_at'       => now(),
-            ], 'log_id');
-
-            $loggedRow = DB::table('daily_output_logs')->where('log_id', $logId)->first(['log_id', 'total_output']);
-
-            // ── 2. Upsert order_production_tracking row, locked ────────────────
+            // Tracking row read under lock before any write, so a resubmit can't push a stage past its target.
             $existing = DB::table('order_production_tracking')
                 ->where('order_id', $orderId)
                 ->where('stage', $stage)
                 ->lockForUpdate()
                 ->first();
+            $qtyTarget = $existing && $existing->qty_target > 0 ? (int) $existing->qty_target : (int) $order->quantity_ordered;
+            $done      = (int) ($existing->qty_completed ?? 0);
+            $label     = self::stageLabel($stage);
 
-            if ($existing) {
-                $newCompleted = $existing->qty_completed + $thisBatch;
-                DB::table('order_production_tracking')
-                    ->where('tracking_id', $existing->tracking_id)
-                    ->update([
-                        'qty_completed' => $newCompleted,
+            // Duplicate submit on a finished stage: log nothing, only retry the held advance below.
+            $alreadyComplete = $qtyTarget > 0 && $done >= $qtyTarget;
+            if (!$alreadyComplete && $qtyTarget > 0 && $done + $thisBatch > $qtyTarget) {
+                $left = $qtyTarget - $done;
+                return [
+                    'error'         => true,
+                    'status'        => 422,
+                    'message'       => "{$label} is at {$done}/{$qtyTarget}; only {$left} more piece" . ($left === 1 ? '' : 's') . " can be logged.",
+                    'current_stage' => $order->status,
+                ];
+            }
+
+            $logId     = null;
+            $loggedRow = null;
+            $newCompleted = $done;
+            if (!$alreadyComplete) {
+                // ── 1. Write to daily_output_logs (per-size audit trail) ─────────
+                // total_output is GENERATED ALWAYS — never insert it.
+                $logId = DB::table('daily_output_logs')->insertGetId([
+                    'order_id'         => $orderId,
+                    'stage'            => $stage,
+                    'logged_by'        => $staffId,
+                    'log_date'         => $logDate,
+                    'qty_xs'           => $qtyXs,
+                    'qty_s'            => $qtyS,
+                    'qty_m'            => $qtyM,
+                    'qty_l'            => $qtyL,
+                    'qty_xl'           => $qtyXl,
+                    'qty_xxl'          => $qtyXxl,
+                    'qty_xxxl'         => $qtyXxxl,
+                    'qty_custom'       => $qtyCustom,
+                    'defect_count'     => (int) ($meta['defect_count'] ?? 0),
+                    'alteration_count' => (int) ($meta['alteration_count'] ?? 0),
+                    'defect_notes'     => $meta['defect_notes'] ?? null,
+                    'notes'            => $notes,
+                    'created_at'       => now(),
+                    'updated_at'       => now(),
+                ], 'log_id');
+
+                $loggedRow = DB::table('daily_output_logs')->where('log_id', $logId)->first(['log_id', 'total_output']);
+
+                // ── 2. Upsert order_production_tracking row (locked above) ─────────
+                if ($existing) {
+                    $newCompleted = $done + $thisBatch;
+                    DB::table('order_production_tracking')
+                        ->where('tracking_id', $existing->tracking_id)
+                        ->update([
+                            'qty_completed' => $newCompleted,
+                            'updated_by'    => $staffId,
+                            'notes'         => $notes ?? $existing->notes,
+                            'updated_at'    => now(),
+                        ]);
+                } else {
+                    DB::table('order_production_tracking')->insert([
+                        'order_id'      => $orderId,
+                        'stage'         => $stage,
+                        'qty_target'    => $qtyTarget,
+                        'qty_completed' => $thisBatch,
                         'updated_by'    => $staffId,
-                        'notes'         => $notes ?? $existing->notes,
+                        'notes'         => $notes,
+                        'created_at'    => now(),
                         'updated_at'    => now(),
                     ]);
-                $qtyTarget = $existing->qty_target > 0 ? $existing->qty_target : $order->quantity_ordered;
-            } else {
-                $qtyTarget = (int) $order->quantity_ordered;
-                DB::table('order_production_tracking')->insert([
-                    'order_id'      => $orderId,
-                    'stage'         => $stage,
-                    'qty_target'    => $qtyTarget,
-                    'qty_completed' => $thisBatch,
-                    'updated_by'    => $staffId,
-                    'notes'         => $notes,
-                    'created_at'    => now(),
-                    'updated_at'    => now(),
-                ]);
-                $newCompleted = $thisBatch;
+                    $newCompleted = $thisBatch;
+                }
             }
 
             $pct = $qtyTarget > 0 ? min(100, round($newCompleted / $qtyTarget * 100)) : 0;
@@ -223,12 +242,18 @@ class ProductionStageService
             $newStage            = $stage;
             $deductionLog        = [];
             $lowStockAlerts      = [];
-            $message = "{$newCompleted}/{$qtyTarget} pieces logged for " . ucfirst($stage) . ".";
+            $message = $alreadyComplete
+                ? "{$label} is already complete ({$newCompleted}/{$qtyTarget}); nothing new was logged."
+                : "{$newCompleted}/{$qtyTarget} pieces logged for {$label}.";
 
             // ── 3. Auto-advance check ──────────────────────────────────────────
-            if ($newCompleted >= $qtyTarget) {
+            $earlierOpen = $newCompleted >= $qtyTarget ? $this->incompleteStages($orderId, $stage) : [];
+            if ($earlierOpen) {
+                $message = "{$label} is complete, but earlier stages are not: " . implode(', ', $earlierOpen) . ". The order stays at {$label}.";
+            }
+            if ($newCompleted >= $qtyTarget && !$earlierOpen) {
                 if ($stage === 'qc') {
-                    $qcBlocked = $this->checkQCGate($order);
+                    $qcBlocked = self::qcBlocked($order);
                     if ($qcBlocked) {
                         $message = "QC complete but checklist not passed (80% rule). Fix failing items before advancing to Pressing.";
                     }
@@ -257,13 +282,7 @@ class ProductionStageService
                 if (!$qcBlocked && !$materialsBlocked) {
                     $nextStage = self::STAGE_MAP[$stage] ?? null;
                     if ($nextStage) {
-                        DB::table('orders')
-                            ->where('order_id', $orderId)
-                            ->update(['status' => $nextStage, 'updated_at' => now()]);
-
-                        if ($stage === 'qc') {
-                            DB::table('orders')->where('order_id', $orderId)->update(['qc_passed_at' => now()]);
-                        }
+                        $this->moveStage($orderId, $stage, $nextStage);
 
                         // ── Goods Issue to Production ──────────
                         // Fires ONLY when Pattern completes (locked rule, was
@@ -295,8 +314,9 @@ class ProductionStageService
 
             return [
                 'error'                    => false,
+                'already_complete'         => $alreadyComplete,
                 'log_id'                   => $logId,
-                'total_output'             => $loggedRow->total_output ?? $thisBatch,
+                'total_output'             => $alreadyComplete ? 0 : ($loggedRow->total_output ?? $thisBatch),
                 'completed'                => (int) $newCompleted,
                 'total'                    => (int) $qtyTarget,
                 'pct'                      => $pct,
@@ -314,6 +334,31 @@ class ProductionStageService
                 ],
             ];
         });
+    }
+
+    public static function stageLabel(string $stage): string
+    {
+        return $stage === 'qc' ? 'QC' : ucfirst($stage);
+    }
+
+    // Production stages before $stage (and $stage itself when $inclusive) that haven't met their target, e.g. ["QC 0/100"].
+    public function incompleteStages(int $orderId, string $stage, bool $inclusive = false): array
+    {
+        $stages = array_slice(self::STAGE_MAP, 1, null, true); // pattern … packing
+        $upTo   = array_search($stage, array_keys($stages), true);
+        if ($upTo === false) return [];
+        $check  = array_slice(array_keys($stages), 0, $upTo + ($inclusive ? 1 : 0));
+
+        $ordered = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered');
+        $rows    = DB::table('order_production_tracking')->where('order_id', $orderId)->whereIn('stage', $check)->get()->keyBy('stage');
+
+        $open = [];
+        foreach ($check as $s) {
+            $target = ($rows[$s]->qty_target ?? 0) > 0 ? (int) $rows[$s]->qty_target : $ordered;
+            $done   = (int) ($rows[$s]->qty_completed ?? 0);
+            if ($done < $target) $open[] = self::stageLabel($s) . " {$done}/{$target}";
+        }
+        return $open;
     }
 
     // ── Material-Actuals Gate — Pattern stage only ────────────────────────────
@@ -348,40 +393,48 @@ class ProductionStageService
         return $missing;
     }
 
-    // ── QC Gate: 80/20 rule ───────────────────────────────────────────────────
-    // Ported verbatim from ProductionController::checkQCGate() — that version
-    // was chosen as canonical over OutputLogController's inline duplicate
-    // because it also honors an explicit `passed` flag (not just the 80%
-    // rate) and correctly short-circuits when qc_required = 0.
-    // Takes the already-locked $order row (from the transaction above)
-    // instead of re-querying it, since we already have it under lock.
-    private function checkQCGate(object $order): bool
+    // ── QC Gate ───────────────────────────────────────────────────────────────
+    // Shared by logOutput() and ProductionController's manager override. Blocked unless QC is not required for the
+    // order or its latest checklist passed (QCChecklistController sets passed: 80% of the sample AND every required check).
+    public static function qcBlocked(object $order): bool
     {
         if (!$order->qc_required) {
             return false;
         }
+        $latest = DB::table('qc_checklists')->where('order_id', $order->order_id)->orderByDesc('checked_at')->orderByDesc('check_id')->first();
+        return !($latest && $latest->passed);
+    }
 
-        $checklist = DB::table('qc_checklists')
-            ->where('order_id', $order->order_id)
-            ->orderByDesc('checked_at')
-            ->first();
-
-        if (!$checklist) {
-            return true; // no checklist submitted yet = blocked
-        }
-
-        if ($checklist->passed) {
-            return false; // explicit pass
-        }
-
-        if ($checklist->items_checked > 0) {
-            $passRate = $checklist->items_passed / $checklist->items_checked;
-            if ($passRate >= self::QC_PASS_THRESHOLD) {
-                return false;
+    // A passing checklist submitted after every QC piece was already logged releases the held advance to Pressing,
+    // so staff never have to log a dummy piece. Same checks as logOutput(): order at QC, QC and earlier stages complete.
+    public function releaseQcHold(int $orderId): array
+    {
+        return DB::transaction(function () use ($orderId) {
+            $order = DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->first();
+            if (!$order || $order->status !== 'qc') {
+                return ['advanced' => false, 'new_stage' => $order->status ?? null, 'message' => null];
             }
-        }
+            $open = $this->incompleteStages($orderId, 'qc', true);
+            if ($open) {
+                return ['advanced' => false, 'new_stage' => 'qc', 'message' => 'QC passed. The order moves to Pressing once these are logged: ' . implode(', ', $open) . '.'];
+            }
+            if (self::qcBlocked($order)) {
+                return ['advanced' => false, 'new_stage' => 'qc', 'message' => null];
+            }
+            $next = self::STAGE_MAP['qc'];
+            $this->moveStage($orderId, 'qc', $next);
+            $this->notifyStageAdvance($orderId, $order->user_id, 'qc', $next);
+            return ['advanced' => true, 'new_stage' => $next, 'message' => "QC passed. Order #{$orderId} advanced to " . self::stageLabel($next) . '.'];
+        });
+    }
 
-        return true; // blocked
+    // The one place an order's stage changes; leaving QC stamps qc_passed_at.
+    private function moveStage(int $orderId, string $from, string $to): void
+    {
+        DB::table('orders')->where('order_id', $orderId)->update(array_merge(
+            ['status' => $to, 'updated_at' => now()],
+            $from === 'qc' ? ['qc_passed_at' => now()] : []
+        ));
     }
 
     // ── Goods Issue to Production ─────────────────────────────

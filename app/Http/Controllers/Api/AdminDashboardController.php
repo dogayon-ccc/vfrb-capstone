@@ -371,14 +371,10 @@ class AdminDashboardController extends Controller
 
         $needsFollowUp = $orders->filter(fn($o) => $o->balance > 0)->values();
 
-        $funnelMap = ['pending'=>'Pending','confirmed'=>'Confirmed',
-            'pattern'=>'In Production','segregation'=>'In Production','cutting'=>'In Production',
-            'sewing'=>'In Production','qc'=>'In Production','pressing'=>'In Production','packing'=>'In Production',
-            'completed'=>'Delivered'];
         $funnel = ['Pending'=>0,'Confirmed'=>0,'In Production'=>0,'Delivered'=>0];
         foreach ($orders as $o) {
-            $bucket = $funnelMap[$o->status] ?? null;
-            if ($bucket) $funnel[$bucket]++;
+            $bucket = \App\Support\OrderStatusLabel::for($o->status);
+            if (isset($funnel[$bucket])) $funnel[$bucket]++;
         }
 
         return [

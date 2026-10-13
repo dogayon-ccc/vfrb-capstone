@@ -135,4 +135,61 @@ class MaterialCatalogMatcherTest extends TestCase
         $this->assertSame($this->m->designHash(['a' => 1, 'b' => ['y' => 2, 'x' => 1]]), $this->m->designHash(['b' => ['x' => 1, 'y' => 2], 'a' => 1]));
         $this->assertNotSame($this->m->designHash(['fit' => 'slim']), $this->m->designHash(['fit' => 'regular']));
     }
+
+    // Names mirror the live catalog, where colour is part of the material name.
+    private function colourCatalog(): array
+    {
+        $rows = [
+            55 => ['Airstretch Fabric - Maroon', 'Fabric'], 56 => ['Airstretch Fabric - Black', 'Fabric'],
+            63 => ['TC Poplin 65/35 - Navy Blue', 'Fabric'], 65 => ['TC Twill 65/35 - Black', 'Fabric'],
+            68 => ['Polyester Interlock / Dry-fit - Custom colors', 'Fabric'],
+            69 => ['Polyester Thread - Black (Industrial)', 'Thread'], 70 => ['Polyester Thread - Maroon (Industrial)', 'Thread'],
+            72 => ['Polyester Thread - Navy Blue (Industrial)', 'Thread'], 73 => ['Polyester Thread - Matching color (per order)', 'Thread'],
+            74 => ['Elastic Band - 2-inch wide', 'Elastic'], 78 => ['Flat Button - 12mm (White)', 'Accessories'],
+        ];
+        return array_map(fn ($id, $r) => ['material_id' => $id, 'material_name' => $r[0], 'category' => $r[1], 'unit' => 'pcs'], array_keys($rows), $rows);
+    }
+
+    public function test_gray_garment_never_gets_maroon_or_black_fabric(): void
+    {
+        // Live order #22: gray scrub top with navy trim.
+        $ids = array_keys($this->m->eligible($this->colourCatalog(), 'Scrub Top', ['body' => '#808080', 'collar' => '#1B2A4A']));
+        $this->assertSame([68, 72, 73, 74, 78], $ids);
+    }
+
+    public function test_black_garment_gets_black_fabric_and_thread_only(): void
+    {
+        // Live order #23: #282828 joggers with green trim.
+        $ids = array_keys($this->m->eligible($this->colourCatalog(), 'Pants', ['body' => '#282828', 'collar' => '#00A86B']));
+        $this->assertSame([56, 65, 68, 69, 73, 74, 78], $ids);
+    }
+
+    public function test_colour_name_on_the_order_is_used_when_there_is_no_studio_design(): void
+    {
+        $ids = array_keys($this->m->eligible($this->colourCatalog(), 'Polo Shirt', ['all' => 'Navy']));
+        $this->assertSame([63, 68, 72, 73, 74, 78], $ids);
+    }
+
+    public function test_unknown_colour_filters_nothing(): void
+    {
+        $this->assertCount(11, $this->m->eligible($this->colourCatalog(), 'Pants', ['all' => 'any']));
+        $this->assertCount(11, $this->m->eligible($this->colourCatalog(), 'Pants'));
+    }
+
+    public function test_fallback_follows_the_colour_filter(): void
+    {
+        $eligible = $this->m->eligible($this->colourCatalog(), 'Scrub Top', ['body' => 'Gray']);
+        $picked   = array_column($this->m->fallback($eligible)['selections'], 'material_id');
+        $this->assertNotContains(55, $picked);
+        $this->assertSame([68, 73], $picked);
+    }
+
+    public function test_colour_families(): void
+    {
+        foreach (['#282828' => 'black', '#808080' => 'gray', '#FFFFFF' => 'white', '#1E3A5F' => 'navy', '#800000' => 'maroon',
+                  '#00A86B' => 'green', 'Old Rose' => 'pink', 'Dark Navy' => 'navy', 'Camel' => 'brown', 'Custom colors' => 'any',
+                  'Care Label (wash instructions)' => null, 'Standard' => null] as $in => $want) {
+            $this->assertSame($want, $this->m->colourFamily($in), $in);
+        }
+    }
 }

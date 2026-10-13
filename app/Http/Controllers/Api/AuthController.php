@@ -483,8 +483,9 @@ class AuthController extends Controller
             'organization_name' => $user->organization_name,
             'address'           => $user->address,
             'client_type'       => $user->client_type,
-            'avatar'            => $user->avatar,
+            'avatar'            => \App\Support\UploadDisk::url($user->avatar),
             'job_function'      => $user->job_function ?? 'general',
+            'appearance'        => \App\Models\NotificationPreference::appearanceFor((int) $user->user_id),
         ];
     }
 }

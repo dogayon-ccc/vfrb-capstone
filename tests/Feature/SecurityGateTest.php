@@ -119,6 +119,61 @@ class SecurityGateTest extends TestCase
         $this->assertNotSame('completed', DB::table('orders')->where('order_id', 1)->value('status'));
     }
 
+    public function test_only_inventory_staff_can_receive_a_purchase_order(): void
+    {
+        DB::table('users')->where('user_id', 4)->update(['job_function' => 'production']);
+        $this->actAs(4);
+        $this->patchJson('/api/admin/purchase-orders/999999/receive')->assertForbidden();
+
+        DB::table('users')->where('user_id', 4)->update(['job_function' => 'inventory']);
+        $this->actAs(4);
+        $this->patchJson('/api/admin/purchase-orders/999999/receive')->assertNotFound();
+    }
+
+    public function test_admin_cannot_create_or_promote_customer_accounts(): void
+    {
+        $this->actAs(1);
+        $body = ['name' => 'X', 'email' => 'new-cust@gmail.com', 'password' => 'Secret#123', 'password_confirmation' => 'Secret#123', 'role' => 'customer'];
+        foreach (['/api/admin/users', '/api/admin/users/create'] as $url) {
+            $this->postJson($url, $body)->assertStatus(422)->assertJsonValidationErrors('role');
+        }
+        $this->assertFalse(DB::table('users')->where('email', 'new-cust@gmail.com')->exists());
+
+        // An existing customer account (user 5) cannot be turned into staff from User Management.
+        $this->putJson('/api/admin/users/5', ['role' => 'staff'])->assertStatus(422);
+        $this->assertSame(['customer'], DB::table('model_has_roles')->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
+            ->where('model_has_roles.model_id', 5)->pluck('roles.name')->all());
+    }
+
+    public function test_activity_log_and_transactions_name_the_actor_and_time_on_every_row(): void
+    {
+        if (DB::connection()->getDriverName() !== 'mysql') {
+            $this->markTestSkipped('Writes a test payment; run on the local MySQL vfrb_test only.');
+        }
+        $this->actAs(1);
+        $ghost = DB::table('users')->max('user_id') + 1000; // a deleted staff account
+        DB::statement('SET FOREIGN_KEY_CHECKS=0');
+        $txn = DB::table('sales_transactions')->insertGetId([
+            'order_id' => DB::table('orders')->whereNotIn('order_id', DB::table('sales_transactions')->pluck('order_id'))->value('order_id'),
+            'processed_by' => $ghost, 'amount_total' => 100, 'amount_paid' => 50, 'balance_due' => 50, 'payment_method' => 'cash',
+            'payment_terms' => 'down_payment', 'completion_status' => 'processing', 'date_processed' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ], 'transaction_id');
+        DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        $rows = collect($this->getJson('/api/admin/transactions?per_page=100')->assertOk()->json('data'));
+        $this->assertTrue($rows->contains('transaction_id', $txn), 'a payment by a deleted user must still be listed');
+        foreach ($rows as $r) {
+            $this->assertNotEmpty($r['processed_by_name']);
+            $this->assertNotEmpty($r['processed_at']);
+        }
+        $this->getJson("/api/admin/transactions/{$txn}")->assertOk()->assertJson(['processed_by_name' => 'Unknown user'])->assertJsonStructure(['processed_at']);
+
+        foreach ($this->getJson('/api/admin/activity-log?per_page=100')->assertOk()->json('data') as $r) {
+            $this->assertNotEmpty($r['actor_name']);
+            $this->assertNotEmpty($r['occurred_at']);
+        }
+    }
+
     public function test_manager_reaches_manager_endpoints(): void
     {
         $this->actAs(1);
@@ -179,10 +234,11 @@ class SecurityGateTest extends TestCase
         $this->patchJson('/api/admin/users/5/toggle')->assertStatus(422);
     }
 
-    public function test_public_chat_endpoint_rejects_oversized_context(): void
+    // Free-form chat was removed (AI scope: materials + B5 design edits): a chat payload is refused before any AI call.
+    public function test_public_design_endpoint_has_no_free_chat_and_caps_the_brief(): void
     {
-        $this->postJson('/api/ai/describe-design', [
-            'mode' => 'chat', 'prompt' => 'hi', 'chat_context' => str_repeat('a', 12001),
-        ])->assertStatus(422);
+        $this->postJson('/api/ai/describe-design', ['mode' => 'chat', 'prompt' => 'hi', 'chat_context' => 'anything'])
+            ->assertStatus(422)->assertJsonValidationErrors('description');
+        $this->postJson('/api/ai/describe-design', ['description' => str_repeat('a', 501)])->assertStatus(422);
     }
 }

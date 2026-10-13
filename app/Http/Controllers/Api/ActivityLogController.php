@@ -115,6 +115,13 @@ class ActivityLogController extends Controller
             // arm would just run a permanently-empty query forever — removing it is
             // pure cleanup, not a behavior change (it already returned zero rows).
 
+            // Payments: who recorded each one and when (amounts stay on Sales & Pay).
+            DB::table('sales_transactions')
+                ->selectRaw("'payment_recorded' as action_type, processed_by as actor_user_id,
+                    CONCAT('Recorded payment for order #', order_id, ' — ', REPLACE(payment_method, '_', ' '), CASE WHEN or_number IS NOT NULL THEN CONCAT(', OR ', or_number) ELSE '' END) as description,
+                    CONCAT('order:', order_id) as target, COALESCE(date_processed, created_at) as occurred_at")
+                ->whereNotNull('processed_by'),
+
             DB::table('company_settings')
                 ->selectRaw("'settings_updated' as action_type, updated_by as actor_user_id,
                     'Updated company settings' as description,
@@ -188,7 +195,7 @@ class ActivityLogController extends Controller
             'output_logged', 'stage_progress', 'qc_checked', 'physical_count',
             'count_reconciled', 'inventory_stock_in', 'inventory_stock_out',
             'inventory_adjustment', 'inventory_wastage', 'delivery_updated',
-            'po_created', 'rfq_created', 'settings_updated',
+            'po_created', 'rfq_created', 'payment_recorded', 'settings_updated',
         ]);
     }
 }

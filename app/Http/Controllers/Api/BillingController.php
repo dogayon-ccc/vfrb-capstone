@@ -151,7 +151,8 @@ class BillingController extends Controller
         ];
 
         if ($admin) {
-            $out['can_issue']  = !$invoice && $order->status !== 'cancelled' && $order->agreed_total !== null;
+            $out['awaiting_delivery'] = !$invoice && !$this->billing->reachedDelivery($orderId);
+            $out['can_issue']  = !$invoice && !$out['awaiting_delivery'] && $order->status !== 'cancelled' && $order->agreed_total !== null;
             $out['void_count'] = Invoice::where('order_id', $orderId)->where('status', 'void')->count();
             $out['billing_profiles'] = DB::table('billing_profiles')
                 ->where('user_id', DB::table('orders')->where('order_id', $orderId)->value('user_id'))

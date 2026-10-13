@@ -408,6 +408,7 @@ class InventoryController extends Controller
         // Same 24-hour dedupe as the in-app alert above.
         \App\Support\EmailNotify::users($managers, new \App\Notifications\PortalMailNotification(
             "Low stock: {$materialName}", [$message, 'Reorder or record incoming stock to clear this alert.'], 'Open inventory', '/admin/inventory'));
+        \App\Support\SmsNotify::users($managers, 'low_stock', "VFRB: Low stock on {$materialName}. Reorder or record incoming stock.");
     }
 
     // ratesIndex()/ratesUpsert()/ratesDestroy() removed Aug 28 2026 — no

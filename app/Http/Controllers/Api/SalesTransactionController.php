@@ -37,20 +37,8 @@ class SalesTransactionController extends Controller
         $perPage = (int) $request->input('per_page', 20);
         $search  = $request->input('search', '');
 
-        $query = DB::table('sales_transactions')
-            ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
-            ->join('users',  'orders.user_id', '=', 'users.user_id')
-            ->join('users as staff', 'sales_transactions.processed_by', '=', 'staff.user_id')
-            ->select(
-                'sales_transactions.*',
-                'orders.garment_type',
-                'orders.quantity_ordered',
-                'orders.status as order_status',
-                'orders.color',
-                'users.name as customer_name',
-                'users.organization_name',
-                'staff.name as processed_by_name'
-            )
+        $query = $this->withActor()
+            ->addSelect('orders.status as order_status', 'orders.color')
             ->orderByDesc('sales_transactions.date_processed');
 
         if ($search) {
@@ -67,13 +55,7 @@ class SalesTransactionController extends Controller
     // ── GET /api/admin/transactions/{id} ──────────────────────────────────────
     public function show(int $id)
     {
-        $txn = DB::table('sales_transactions')
-            ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
-            ->join('users',  'orders.user_id', '=', 'users.user_id')
-            ->where('sales_transactions.transaction_id', $id)
-            ->select('sales_transactions.*', 'orders.garment_type', 'orders.quantity_ordered',
-                     'users.name as customer_name', 'users.organization_name')
-            ->first();
+        $txn = $this->withActor()->where('sales_transactions.transaction_id', $id)->first();
 
         if (!$txn) {
             return response()->json(['message' => 'Transaction not found.'], 404);
@@ -85,13 +67,7 @@ class SalesTransactionController extends Controller
     // Official Receipt PDF — proof of payment, distinct from the order invoice.
     public function downloadReceiptPdf(int $id)
     {
-        $txn = DB::table('sales_transactions')
-            ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
-            ->join('users',  'orders.user_id', '=', 'users.user_id')
-            ->where('sales_transactions.transaction_id', $id)
-            ->select('sales_transactions.*', 'orders.garment_type', 'orders.quantity_ordered',
-                     'users.name as customer_name', 'users.organization_name')
-            ->first();
+        $txn = $this->withActor()->where('sales_transactions.transaction_id', $id)->first();
 
         if (!$txn) {
             return response()->json(['message' => 'Transaction not found.'], 404);
@@ -177,6 +153,27 @@ class SalesTransactionController extends Controller
 
         Cache::forget('dashboard_stats');
 
-        return response()->json($txn, $txn->wasRecentlyCreated ? 201 : 200);
+        return response()->json(
+            $this->withActor()->where('sales_transactions.transaction_id', $txn->transaction_id)->first(),
+            $txn->wasRecentlyCreated ? 201 : 200
+        );
+    }
+
+    // Transaction rows with order, customer, and who recorded the payment and when; a deleted user never hides a row.
+    private function withActor()
+    {
+        return DB::table('sales_transactions')
+            ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
+            ->join('users',  'orders.user_id', '=', 'users.user_id')
+            ->leftJoin('users as staff', 'sales_transactions.processed_by', '=', 'staff.user_id')
+            ->select(
+                'sales_transactions.*',
+                'orders.garment_type',
+                'orders.quantity_ordered',
+                'users.name as customer_name',
+                'users.organization_name',
+                DB::raw("COALESCE(staff.name, 'Unknown user') as processed_by_name"),
+                DB::raw('COALESCE(sales_transactions.date_processed, sales_transactions.updated_at) as processed_at')
+            );
     }
 }

@@ -135,6 +135,8 @@ class OutputLogController extends Controller
 
         return response()->json([
             'message'                  => 'Output logged successfully.',
+            'detail'                   => $result['message'],
+            'already_complete'         => $result['already_complete'],
             'log_id'                   => $result['log_id'],
             'total_output'             => $result['total_output'],
             'stage_total'              => $result['completed'],

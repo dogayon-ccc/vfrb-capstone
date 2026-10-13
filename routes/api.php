@@ -56,6 +56,7 @@ use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\ShippingAddressController;
 use App\Http\Controllers\Api\SalesTransactionController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\ProfilePhotoController;
 use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\OrderDraftController;
 use App\Http\Controllers\Api\VersionController;
@@ -85,6 +86,8 @@ Route::post('/password/reset',  [AuthController::class, 'resetPassword'])->middl
 
 // ── AI Design Studio prompt (PUBLIC — customer uses before login) ─
 Route::post('/ai/describe-design', [AIController::class, 'describeDesign'])->middleware('throttle:30,1');
+// Studio edit-by-instruction: strict operations on the current template's real zones (AIController::designEdits).
+Route::post('/ai/design-edits', [AIController::class, 'designEdits'])->middleware('throttle:20,1');
 
 // ── Google OAuth ──────────────────────────────────────────────
 // Real routes now live in routes/web.php (Aug 23 2026) — GET
@@ -118,6 +121,12 @@ Route::middleware(['auth:sanctum', 'auth.throttle:shared,60'])->group(function (
     // Settings.jsx: GET/PATCH /api/settings/notifications
     Route::get('/settings/notifications',   [SettingsController::class, 'notificationShow']);
     Route::patch('/settings/notifications', [SettingsController::class, 'notificationUpdate']);
+
+    // ── Appearance + profile photo (own account only, any role) ───
+    Route::get('/settings/appearance',   [SettingsController::class, 'appearanceShow']);
+    Route::patch('/settings/appearance', [SettingsController::class, 'appearanceUpdate']);
+    Route::post('/profile/photo',   [ProfilePhotoController::class, 'store'])->middleware('auth.throttle:avatar-upload,10');
+    Route::delete('/profile/photo', [ProfilePhotoController::class, 'destroy']);
 
 });
 
@@ -183,6 +192,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::delete('/designs/{id}', [DesignController::class, 'customerDestroy']);
     Route::get('/designs/showcase', [DesignController::class, 'customerShowcaseIndex']);
     Route::post('/designs/{id}/submit-showcase', [DesignController::class, 'customerSubmitShowcase']);
+    Route::post('/designs/{id}/withdraw-showcase', [DesignController::class, 'customerWithdrawShowcase']);
 
     // ── Messages ─────────────────────────────────────────────────
     // Messages.jsx:    GET  /api/customer/messages         (thread list)
@@ -340,9 +350,10 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::patch('/production-incidents/{id}/resolve',   [ProductionIncidentController::class, 'resolve'])->middleware('jobfn:production');
 
     // ── QC Checklist ─────────────────────────────────────────────
-    // QCChecklist.jsx: GET  /api/admin/orders/{orderId}/qc
-    //                  POST /api/admin/orders/{orderId}/qc
+    // DailyOutputLog.jsx (inline at the QC stage): GET/POST /api/admin/orders/{orderId}/qc
+    // QCChecklist.jsx (read-only history):          GET /api/admin/qc-checklists
     Route::get('/orders/{orderId}/qc',  [QCChecklistController::class, 'show'])->middleware('jobfn:production');
+    Route::get('/qc-checklists',        [QCChecklistController::class, 'index'])->middleware('jobfn:production');
     Route::post('/orders/{orderId}/qc', [QCChecklistController::class, 'store'])->middleware('jobfn:production');
 
     // ── Daily Output Logs ─────────────────────────────────────────
@@ -430,7 +441,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::get('/purchase-orders',                           [PurchaseOrderController::class, 'index']);
     Route::post('/purchase-orders',                          [PurchaseOrderController::class, 'store']);
     Route::get('/purchase-orders/{id}',                      [PurchaseOrderController::class, 'show']);
-    Route::patch('/purchase-orders/{id}/receive',            [PurchaseOrderController::class, 'receive']);
+    Route::patch('/purchase-orders/{id}/receive',            [PurchaseOrderController::class, 'receive'])->middleware('jobfn:inventory'); // credits stock, same guard as stock-in
 
     // ── RFQ ───────────────────────────────────────────────────────
     // PurchaseOrders.jsx: GET  /api/admin/rfq

@@ -29,10 +29,13 @@ use Illuminate\Support\Facades\DB;
 
 class QCChecklistController extends Controller
 {
-    const QC_PASS_THRESHOLD = 0.80;
+    const QC_PASS_THRESHOLD = \App\Services\ProductionStageService::QC_PASS_THRESHOLD;
+    // Inspection checks. button_ok is optional: left unanswered (no fasteners) it is stored NULL and does not block a pass; answered Fail it does.
+    const CHECK_LABELS = ['stitching_ok' => 'Stitching', 'color_ok' => 'Color match', 'size_ok' => 'Size / fit',
+                          'label_ok' => 'Labels', 'finish_ok' => 'Finish', 'button_ok' => 'Buttons / zip'];
 
     // ── GET /api/admin/orders/{orderId}/qc ────────────────────────────────────
-    // QCChecklist.jsx loads the existing checklist on mount
+    // DailyOutputLog.jsx loads the latest checklist when the QC stage is selected
     public function show(int $orderId)
     {
         $order = DB::table('orders')->where('order_id', $orderId)->first();
@@ -41,9 +44,9 @@ class QCChecklistController extends Controller
         }
 
         $checklist = DB::table('qc_checklists')
-            ->join('users', 'qc_checklists.checked_by', '=', 'users.user_id')
+            ->leftJoin('users', 'qc_checklists.checked_by', '=', 'users.user_id')
             ->where('qc_checklists.order_id', $orderId)
-            ->select('qc_checklists.*', 'users.name as checked_by_name')
+            ->select('qc_checklists.*', DB::raw("COALESCE(users.name, 'Unknown user') as checked_by_name"))
             ->orderByDesc('qc_checklists.checked_at')
             ->first();
 
@@ -110,9 +113,10 @@ class QCChecklistController extends Controller
             $request->boolean('size_ok',      false),
             $request->boolean('label_ok',     false),
             $request->boolean('finish_ok',    false),
-            $request->boolean('button_ok',    false),
+            $request->input('button_ok') === null ? true : $request->boolean('button_ok'),
         ];
         $allBoolsPassed = !in_array(false, $boolChecks, true);
+        $failedChecks   = array_keys(array_filter(self::CHECK_LABELS, fn ($label, $key) => !($key === 'button_ok' && $request->input($key) === null) && !$request->boolean($key, false), ARRAY_FILTER_USE_BOTH));
 
         $passed = ($passRate >= self::QC_PASS_THRESHOLD && $allBoolsPassed) ? 1 : 0;
 
@@ -129,7 +133,7 @@ class QCChecklistController extends Controller
             'size_ok'      => $request->boolean('size_ok',      false) ? 1 : 0,
             'label_ok'     => $request->boolean('label_ok',     false) ? 1 : 0,
             'finish_ok'    => $request->boolean('finish_ok',    false) ? 1 : 0,
-            'button_ok'    => $request->boolean('button_ok',    false) ? 1 : 0,
+            'button_ok'    => $request->input('button_ok') === null ? null : ($request->boolean('button_ok') ? 1 : 0),
             'passed'       => $passed,
             'items_checked'=> $itemsChecked,
             'items_passed' => $itemsPassed,
@@ -166,13 +170,41 @@ class QCChecklistController extends Controller
         \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
             ($passed ? 'QC passed' : 'QC not passed') . " on order #{$orderId}", [$qcMessage], 'Open order', "/admin/orders/{$orderId}"));
 
+        // A pass after every QC piece was logged moves the order to Pressing now (no dummy re-log needed).
+        $release = $passed ? (new \App\Services\ProductionStageService())->releaseQcHold($orderId) : ['advanced' => false, 'new_stage' => $order->status, 'message' => null];
+        $checklist->checked_by_name = Auth::user()?->name;
+
         return response()->json([
             'checklist' => $checklist,
             'passed'    => (bool) $passed,
             'pass_rate' => round($passRate * 100, 1),
+            'advanced'  => $release['advanced'],
+            'new_stage' => $release['new_stage'],
             'message'   => $passed
-                ? "QC passed ({$itemsPassed}/{$itemsChecked} pieces, " . round($passRate * 100) . "%). Order can advance to Pressing."
-                : "QC not yet passed. Pass rate: " . round($passRate * 100, 1) . "% (need " . (self::QC_PASS_THRESHOLD * 100) . "%). Correct failing items and resubmit.",
+                ? ($release['message'] ?? "QC passed ({$itemsPassed}/{$itemsChecked} pieces, " . round($passRate * 100) . "%). The order moves to Pressing once all QC pieces are logged.")
+                : ($passRate < self::QC_PASS_THRESHOLD
+                    ? "QC not passed. Pass rate " . round($passRate * 100, 1) . "% (need " . (self::QC_PASS_THRESHOLD * 100) . "%). Correct failing pieces and resubmit."
+                    : 'QC not passed: ' . implode(', ', array_map(fn ($k) => self::CHECK_LABELS[$k], $failedChecks)) . ' failed. Correct them and resubmit.'),
         ], 201);
+    }
+
+    // ── GET /api/admin/qc-checklists ──────────────────────────────────────────
+    // QCChecklist.jsx history (read-only): every submitted checklist, newest first, with who recorded it and when.
+    public function index(Request $request)
+    {
+        $request->validate([
+            'order_id' => 'nullable|integer',
+            'result'   => 'nullable|in:passed,failed',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+        $q = DB::table('qc_checklists')
+            ->join('orders', 'orders.order_id', '=', 'qc_checklists.order_id')
+            ->leftJoin('users', 'users.user_id', '=', 'qc_checklists.checked_by')
+            ->select('qc_checklists.*', 'orders.garment_type', 'orders.status as order_status',
+                DB::raw("COALESCE(users.name, 'Unknown user') as checked_by_name"))
+            ->orderByDesc('qc_checklists.checked_at')->orderByDesc('qc_checklists.check_id');
+        if ($request->filled('order_id')) $q->where('qc_checklists.order_id', (int) $request->input('order_id'));
+        if ($request->filled('result'))   $q->where('qc_checklists.passed', $request->input('result') === 'passed' ? 1 : 0);
+        return response()->json($q->paginate((int) $request->input('per_page', 25)));
     }
 }

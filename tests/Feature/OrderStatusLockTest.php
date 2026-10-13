@@ -76,6 +76,10 @@ class OrderStatusLockTest extends TestCase
         $this->patchJson('/api/admin/orders/1', ['status' => 'pending'])->assertStatus(422);
         $this->assertSame('pattern', $this->statusOf(1));
 
+        // The manager override only advances a stage whose output is fully logged.
+        $target = (int) DB::table('orders')->where('order_id', 1)->value('quantity_ordered');
+        DB::table('order_production_tracking')->updateOrInsert(['order_id' => 1, 'stage' => 'pattern'],
+            ['qty_target' => $target, 'qty_completed' => $target, 'updated_at' => now()]);
         $this->postJson('/api/admin/orders/1/advance')->assertOk();
         $this->assertSame('segregation', $this->statusOf(1));
     }

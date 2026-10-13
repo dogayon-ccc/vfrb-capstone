@@ -25,8 +25,11 @@ class NotificationPreferenceController extends Controller
     {
         $data = $request->validate([
             'email_enabled' => 'required|boolean',
-            'sms_enabled'   => 'required|boolean|declined',
-        ], ['sms_enabled.declined' => 'SMS needs a gateway; not enabled.']);
+            'sms_enabled'   => 'required|boolean',
+        ]);
+        if ($error = SettingsController::smsOptInError($request)) {
+            return response()->json(['message' => $error, 'errors' => ['sms_enabled' => [$error]]], 422);
+        }
 
         $pref = NotificationPreference::firstOrCreate(['user_id' => Auth::id()]);
         $pref->update($data);
