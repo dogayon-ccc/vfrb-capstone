@@ -36,6 +36,7 @@ use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\BillingController;
 use App\Http\Controllers\Api\BillingProfileController;
 use App\Http\Controllers\Api\NotificationPreferenceController;
 use App\Http\Controllers\Api\CustomerFabricPreferenceController;
@@ -168,6 +169,11 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // never called by the frontend anyway. OrderDetail.jsx actually calls
     // GET /api/customer/orders/{id}/ai-recommendation — routed here now.
     Route::get('/orders/{id}/ai-recommendation', [AIController::class, 'showForOrder']);
+
+    // ── Billing (Oct 14 2026): own orders only; ?format=pdf (A4) or ?format=html (mobile) ──
+    Route::get('/orders/{id}/billing',      [BillingController::class, 'customerOrderBilling']);
+    Route::get('/invoices/{id}/document',   [BillingController::class, 'customerInvoiceDocument']);
+    Route::get('/receipts/{id}/document',   [BillingController::class, 'customerReceiptDocument']);
 
     // ── Design archive/catalog (InspoGallery.jsx) ────────────────
     // GET /api/customer/designs — starter templates + this customer's
@@ -463,6 +469,11 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     Route::get('/transactions/{id}', [SalesTransactionController::class, 'show']);
     Route::get('/transactions/{id}/receipt-pdf', [SalesTransactionController::class, 'downloadReceiptPdf']);
 
+    // ── Billing documents (Oct 14 2026): read-only for staff; issue/mark-paid/void are manager-only below ──
+    Route::get('/orders/{id}/billing',      [BillingController::class, 'adminOrderBilling']);
+    Route::get('/invoices/{id}/document',   [BillingController::class, 'adminInvoiceDocument']);
+    Route::get('/receipts/{id}/document',   [BillingController::class, 'adminReceiptDocument']);
+
     // ── Reports (TASK P) moved to the manager-only group below (Sept 15
     // 2026, QA account) — Reports is manager-exclusive per the locked
     // business rules; both routes were reachable by staff here, a real
@@ -497,6 +508,11 @@ Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])-
     Route::get('/reports',                 [AdminReportController::class, 'index']);
     Route::get('/reports/sales',           [AdminReportController::class, 'salesSummary']);
     Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
+
+    // ── Billing actions (Oct 14 2026): amounts come only from orders.agreed_total and recorded payments ──
+    Route::post('/orders/{id}/invoice',       [BillingController::class, 'issue']);
+    Route::patch('/invoices/{id}/mark-paid',  [BillingController::class, 'markPaid']);
+    Route::patch('/invoices/{id}/void',       [BillingController::class, 'void']);
 
     // ── Design showcase moderation (Sept 18 2026) ──────────────────
     // ── AI recommendation guidance (Oct 13 2026): manager-written prompt grounding ──

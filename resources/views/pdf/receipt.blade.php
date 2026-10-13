@@ -32,7 +32,8 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
     <div class="sub">31 San Guillermo St., Bayanan, Muntinlupa City<br/>Garment Manufacturing since 2000</div>
   </div>
   <div class="hdr-r">
-    <div class="doc">Official Receipt</div>
+    <div class="doc">{{ $labels['receipt_title'] }}</div>
+    @if($labels['receipt_note'])<div style="font-size:9px;color:#b45309;font-weight:700;">{{ $labels['receipt_note'] }}</div>@endif
     <div class="doc-num">{{ $txn['or_number'] ?? ('TXN-' . $txn['transaction_id']) }}</div>
   </div>
 </div>

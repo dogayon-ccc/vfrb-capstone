@@ -15,7 +15,7 @@ class CompanySetting extends Model
 
     protected $fillable = [
         'company_name', 'logo_path', 'address', 'contact_number',
-        'contact_email', 'updated_by',
+        'contact_email', 'tin', 'invoice_terms', 'updated_by',
     ];
 
     public function updater() { return $this->belongsTo(User::class, 'updated_by', 'user_id'); }

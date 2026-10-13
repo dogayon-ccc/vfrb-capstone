@@ -99,6 +99,7 @@ class SalesTransactionController extends Controller
 
         $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt', [
             'txn'       => (array) $txn,
+            'labels'    => app(\App\Services\BillingService::class)->labels(),
             'printedAt' => now()->format('F d, Y g:i A'),
         ])->setPaper('a4', 'portrait');
 
@@ -129,72 +130,23 @@ class SalesTransactionController extends Controller
             // not here, because "required" depends on whether a
             // sales_transactions row already exists for this order.
             'amount_total'   => 'nullable|numeric|min:0.01',
+            'reference_no'   => 'nullable|string|max:50',
         ]);
 
         $newAmountPaid = (float) $request->input('amount_paid');
 
-        // Locked transaction — was a read-modify-write race on amount_paid,
-        // could double-count on double-click/retry.
-        $result = DB::transaction(function () use ($request, $newAmountPaid) {
-            $order = DB::table('orders')
-                ->where('order_id', $request->input('order_id'))
-                ->select('order_id', 'user_id', 'agreed_total')
-                ->lockForUpdate()
-                ->first();
-
-            $existingTxn = DB::table('sales_transactions')
-                ->where('order_id', $order->order_id)
-                ->lockForUpdate()
-                ->first();
-
-            if (!$existingTxn) {
-                // First payment — total must be recorded now (no pricing engine here).
-                $amountTotalInput = $request->input('amount_total');
-                if ($amountTotalInput === null || (float) $amountTotalInput <= 0) {
-                    return ['error' => [
-                        'message' => 'Record the order total (amount_total) on the first payment before recording additional payments.',
-                        'errors'  => ['amount_total' => ['The order total is required for an order\'s first payment.']],
-                    ]];
-                }
-                $amountTotal = (float) $amountTotalInput;
-
-                DB::table('orders')->where('order_id', $order->order_id)->update([
-                    'agreed_total' => $amountTotal,
-                    'updated_at'   => now(),
-                ]);
-                $cumulativePaid = $newAmountPaid;
-            } else {
-                // Subsequent payment — total comes from orders.agreed_total, not the client.
-                if ($order->agreed_total === null) {
-                    return ['error' => ['message' => 'Record the order total on the first payment before recording additional payments.']];
-                }
-                $amountTotal    = (float) $order->agreed_total;
-                $cumulativePaid = (float) $existingTxn->amount_paid + $newAmountPaid;
-            }
-
-            $balanceDue       = max(0, round($amountTotal - $cumulativePaid, 2));
-            $completionStatus = $balanceDue <= 0 ? 'completed' : 'processing';
-
-            // updateOrCreate keyed on order_id — same row reused across payments.
-            $txn = \App\Models\SalesTransaction::updateOrCreate(
-                ['order_id' => $order->order_id],
-                [
-                    'processed_by'      => Auth::id(),
-                    'amount_total'      => $amountTotal,
-                    'amount_paid'       => $cumulativePaid,
-                    'balance_due'       => $balanceDue,
-                    'payment_method'    => $request->input('payment_method'),
-                    'payment_terms'     => $request->input('payment_terms', 'full_payment'),
-                    'payment_date'      => now()->toDateString(),
-                    'or_number'         => $request->input('or_number'),
-                    'completion_status' => $completionStatus,
-                    'notes'             => $request->input('notes'),
-                    'date_processed'    => now(),
-                ]
-            );
-
-            return ['order' => $order, 'txn' => $txn, 'balanceDue' => $balanceDue];
-        });
+        // Locked transaction (race-safe on amount_paid); also writes the payment's RCT receipt.
+        $result = app(\App\Services\BillingService::class)->recordPayment(
+            (int) $request->input('order_id'),
+            $newAmountPaid,
+            $request->input('payment_method'),
+            $request->input('payment_terms'),
+            $request->input('or_number'),
+            $request->input('notes'),
+            $request->filled('amount_total') ? (float) $request->input('amount_total') : null,
+            Auth::id(),
+            $request->input('reference_no'),
+        );
 
         if (isset($result['error'])) {
             return response()->json($result['error'], 422);

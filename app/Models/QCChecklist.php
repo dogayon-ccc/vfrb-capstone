@@ -5,6 +5,7 @@ use Illuminate\Database\Eloquent\Model;
 
 class QCChecklist extends Model
 {
+    protected $table      = 'qc_checklists'; // Eloquent would guess q_c_checklists
     protected $primaryKey = 'check_id';
 
     protected $fillable = [

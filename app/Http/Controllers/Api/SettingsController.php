@@ -85,6 +85,8 @@ class SettingsController extends Controller
                 'address'        => null,
                 'contact_number' => null,
                 'contact_email'  => null,
+                'tin'            => null,
+                'invoice_terms'  => null,
                 'updated_at'     => null,
             ]);
         }
@@ -95,6 +97,8 @@ class SettingsController extends Controller
             'address'        => $settings->address,
             'contact_number' => $settings->contact_number,
             'contact_email'  => $settings->contact_email,
+            'tin'            => $settings->tin,
+            'invoice_terms'  => $settings->invoice_terms,
             'updated_at'     => $settings->updated_at,
         ]);
     }
@@ -109,11 +113,14 @@ class SettingsController extends Controller
             'address'        => 'nullable|string|max:255',
             'contact_number' => 'nullable|string|max:20',
             'contact_email'  => 'nullable|email|max:100',
+            // TIN + invoice terms together switch invoices/receipts off the "not official" titles.
+            'tin'            => ['nullable', 'string', 'regex:/^\d{3}-?\d{3}-?\d{3}(-?\d{3,5})?$/'],
+            'invoice_terms'  => 'nullable|string|max:500',
         ]);
 
         $settings = CompanySetting::find(1) ?? new CompanySetting(['id' => 1]);
         $settings->id = 1; // enforced single row — see migration note
-        $settings->fill($request->only(['company_name', 'address', 'contact_number', 'contact_email']));
+        $settings->fill($request->only(['company_name', 'address', 'contact_number', 'contact_email', 'tin', 'invoice_terms']));
         $settings->updated_by = $request->user()->user_id;
         $settings->save();
 
