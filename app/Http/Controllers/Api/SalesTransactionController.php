@@ -133,6 +133,11 @@ class SalesTransactionController extends Controller
             'reference_no'   => 'nullable|string|max:50',
         ]);
 
+        // The order total is a manager decision; staff record payments against it.
+        if ($request->filled('amount_total') && !$request->user()->isManager()) {
+            return response()->json(['message' => 'Only a manager can set the order total.'], 403);
+        }
+
         $newAmountPaid = (float) $request->input('amount_paid');
 
         // Locked transaction (race-safe on amount_paid); also writes the payment's RCT receipt.
