@@ -67,19 +67,28 @@ class BillingService
                 ->first();
 
             if (!$existingTxn) {
-                // First payment — total must be recorded now (no pricing engine here).
-                if ($amountTotalInput === null || $amountTotalInput <= 0) {
+                // First payment. The total is the manager-set agreed_total; amount_total (manager-only, checked
+                // by the caller) may set it once when it is still empty, never change it.
+                if ($order->agreed_total !== null) {
+                    $amountTotal = (float) $order->agreed_total;
+                    if ($amountTotalInput !== null && abs($amountTotalInput - $amountTotal) > 0.004) {
+                        return ['error' => [
+                            'message' => 'The order total is already set to ₱' . number_format($amountTotal, 2) . ' and cannot be changed here.',
+                            'errors'  => ['amount_total' => ['Order total is already set.']],
+                        ]];
+                    }
+                } elseif ($amountTotalInput !== null && $amountTotalInput > 0) {
+                    $amountTotal = $amountTotalInput;
+                    DB::table('orders')->where('order_id', $order->order_id)->update([
+                        'agreed_total' => $amountTotal,
+                        'updated_at'   => now(),
+                    ]);
+                } else {
                     return ['error' => [
-                        'message' => 'Record the order total (amount_total) on the first payment before recording additional payments.',
-                        'errors'  => ['amount_total' => ['The order total is required for an order\'s first payment.']],
+                        'message' => 'A manager must set the order total before the first payment is recorded.',
+                        'errors'  => ['amount_total' => ['The order total has not been set by a manager.']],
                     ]];
                 }
-                $amountTotal = $amountTotalInput;
-
-                DB::table('orders')->where('order_id', $order->order_id)->update([
-                    'agreed_total' => $amountTotal,
-                    'updated_at'   => now(),
-                ]);
                 $cumulativePaid = $amount;
             } else {
                 // Subsequent payment — total comes from orders.agreed_total, not the client.
