@@ -30,6 +30,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Support\FileUrl;
 use App\Support\UploadDisk;
+use App\Models\AuditLog;
 use App\Models\CompanySetting;
 use App\Models\NotificationPreference;
 use Illuminate\Http\Request;
@@ -117,6 +118,7 @@ class SettingsController extends Controller
         $settings->fill($request->only(['company_name', 'address', 'contact_number', 'contact_email', 'tin', 'invoice_terms']));
         $settings->updated_by = $request->user()->user_id;
         $settings->save();
+        AuditLog::record('settings_updated', 'company_settings', 1);
 
         return response()->json(['message' => 'Company settings updated.']);
     }
@@ -146,6 +148,7 @@ class SettingsController extends Controller
         $settings->logo_path = $path;
         $settings->updated_by = $request->user()->user_id;
         $settings->save();
+        AuditLog::record('settings_updated', 'company_settings', 1);
 
         return response()->json([
             'message'  => 'Logo uploaded.',

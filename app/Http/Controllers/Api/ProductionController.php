@@ -44,6 +44,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Notifications\StageAdvancedNotification;
 use App\Services\ProductionStageService;
@@ -165,6 +166,7 @@ class ProductionController extends Controller
                 'status'     => $nextStage,
                 'updated_at' => now(),
             ]);
+        AuditLog::record('order_status_changed', 'orders', (int) $orderId);
 
         if ($order->status === 'qc') {
             DB::table('orders')
@@ -297,6 +299,7 @@ class ProductionController extends Controller
         DB::table('orders')
             ->where('order_id', $orderId)
             ->update(['status' => 'confirmed', 'updated_at' => now()]);
+        AuditLog::record('order_status_changed', 'orders', (int) $orderId);
 
         // Notify customer
         DB::table('notifications')->insert([

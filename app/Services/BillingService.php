@@ -6,6 +6,7 @@
 // Nothing here prices an order from materials, quantities or rates.
 namespace App\Services;
 
+use App\Models\AuditLog;
 use App\Models\CompanySetting;
 use App\Models\Invoice;
 use App\Models\PaymentReceipt;
@@ -83,6 +84,7 @@ class BillingService
                         'agreed_total' => $amountTotal,
                         'updated_at'   => now(),
                     ]);
+                    AuditLog::record('order_total_set', 'orders', (int) $order->order_id, $userId);
                 } else {
                     return ['error' => [
                         'message' => 'A manager must set the order total before the first payment is recorded.',
@@ -136,6 +138,7 @@ class BillingService
                     'issued_by'      => $userId,
                     'notes'          => $notes,
                 ]);
+                AuditLog::record('payment_receipt_created', 'payment_receipts', (int) $receipt->receipt_id, $userId);
             }
 
             if ($invoice && $invoice->status === 'issued' && $balanceDue <= 0) {
@@ -199,6 +202,7 @@ class BillingService
                 'issued_at'          => now(),
                 'issued_by'          => $userId,
             ]);
+            AuditLog::record('invoice_issued', 'invoices', (int) $invoice->invoice_id, $userId);
 
             // Payments recorded before the invoice existed now point at it.
             PaymentReceipt::where('order_id', $orderId)->whereNull('invoice_id')->update(['invoice_id' => $invoice->invoice_id]);

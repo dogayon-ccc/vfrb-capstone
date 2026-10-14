@@ -23,6 +23,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -397,6 +398,11 @@ class InventoryController extends Controller
                 'message' => "Only {$fmt($newStock['short'])} {$material->unit} in stock; cannot remove {$fmt($qty)}.",
                 'quantity_in_stock' => $newStock['short'],
             ], 422);
+        }
+
+        // Routine stock-in/out are already in inventory_logs; only manual corrections are audited.
+        if (in_array($type, ['adjustment', 'wastage'], true)) {
+            AuditLog::record('inventory_adjusted', 'materials', $id);
         }
 
         Cache::forget('materials_list');

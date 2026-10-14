@@ -35,6 +35,7 @@ use App\Http\Controllers\Api\RecommendationGuidanceController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
 use App\Http\Controllers\Api\ActivityLogController;
+use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingController;
 use App\Http\Controllers\Api\BillingProfileController;
@@ -558,6 +559,10 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                  GET /api/admin/activity-log/action-types
     Route::get('/activity-log',              [ActivityLogController::class, 'index']);
     Route::get('/activity-log/action-types', [ActivityLogController::class, 'actionTypes']);
+
+    // ── Audit Log (Oct 16 2026) — insert-only audit_logs: logins, logouts,
+    // failed logins and key writes. Read-only for manager and owner. ──
+    Route::get('/audit-logs', [AuditLogController::class, 'index']);
 
     // ── Stage advance (manager override — bypasses qty check, still gates QC) ─
     // ProductionTracking.jsx advance button
