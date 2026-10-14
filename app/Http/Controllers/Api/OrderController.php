@@ -220,7 +220,12 @@ class OrderController extends Controller
         // own rather than released in a finally block — it's a short
         // debounce window on the act of submitting, not a mutex meant to
         // guard the whole method body.
-        $lock = Cache::lock('order-submit:' . Auth::id(), 10);
+        // A uniform set submits one order per piece back to back, so each piece of a set gets its own lock;
+        // a retry of the same piece still hits the same key.
+        $setPart = json_decode((string) $request->input('studio_config', ''), true)['uniformSet'] ?? null;
+        $setKey  = is_array($setPart) && is_string($setPart['id'] ?? null) && in_array($setPart['role'] ?? null, ['top', 'bottom'], true)
+            ? ':set:' . substr(preg_replace('/[^A-Za-z0-9-]/', '', $setPart['id']), 0, 64) . ':' . $setPart['role'] : '';
+        $lock = Cache::lock('order-submit:' . Auth::id() . $setKey, 10);
         if (!$lock->get()) {
             return response()->json([
                 'message' => 'Your previous order submission is still being processed. Please wait a moment before trying again.',
