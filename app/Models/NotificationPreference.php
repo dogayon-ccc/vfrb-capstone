@@ -1,7 +1,7 @@
 <?php
 // app/Models/NotificationPreference.php
 // One row per user: notification channels plus appearance (theme_mode, theme_accent).
-// sms_enabled is the user's opt-in; texts only go out when SMS_ENABLED is also on (App\Support\SmsNotify).
+// Email only. The legacy sms_enabled column stays in the table but is unused and hidden.
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
@@ -15,11 +15,12 @@ class NotificationPreference extends Model
     protected $primaryKey = 'user_id';
     public $incrementing = false;
 
-    protected $fillable = ['user_id', 'email_enabled', 'sms_enabled', 'theme_mode', 'theme_accent'];
+    protected $fillable = ['user_id', 'email_enabled', 'theme_mode', 'theme_accent'];
+
+    protected $hidden = ['sms_enabled'];
 
     protected $casts = [
         'email_enabled' => 'boolean',
-        'sms_enabled'   => 'boolean',
     ];
 
     public function user() { return $this->belongsTo(User::class, 'user_id', 'user_id'); }

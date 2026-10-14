@@ -56,7 +56,6 @@ final class StudioSet
                 'updated_at' => now(),
             ]);
             EmailNotify::users([$userId], new OrderStatusNotification($id, 'confirmed'));
-            SmsNotify::orderStatus($id, (int) $userId, 'pending', 'confirmed');
             $confirmed[] = $id;
         }
         return $confirmed;

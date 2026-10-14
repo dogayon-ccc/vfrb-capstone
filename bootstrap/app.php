@@ -68,6 +68,8 @@ return Application::configure(basePath: dirname(__DIR__))
             // Usage: ->middleware('role:manager') or ->middleware('role:staff,manager')
             'role' => \App\Http\Middleware\RoleMiddleware::class,
             'jobfn' => \App\Http\Middleware\JobFunctionMiddleware::class,
+            // Read-only owner role: GET on the listed admin areas, 403 on any write.
+            'owner.readonly' => \App\Http\Middleware\OwnerReadOnly::class,
         ]);
 
         // ── Never redirect unauthenticated guests to a 'login' route ──────────

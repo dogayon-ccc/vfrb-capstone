@@ -51,15 +51,4 @@ return [
         'key'       => env('GEMINI_KEY_1'),
         'api_key'   => env('GEMINI_KEY_1'),
     ],
-
-    // SMS, provider-neutral and OFF unless SMS_ENABLED=true. 'log' writes to the app log only; 'http' POSTs
-    // {to, message, sender} as JSON with a bearer token to any gateway that accepts it (App\Services\Sms).
-    'sms' => [
-        'enabled' => (bool) env('SMS_ENABLED', false),
-        'driver'  => env('SMS_DRIVER', 'log'),
-        'url'     => env('SMS_HTTP_URL'),
-        'token'   => env('SMS_HTTP_TOKEN'),
-        'sender'  => env('SMS_SENDER', 'VFRB'),
-        'timeout' => (int) env('SMS_TIMEOUT', 10),
-    ],
 ];
