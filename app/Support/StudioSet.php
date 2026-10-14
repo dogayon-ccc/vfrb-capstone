@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\AuditLog;
 use App\Notifications\OrderStatusNotification;
 use Illuminate\Support\Facades\DB;
 
@@ -45,6 +46,7 @@ final class StudioSet
             if (!$userId) continue;
 
             DB::table('orders')->where('order_id', $id)->update(['status' => 'confirmed', 'updated_at' => now()]);
+            AuditLog::record('order_status_changed', 'orders', $id);
             DB::table('notifications')->insert([
                 'user_id'    => $userId,
                 'order_id'   => $id,

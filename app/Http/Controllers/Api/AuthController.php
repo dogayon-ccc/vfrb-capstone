@@ -30,6 +30,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Notifications\CustomVerifyEmailNotification;
 use Illuminate\Auth\Events\Registered;
@@ -59,16 +60,20 @@ class AuthController extends Controller
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
+            // The typed login name is never stored: an unknown name is logged as user_id null + IP.
+            AuditLog::record('login_failed', userId: $user?->user_id);
             return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
 
         if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
+            AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
         $token = $this->createToken($user->user_id);
+        AuditLog::record('login', userId: $user->user_id);
 
         return response()->json([
             'token' => $token,
@@ -89,23 +94,28 @@ class AuthController extends Controller
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (!$user || !Hash::check($request->input('password'), $user->password)) {
+            // The typed login name is never stored: an unknown name is logged as user_id null + IP.
+            AuditLog::record('login_failed', userId: $user?->user_id);
             return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
 
         if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
+            AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
         // Admin portal: only staff, manager and the read-only owner may log in here
         if (!in_array($role, ['staff', 'manager', 'owner'])) {
+            AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json([
                 'message' => 'This account does not have admin access.',
             ], 403);
         }
 
         $token = $this->createToken($user->user_id);
+        AuditLog::record('login', userId: $user->user_id);
 
         return response()->json([
             'token' => $token,
@@ -241,6 +251,7 @@ class AuthController extends Controller
             // be logged in — or upgraded, or touched in any way — through
             // this customer-only flow. Reject clearly, issue no token.
             if ($role !== 'customer') {
+                AuditLog::record('login_failed', userId: $existing->user_id);
                 return redirect($frontend . '/login?google_error=' . urlencode(
                     'This email belongs to a staff/manager account. Google sign-in here is for customers only — please sign in with your email and password instead.'
                 ));
@@ -259,6 +270,7 @@ class AuthController extends Controller
 
             $token   = $this->createToken($existing->user_id);
             $payload = $this->formatUser($existing, 'customer');
+            AuditLog::record('login', userId: $existing->user_id);
         } else {
             // New email — create a new customer account. Mirrors register()
             // exactly: raw insert + manual model_has_roles assignment.
@@ -290,6 +302,7 @@ class AuthController extends Controller
             $newUser = DB::table('users')->where('user_id', $userId)->first();
             $token   = $this->createToken($userId);
             $payload = $this->formatUser($newUser, 'customer');
+            AuditLog::record('login', userId: $userId);
         }
 
         // Hand the token back to the SPA. A full-page redirect can't set an
@@ -317,6 +330,7 @@ class AuthController extends Controller
     // AdminLayout.jsx + CustomerLayout.jsx both call this
     public function logout(Request $request)
     {
+        AuditLog::record('logout', userId: $request->user()->user_id);
         // Revoke the current Sanctum token
         $request->user()->currentAccessToken()->delete();
         return response()->json(['message' => 'Logged out successfully.']);

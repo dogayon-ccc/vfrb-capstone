@@ -33,6 +33,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Support\FileUrl;
 use App\Support\StudioSet;
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Notifications\OrderStatusNotification;
 use Illuminate\Http\Request;
@@ -617,6 +618,13 @@ class OrderController extends Controller
 
         $fields['updated_at'] = now();
         DB::table('orders')->where('order_id', $id)->update($fields);
+
+        if (isset($fields['status'])) {
+            AuditLog::record('order_status_changed', 'orders', $id);
+        }
+        if (isset($fields['agreed_total'])) {
+            AuditLog::record('order_total_set', 'orders', $id);
+        }
 
         if (isset($fields['status'])) {
             $statusMessage = $fields['status'] === 'cancelled' && $request->filled('notes')

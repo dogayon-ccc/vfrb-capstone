@@ -26,6 +26,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -194,6 +195,8 @@ class UserController extends Controller
             ]);
         }
 
+        AuditLog::record('user_created', 'users', $userId);
+
         $user       = DB::table('users')->where('user_id', $userId)->first();
         $user->role = $request->input('role');
 
@@ -221,6 +224,11 @@ class UserController extends Controller
         ]);
 
         $newRole = $request->input('role');
+        $oldRole = DB::table('model_has_roles')
+            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('model_has_roles.model_type', 'App\\Models\\User')
+            ->where('model_has_roles.model_id', $id)
+            ->value('roles.name');
         DB::table('users')->where('user_id', $id)->update([
             'job_function' => $newRole === 'staff' ? ($request->input('job_function') ?? 'general') : 'general',
             'updated_at'   => now(),
@@ -230,6 +238,9 @@ class UserController extends Controller
         if ($roleId) {
             DB::table('model_has_roles')->where('model_id', $id)->where('model_type', 'App\\Models\\User')->delete();
             DB::table('model_has_roles')->insert(['role_id' => $roleId, 'model_type' => 'App\\Models\\User', 'model_id' => $id]);
+            if ($oldRole !== $newRole) {
+                AuditLog::record('user_role_changed', 'users', $id);
+            }
         }
 
         $updated       = DB::table('users')->where('user_id', $id)->first();
@@ -267,6 +278,7 @@ class UserController extends Controller
                 'email_verified_at' => $newVerified,
                 'updated_at'        => now(),
             ]);
+        AuditLog::record($newVerified ? 'user_activated' : 'user_deactivated', 'users', $id);
 
         if (!$newVerified) {
             DB::table('personal_access_tokens')

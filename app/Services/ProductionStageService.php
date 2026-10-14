@@ -44,6 +44,7 @@
 
 namespace App\Services;
 
+use App\Models\AuditLog;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -435,6 +436,7 @@ class ProductionStageService
             ['status' => $to, 'updated_at' => now()],
             $from === 'qc' ? ['qc_passed_at' => now()] : []
         ));
+        AuditLog::record('order_status_changed', 'orders', $orderId);
     }
 
     // ── Goods Issue to Production ─────────────────────────────

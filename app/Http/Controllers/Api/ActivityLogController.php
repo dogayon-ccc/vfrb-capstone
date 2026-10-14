@@ -20,8 +20,10 @@
 //   (usage_rate_set removed Aug 29 2026 — see body comment, source deleted)
 //
 // EXPLICITLY OUT OF SCOPE (per the scoping conversation):
-//   - No login/logout history — no auth_logs table or login timestamp exists
-//     anywhere in the schema. Not fabricated here.
+//   - Login/logout history — not here. Since Oct 16 2026 logins, logouts,
+//     failed logins and key writes go to the insert-only audit_logs table,
+//     read through AuditLogController (GET /api/admin/audit-logs). This
+//     controller stays a view over the operational tables only.
 //   - Not cryptographically immutable — this is a read view over mutable
 //     operational tables, not a tamper-proof ledger.
 //

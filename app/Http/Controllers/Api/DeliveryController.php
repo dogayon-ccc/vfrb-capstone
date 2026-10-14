@@ -16,6 +16,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Services\ProductionStageService;
 use App\Support\StudioSet;
 use Illuminate\Http\Request;
@@ -198,6 +199,7 @@ class DeliveryController extends Controller
                 if (!$order) continue;
                 $this->notifyCustomer($order->user_id, $orderId, "Your order of {$order->quantity_ordered} {$order->garment_type} has been delivered. Thank you!");
                 DB::table('orders')->where('order_id', $orderId)->update(['status' => 'completed', 'updated_at' => now()]);
+                AuditLog::record('order_status_changed', 'orders', $orderId);
             }
         });
 

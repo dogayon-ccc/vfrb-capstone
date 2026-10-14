@@ -6,6 +6,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -146,6 +147,7 @@ class PhysicalCountController extends Controller
                 'stock_adjusted'       => 1,                          // mark stock was adjusted
                 'updated_at'           => now(),
             ]);
+        AuditLog::record('inventory_adjusted', 'materials', (int) $log->material_id);
 
         Cache::forget('materials_list');
         Cache::forget('dashboard_stats');

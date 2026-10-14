@@ -11,7 +11,7 @@ use Illuminate\Support\Facades\DB;
 class OwnerReadOnly
 {
     // First path segment after /api/admin/.
-    public const AREAS = ['dashboard', 'orders', 'reports', 'transactions', 'invoices', 'inventory', 'materials', 'activity-log'];
+    public const AREAS = ['dashboard', 'orders', 'reports', 'transactions', 'invoices', 'inventory', 'materials', 'activity-log', 'audit-logs'];
 
     public function handle(Request $request, Closure $next): mixed
     {
