@@ -5,7 +5,7 @@
 // wasn't "half-built," it was fully built except for this file.
 // show() auto-creates a default row on first access rather than 404ing,
 // since every user implicitly has preferences (the table's own column
-// defaults — email_enabled=1, sms_enabled=0 — ARE the intended default).
+// default — email_enabled=1 — IS the intended default).
 
 namespace App\Http\Controllers\Api;
 
@@ -25,12 +25,7 @@ class NotificationPreferenceController extends Controller
     {
         $data = $request->validate([
             'email_enabled' => 'required|boolean',
-            'sms_enabled'   => 'required|boolean',
         ]);
-        if ($error = SettingsController::smsOptInError($request)) {
-            return response()->json(['message' => $error, 'errors' => ['sms_enabled' => [$error]]], 422);
-        }
-
         $pref = NotificationPreference::firstOrCreate(['user_id' => Auth::id()]);
         $pref->update($data);
 

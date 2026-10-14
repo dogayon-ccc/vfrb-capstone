@@ -23,14 +23,12 @@
 //   Railway's filesystem is ephemeral regardless of disk, so 'public' is
 //   still dev-only — a Railway redeploy wipes anything saved there.
 //
-// SMS / EMAIL CAVEAT — sms_enabled is the user's opt-in; texts only go out while SMS_ENABLED is on (App\Support\SmsNotify),
-//   reported to the frontend as sms_provider_live. Email is live only with a non-sandbox mailer (emailProviderLive()).
+// EMAIL CAVEAT — notifications are email only; email is live only with a non-sandbox mailer (emailProviderLive()).
 
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Support\FileUrl;
-use App\Support\SmsNotify;
 use App\Support\UploadDisk;
 use App\Models\CompanySetting;
 use App\Models\NotificationPreference;
@@ -163,11 +161,9 @@ class SettingsController extends Controller
 
         return response()->json([
             'email_enabled' => $pref?->email_enabled ?? true,
-            'sms_enabled'   => $pref?->sms_enabled ?? false,
             // Frontend caveat flags — sent from backend so the "not real yet"
             // warning can't drift out of sync between FE and BE independently.
             'email_provider_live' => self::emailProviderLive(),
-            'sms_provider_live'   => SmsNotify::live(),
         ]);
     }
 
@@ -187,27 +183,12 @@ class SettingsController extends Controller
     {
         $request->validate([
             'email_enabled' => 'sometimes|boolean',
-            'sms_enabled'   => 'sometimes|boolean',
         ]);
-        if ($error = self::smsOptInError($request)) {
-            return response()->json(['message' => $error, 'errors' => ['sms_enabled' => [$error]]], 422);
-        }
-
         $pref = NotificationPreference::firstOrNew(['user_id' => $request->user()->user_id]);
-        $pref->fill($request->only(['email_enabled', 'sms_enabled']));
+        $pref->fill($request->only(['email_enabled']));
         $pref->save();
 
         return response()->json(['message' => 'Notification preferences updated.']);
-    }
-
-    // Turning SMS on needs the gateway switched on and a PH mobile number on the account; turning it off is always allowed.
-    public static function smsOptInError(Request $request): ?string
-    {
-        if (!$request->boolean('sms_enabled')) {
-            return null;
-        }
-        $phone = \Illuminate\Support\Facades\DB::table('users')->where('user_id', $request->user()->user_id)->value('contact_number');
-        return SmsNotify::optInError($phone);
     }
 
     // ── GET /api/settings/appearance ─────────────────────────────────

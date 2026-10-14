@@ -8,7 +8,7 @@
 //          client_type (enum: corporate|school|government|medical|organization; legacy: individual),
 //          email_verified_at, remember_token
 //   model_has_roles: role_id, model_type ('App\Models\User'), model_id
-//   roles: id, name (customer|staff|manager)
+//   roles: id, name (customer|staff|manager|owner) — owner is read-only, edited by managers only
 //
 // RULES:
 //   - PK is user_id (never id)
@@ -36,15 +36,15 @@ use Illuminate\Validation\Rules\Password as PasswordRule;
 class UserController extends Controller
 {
     // ── GET /api/admin/users ──────────────────────────────────────────────────
-    // UserManagement.jsx: staff + manager user list (excludes customers)
+    // UserManagement.jsx: staff, manager and owner user list (excludes customers)
     public function adminIndex(Request $request)
     {
         $perPage = (int) $request->input('per_page', 20);
         $search  = $request->input('search', '');
 
-        // Only show staff and manager accounts
+        // Only show staff, manager and owner accounts
         $staffRoleIds = DB::table('roles')
-            ->whereIn('name', ['staff', 'manager'])
+            ->whereIn('name', ['staff', 'manager', 'owner'])
             ->pluck('id');
 
         $userIds = DB::table('model_has_roles')
@@ -156,7 +156,7 @@ class UserController extends Controller
             'name'                  => 'required|string|max:100',
             'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
             'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
-            'role' => 'required|in:staff,manager', // customers self-register only
+            'role' => 'required|in:staff,manager,owner|exists:roles,name', // customers self-register only; owner is the read-only admin role
             'job_function'          => 'nullable|in:general,production,inventory,sales',
             'contact_number'        => 'nullable|string|max:20',
             'organization_name'     => 'nullable|string|max:100',
@@ -175,8 +175,8 @@ class UserController extends Controller
             'job_function'      => $request->input('role') === 'staff'
                 ? ($request->input('job_function') ?? 'general')
                 : 'general',
-            // Auto-verify staff/manager accounts (manager creates them directly)
-            'email_verified_at' => in_array($request->input('role'), ['staff','manager']) ? now() : null,
+            // Auto-verify staff/manager/owner accounts (manager creates them directly)
+            'email_verified_at' => in_array($request->input('role'), ['staff', 'manager', 'owner']) ? now() : null,
             'created_at'        => now(),
             'updated_at'        => now(),
         ], 'user_id');
@@ -210,13 +210,13 @@ class UserController extends Controller
         if (!$user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
-        // A customer account is never promoted into staff or manager from here.
-        if (!$this->isStaffOrManager($id)) {
-            return response()->json(['message' => 'Only staff and manager accounts can be edited here.'], 422);
+        // A customer account is never promoted into staff, manager or owner from here.
+        if (!$this->isAdminAccount($id)) {
+            return response()->json(['message' => 'Only staff, manager and owner accounts can be edited here.'], 422);
         }
 
         $request->validate([
-            'role'         => 'required|in:staff,manager',
+            'role'         => 'required|in:staff,manager,owner|exists:roles,name',
             'job_function' => 'nullable|in:general,production,inventory,sales',
         ]);
 
@@ -254,8 +254,8 @@ class UserController extends Controller
             return response()->json(['message' => 'You cannot deactivate your own account.'], 422);
         }
 
-        if (!$this->isStaffOrManager($id)) {
-            return response()->json(['message' => 'Only staff and manager accounts can be activated or deactivated.'], 422);
+        if (!$this->isAdminAccount($id)) {
+            return response()->json(['message' => 'Only staff, manager and owner accounts can be activated or deactivated.'], 422);
         }
 
         // Toggle: if email_verified_at is set → clear it (deactivate); if null → set it (activate)
@@ -371,13 +371,13 @@ class UserController extends Controller
         return response()->json(['message' => 'Password changed successfully.']);
     }
 
-    private function isStaffOrManager(int $id): bool
+    private function isAdminAccount(int $id): bool
     {
         return DB::table('model_has_roles')
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('model_has_roles.model_type', 'App\\Models\\User')
             ->where('model_has_roles.model_id', $id)
-            ->whereIn('roles.name', ['staff', 'manager'])
+            ->whereIn('roles.name', ['staff', 'manager', 'owner'])
             ->exists();
     }
 }

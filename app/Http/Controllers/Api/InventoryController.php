@@ -68,6 +68,55 @@ class InventoryController extends Controller
         });
     }
 
+    // ── GET /api/admin/inventory/export?format=csv|pdf ────────────────────────
+    // Stock list only: no costs. Takes the same search/category/low_stock filters as index().
+    public function export(Request $request)
+    {
+        $request->validate(['format' => 'required|in:csv,pdf']);
+
+        $query = DB::table('materials')->select('material_name', 'category', 'unit', 'quantity_in_stock', 'reorder_threshold');
+        if ($q = $request->input('search')) {
+            $query->where('material_name', Sql::like(), "%{$q}%");
+        }
+        if ($category = $request->input('category')) {
+            $query->where('category', $category);
+        }
+        if ($request->boolean('low_stock')) {
+            $query->whereRaw('quantity_in_stock <= reorder_threshold');
+        }
+
+        $rows = $query->orderBy('material_name')->get()->map(fn ($m) => [
+            'name'     => $m->material_name,
+            'category' => $m->category,
+            'unit'     => $m->unit,
+            'stock'    => (float) $m->quantity_in_stock,
+            'reorder'  => (float) $m->reorder_threshold,
+            'status'   => $m->quantity_in_stock <= 0 ? 'Out of stock'
+                : ($m->quantity_in_stock <= $m->reorder_threshold ? 'Low stock' : 'In stock'),
+        ]);
+
+        $file = 'VFRB-Inventory-' . now()->format('Y-m-d');
+
+        if ($request->input('format') === 'pdf') {
+            return \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.inventory', [
+                'rows'      => $rows,
+                'printedAt' => now()->format('F d, Y g:i A'),
+            ])->setPaper('a4', 'portrait')->download("{$file}.pdf");
+        }
+
+        return response()->streamDownload(function () use ($rows) {
+            $out = fopen('php://output', 'w');
+            fwrite($out, "\xEF\xBB\xBF"); // UTF-8 BOM so Excel reads accents correctly
+            fputcsv($out, ['Name', 'Category', 'Unit', 'Stock', 'Reorder level', 'Status']);
+            foreach ($rows as $r) {
+                // A leading = + - @ would run as a formula in Excel; prefix text cells with a quote.
+                $safe = fn ($v) => is_string($v) && preg_match('/^[=+\-@]/', $v) ? "'{$v}" : $v;
+                fputcsv($out, array_map($safe, array_values($r)));
+            }
+            fclose($out);
+        }, "{$file}.csv", ['Content-Type' => 'text/csv; charset=UTF-8']);
+    }
+
     // ── GET /api/admin/materials/{id} ─────────────────────────────────────────
     public function show(int $id)
     {
@@ -408,7 +457,6 @@ class InventoryController extends Controller
         // Same 24-hour dedupe as the in-app alert above.
         \App\Support\EmailNotify::users($managers, new \App\Notifications\PortalMailNotification(
             "Low stock: {$materialName}", [$message, 'Reorder or record incoming stock to clear this alert.'], 'Open inventory', '/admin/inventory'));
-        \App\Support\SmsNotify::users($managers, 'low_stock', "VFRB: Low stock on {$materialName}. Reorder or record incoming stock.");
     }
 
     // ratesIndex()/ratesUpsert()/ratesDestroy() removed Aug 28 2026 — no

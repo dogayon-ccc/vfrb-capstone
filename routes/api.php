@@ -269,7 +269,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
 // AdminLayout.jsx polls notifications and dashboard widgets fairly
 // actively during a normal work shift. Still low enough to stop a
 // scripted scrape or a runaway retry loop.
-Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
+Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
 
     // AI recommendation feedback (Oct 13 2026): staff accept/reject per recommended line.
     Route::patch('/material-recommendations/{recId}/feedback', [RecommendationGuidanceController::class, 'feedback'])->whereNumber('recId');
@@ -376,6 +376,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
     // where type is 'in' or 'out' — routes must match exactly
     Route::get('/inventory',      [InventoryController::class, 'index']);
     Route::get('/inventory/logs', [InventoryController::class, 'allLogs']); // FIX: was 'logs' → 500
+    Route::get('/inventory/export', [InventoryController::class, 'export']); // ?format=csv|pdf, stock only (no costs)
     Route::post('/inventory/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
     Route::post('/inventory/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
 
@@ -507,7 +508,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager', 'auth.throttle:staff,12
 // This group covers Reports, Invoice, Suppliers, Users, Activity Log,
 // and Settings edits — deliberate, lower-frequency actions, not something
 // a manager does dozens of times a minute in normal use.
-Route::middleware(['auth:sanctum', 'role:manager', 'auth.throttle:manager,60'])->prefix('admin')->group(function () {
+Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth.throttle:manager,60'])->prefix('admin')->group(function () {
 
     // ── Reports + Invoice (Sept 15 2026 role-gap fix, QA account) ──
     // Moved from the staff+manager group above: Reports and Invoice are

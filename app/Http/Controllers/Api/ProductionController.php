@@ -173,7 +173,6 @@ class ProductionController extends Controller
         }
 
         $this->notifyStageAdvance($orderId, $order->user_id, $order->status, $nextStage);
-        \App\Support\SmsNotify::orderStatus((int) $orderId, (int) $order->user_id, $order->status, $nextStage);
         Cache::forget('dashboard_stats');
 
         return response()->json([
@@ -312,7 +311,6 @@ class ProductionController extends Controller
         ]);
         // Same email as confirming from Order Detail (OrderController::adminUpdate).
         \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\OrderStatusNotification((int) $orderId, 'confirmed'));
-        \App\Support\SmsNotify::orderStatus((int) $orderId, (int) $order->user_id, 'pending', 'confirmed');
 
         $setConfirmed = StudioSet::confirmPendingSiblings((int) $orderId);
         Cache::forget('dashboard_stats');

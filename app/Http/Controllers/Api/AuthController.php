@@ -64,7 +64,7 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
-        if (in_array($role, ['staff', 'manager'], true) && is_null($user->email_verified_at)) {
+        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
@@ -94,12 +94,12 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
-        if (in_array($role, ['staff', 'manager'], true) && is_null($user->email_verified_at)) {
+        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
-        // Admin portal: only staff and manager may log in here
-        if (!in_array($role, ['staff', 'manager'])) {
+        // Admin portal: only staff, manager and the read-only owner may log in here
+        if (!in_array($role, ['staff', 'manager', 'owner'])) {
             return response()->json([
                 'message' => 'This account does not have admin access.',
             ], 403);

@@ -17,7 +17,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\ProductionStageService;
-use App\Support\SmsNotify;
 use App\Support\StudioSet;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -198,7 +197,6 @@ class DeliveryController extends Controller
                 $order = DB::table('orders')->where('order_id', $orderId)->select('user_id', 'garment_type', 'quantity_ordered')->first();
                 if (!$order) continue;
                 $this->notifyCustomer($order->user_id, $orderId, "Your order of {$order->quantity_ordered} {$order->garment_type} has been delivered. Thank you!");
-                SmsNotify::users([$order->user_id], 'status_changed', "VFRB: Your order #{$orderId} has been delivered. Thank you!");
                 DB::table('orders')->where('order_id', $orderId)->update(['status' => 'completed', 'updated_at' => now()]);
             }
         });
