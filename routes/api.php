@@ -299,7 +299,8 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     Route::get('/notifications/unread-count', [NotificationController::class, 'adminUnreadCount']);
 
     // ── Auth ─────────────────────────────────────────────────────
-    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:staff,manager'])->middleware('throttle:10,1');
+    // The excluded role string must match the group's exactly, or RoleMiddleware answers every login with 401.
+    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:staff,manager,owner'])->middleware('throttle:10,1');
 
     // ── Orders ───────────────────────────────────────────────────
     // Orders.jsx:           GET /api/admin/orders
