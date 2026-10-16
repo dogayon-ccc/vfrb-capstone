@@ -24,7 +24,15 @@ class GeminiClient
             2 => config('services.gemini.key_2'),
             3 => config('services.gemini.key_3'),
         ]);
-        $model = config('services.gemini.model', 'gemini-3.6-flash');
+        $model   = config('services.gemini.model', 'gemini-3.6-flash');
+        $timeout = max(5, (int) config('services.gemini.timeout', 30));
+        // Bounded retry on the same key for transient provider trouble (503/504 overload, a dropped connection or timeout).
+        // A 500 or a 4xx request error fails the same way on every attempt, so it is not retried.
+        $retries = max(0, min(2, (int) config('services.gemini.retries', 1)));
+        // One overall deadline across keys and retries, kept under the browser's 120 s wait: a slow provider ends in the caller's
+        // fallback instead of a request the customer has already given up on.
+        $deadline = microtime(true) + max(10, (int) config('services.gemini.budget', 75));
+        $left     = fn () => (int) floor($deadline - microtime(true));
 
         if (!$keys) {
             Log::error('Gemini: no API keys configured');
@@ -32,6 +40,7 @@ class GeminiClient
         }
 
         foreach ($keys as $keyNum => $key) {
+            if ($left() < 5) { Log::warning('Gemini: time budget spent, stopping'); return null; }
 
             // Key goes in a header, not the query string, so it never lands in URL/access logs.
             $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
@@ -61,13 +70,26 @@ class GeminiClient
                     $generationConfig['responseJsonSchema'] = $jsonSchema;
                 }
 
-                $response = Http::withHeaders(['x-goog-api-key' => $key])->timeout(30)->post($url, [
+                $body = [
                     'contents'         => [['parts' => [['text' => $prompt]]]],
                     'generationConfig' => $generationConfig,
                     'safetySettings'   => [
                         ['category' => 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold' => 'BLOCK_NONE'],
                     ],
-                ]);
+                ];
+                for ($attempt = 0; ; $attempt++) {
+                    try {
+                        $response = Http::withHeaders(['x-goog-api-key' => $key])->timeout(max(1, min($timeout, $left())))->post($url, $body);
+                    } catch (\Illuminate\Http\Client\ConnectionException $e) {
+                        if ($attempt >= $retries || $left() < 5) { throw $e; }
+                        Log::warning('Gemini connection failed, retrying', ['key' => $keyNum, 'attempt' => $attempt + 1]);
+                        usleep(400000 * (2 ** $attempt));
+                        continue;
+                    }
+                    if (!in_array($response->status(), [503, 504], true) || $attempt >= $retries || $left() < 5) { break; }
+                    Log::warning('Gemini overloaded, retrying', ['key' => $keyNum, 'status' => $response->status(), 'attempt' => $attempt + 1]);
+                    usleep(400000 * (2 ** $attempt));
+                }
 
                 // FIX: this used to only retry the next key on 429
                 // (rate-limited). Any other failure — a bad/invalid key

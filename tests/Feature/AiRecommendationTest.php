@@ -50,7 +50,7 @@ class AiRecommendationTest extends TestCase
         Http::fake(['*' => $this->gemini([
             'selections' => [
                 ['material_id' => 2, 'reason' => 'Durable navy fabric for a polo.'],
-                ['material_id' => 4, 'reason' => 'Matching thread.'],
+                ['material_id' => 14, 'reason' => 'Neutral thread.'],
             ],
             'narration' => 'Fabric and thread suit this polo design.',
         ])]);
@@ -58,8 +58,13 @@ class AiRecommendationTest extends TestCase
 
         $res = $this->recommend()->assertOk();
 
+        // Order 9 is a sky-blue polo: the navy fabric is the nearest colour (labelled "near"), white thread is a different colour.
         $this->assertSame('Fabric and thread suit this polo design.', $res->json('recommendation'));
-        $this->assertSame([2, 4], collect($res->json('materials'))->pluck('material_id')->all());
+        $this->assertSame('ai', $res->json('source'));
+        $this->assertSame([2, 14], collect($res->json('materials'))->pluck('material_id')->all());
+        $this->assertSame(['near', null], collect($res->json('materials'))->pluck('colour_match')->all());
+        $this->assertSame('MAT-FAB-002', $res->json('materials.0.material_code'));
+        $this->assertIsBool($res->json('materials.0.in_stock'));
         $this->assertSame(['pending', 'pending'], collect($res->json('materials'))->pluck('status')->all());
 
         $body = json_encode($res->json());
@@ -68,7 +73,7 @@ class AiRecommendationTest extends TestCase
         }
 
         $rows = $this->recRows();
-        $this->assertSame(['Cotton-Poly Blend Fabric (Navy)', 'Polyester Thread (White)'], $rows->pluck('material_name')->all());
+        $this->assertSame(['Cotton-Poly Blend Fabric (Navy)', 'Polyester Thread'], $rows->pluck('material_name')->all());
         $this->assertSame([null], $rows->pluck('estimated_range')->unique()->values()->all());
         $this->assertSame('ready', DB::table('orders')->where('order_id', 9)->value('ai_recommendation_status'));
     }
@@ -89,7 +94,10 @@ class AiRecommendationTest extends TestCase
                 && $cfg['responseMimeType'] === 'application/json'
                 && in_array(2, $ids, true) && !in_array(9999, $ids, true)
                 && str_contains($prompt, 'polo_shirt')
-                && str_contains($prompt, '2 | Cotton-Poly Blend Fabric (Navy) | category: Fabric')
+                && str_contains($prompt, '| Cotton-Poly Blend Fabric (Navy) | Fabric |')
+                && str_contains($prompt, 'colour: close to the body colour')
+                && str_contains($prompt, 'stock: in stock')
+                && !in_array(4, $ids, true)
                 && str_contains($prompt, 'Never state or imply a quantity');
         });
         $this->assertStringNotContainsString('test-key', json_encode($res->json()));
@@ -138,51 +146,120 @@ class AiRecommendationTest extends TestCase
         Http::assertSent(fn (Request $r) => $r->hasHeader('x-goog-api-key', 'second-key'));
     }
 
-    public function test_upstream_failure_is_503_persists_nothing_and_hides_provider_detail(): void
+    // Provider trouble never breaks the order: the deterministic catalog fallback answers, says so (source), and leaks nothing.
+    private function assertCatalogFallback($res): void
+    {
+        $res->assertOk();
+        $this->assertSame('catalog_default', $res->json('source'));
+        $this->assertStringNotContainsString('SECRET-UPSTREAM-DETAIL', $res->getContent());
+        $this->assertStringNotContainsString('test-key', $res->getContent());
+        $this->assertNotEmpty($this->recRows());
+        $this->assertSame('ready', DB::table('orders')->where('order_id', 9)->value('ai_recommendation_status'));
+    }
+
+    public function test_upstream_500_uses_the_catalog_fallback_and_hides_provider_detail(): void
     {
         Http::fake(['*' => Http::response(['error' => ['message' => 'SECRET-UPSTREAM-DETAIL key=abc']], 500)]);
         $this->actAs(5);
-
-        $res = $this->recommend()->assertStatus(503);
-
-        $this->assertStringNotContainsString('SECRET-UPSTREAM-DETAIL', $res->getContent());
-        $this->assertSame(0, $this->recRows()->count());
-        $this->assertSame('failed', DB::table('orders')->where('order_id', 9)->value('ai_recommendation_status'));
+        $this->assertCatalogFallback($this->recommend());
+        Http::assertSentCount(1); // a 500 is not retried
     }
 
-    public function test_missing_gemini_key_is_503_without_any_request(): void
+    public function test_missing_gemini_key_uses_the_fallback_without_any_request(): void
     {
         config(['services.gemini.key_1' => null]);
         Http::fake();
         $this->actAs(5);
-
-        $this->recommend()->assertStatus(503);
+        $this->assertCatalogFallback($this->recommend());
         Http::assertNothingSent();
     }
 
-    public function test_unparseable_model_output_is_502_and_stores_nothing(): void
+    public function test_unparseable_model_output_uses_the_fallback(): void
     {
         Http::fake(['*' => Http::response(['candidates' => [['content' => ['parts' => [['text' => 'Sure! Here are some fabrics...']]]]]])]);
         $this->actAs(5);
-
-        $this->recommend()->assertStatus(502);
-        $this->assertSame(0, $this->recRows()->count());
-        $this->assertSame('failed', DB::table('orders')->where('order_id', 9)->value('ai_recommendation_status'));
+        $this->assertCatalogFallback($this->recommend());
     }
 
-    public function test_a_failed_regeneration_keeps_previous_rows_and_retry_works(): void
+    public function test_rate_limit_on_the_only_key_uses_the_fallback(): void
     {
-        $ok = fn (int $id) => ['candidates' => [['content' => ['parts' => [['text' => json_encode(['selections' => [['material_id' => $id, 'reason' => 'ok']], 'narration' => 'ok'])]]]]]];
-        Http::fake(['*' => Http::sequence()->push($ok(2))->push('down', 500)->push($ok(4))]);
+        Http::fake(['*' => Http::response(['error' => ['message' => 'quota']], 429)]);
+        $this->actAs(5);
+        $this->assertCatalogFallback($this->recommend());
+    }
+
+    public function test_timeout_is_retried_once_then_falls_back(): void
+    {
+        config(['services.gemini.retries' => 1]);
+        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException('cURL error 28: timed out')]);
+        $this->actAs(5);
+        $this->assertCatalogFallback($this->recommend());
+    }
+
+    public function test_overloaded_503_is_retried_and_the_second_answer_is_used(): void
+    {
+        config(['services.gemini.retries' => 1]);
+        $ok = $this->gemini(['selections' => [['material_id' => 2, 'reason' => 'ok']], 'narration' => 'ok']);
+        Http::fake(['*' => Http::sequence()->push('busy', 503)->push($ok->wait()->getBody()->getContents(), 200)]);
+        $this->actAs(5);
+
+        $res = $this->recommend()->assertOk();
+        $this->assertSame('ai', $res->json('source'));
+        $this->assertSame([2], $this->recRows()->pluck('material_id')->map(fn ($i) => (int) $i)->all());
+        Http::assertSentCount(2);
+    }
+
+    public function test_the_same_design_is_served_from_cache_without_a_second_provider_call(): void
+    {
+        Http::fake(['*' => $this->gemini(['selections' => [['material_id' => 2, 'reason' => 'ok']], 'narration' => 'ok'])]);
         $this->actAs(5);
 
         $this->recommend()->assertOk();
+        $res = $this->recommend()->assertOk();
+        $this->assertSame('cache', $res->json('source'));
+        Http::assertSentCount(1);
+    }
 
-        $this->recommend()->assertStatus(503);
-        $this->assertSame([2], $this->recRows()->pluck('material_id')->map(fn ($i) => (int) $i)->all());
+    public function test_no_approved_material_for_the_design_is_a_clear_422_not_an_invented_match(): void
+    {
+        DB::table('materials')->update(['ai_eligible' => false]);
+        Http::fake();
+        $this->actAs(5);
 
-        $this->recommend()->assertOk();
-        $this->assertSame([4], $this->recRows()->pluck('material_id')->map(fn ($i) => (int) $i)->all());
+        $this->recommend()->assertStatus(422)->assertJsonPath('message', 'No approved materials are configured for this garment yet.');
+        Http::assertNothingSent();
+        $this->assertSame(0, $this->recRows()->count());
+    }
+
+    public function test_invalid_input_is_rejected(): void
+    {
+        Http::fake();
+        $this->actAs(5);
+        $this->postJson('/api/customer/ai/recommend-materials', [])->assertStatus(422);
+        $this->postJson('/api/customer/ai/recommend-materials', ['order_id' => 'abc'])->assertStatus(422);
+        Http::assertNothingSent();
+    }
+
+    public function test_two_tone_striped_trousers_get_contrast_fabric_closures_and_stock_facts(): void
+    {
+        // White body, navy waistband trim and navy stripes on a rebuilt garment family the catalog never names.
+        DB::table('orders')->where('order_id', 9)->update(['garment_type' => 'Pantsuit Trousers', 'studio_config' => json_encode([
+            'garment' => 'Pantsuit Trousers', 'colors' => ['body' => '#FAFAFA', 'collar' => '#1B2A4A'],
+            'patterns' => ['body' => 'pinstripe'], 'patternParams' => ['body' => ['c2' => '#1B2A4A', 'scale' => 1]],
+        ])]);
+        DB::table('materials')->where('material_id', 8)->update(['quantity_in_stock' => 0]); // the YKK zipper is out of stock
+        config(['services.gemini.key_1' => null]); // deterministic path
+        Http::fake();
+        $this->actAs(5);
+
+        $res = $this->recommend()->assertOk();
+        $mats = collect($res->json('materials'))->keyBy('material_id');
+        $this->assertSame('body', $mats[1]['colour_match']);       // white fabric for the body
+        $this->assertSame('collar', $mats[2]['colour_match']);     // navy fabric for the contrast trim
+        $this->assertTrue($mats->contains(fn ($m) => str_contains(strtolower($m['material_name']), 'zipper')));
+        $this->assertTrue($mats->contains(fn ($m) => str_contains(strtolower($m['material_name']), 'button')));
+        $this->assertFalse($mats->has(8));                         // the in-stock zipper is chosen over the out-of-stock one
+        $this->assertSame('#FAFAFA', json_decode(DB::table('orders')->where('order_id', 9)->value('studio_config'), true)['colors']['body']);
     }
 
     public function test_another_customers_order_is_404_and_never_reaches_gemini(): void
@@ -231,11 +308,13 @@ class AiRecommendationTest extends TestCase
 
     public function test_customer_order_detail_never_exposes_quantity_or_staff_columns(): void
     {
-        DB::table('material_recommendations')->insert([
-            'order_id' => 9, 'material_name' => 'Cotton Fabric', 'material_id' => 12, 'category' => 'Fabric', 'unit' => 'yards',
-            'estimated_range' => '150-200 yards', 'total_estimated_range' => '9999 yards', 'actual_qty_issued' => 321.5,
-            'status' => 'pending', 'created_at' => now(), 'updated_at' => now(),
-        ]);
+        // The estimate columns exist only on databases that have not run the column-removal migration; seed them where present.
+        $row = ['order_id' => 9, 'material_name' => 'Cotton Fabric', 'material_id' => 12, 'category' => 'Fabric', 'unit' => 'yards',
+            'status' => 'pending', 'created_at' => now(), 'updated_at' => now()];
+        foreach (['estimated_range' => '150-200 yards', 'total_estimated_range' => '9999 yards', 'actual_qty_issued' => 321.5] as $col => $v) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('material_recommendations', $col)) { $row[$col] = $v; }
+        }
+        DB::table('material_recommendations')->insert($row);
         $this->actAs(5);
 
         $res = $this->getJson('/api/customer/orders/9')->assertOk();

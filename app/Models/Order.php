@@ -59,11 +59,16 @@ class Order extends Model
         return is_string($g) && $g !== '' ? $g : null;
     }
 
-    // Design Studio zone colours, else the order's colour.
+    // Design Studio zone colours (plus each woven pattern's second colour as "<zone>_pattern"), else the order's colour.
     public function designColours(): array
     {
-        $studio = is_array($this->studio_config) ? $this->studio_config : [];
-        return collect($studio['colors'] ?? [])->filter()->all() ?: ['all' => $this->color ?? 'any'];
+        $studio  = is_array($this->studio_config) ? $this->studio_config : [];
+        $colours = collect($studio['colors'] ?? [])->filter(fn ($c) => is_string($c) && trim($c) !== '')->all();
+        foreach ((array) ($studio['patternParams'] ?? []) as $zone => $params) {
+            $c2 = is_array($params) ? ($params['c2'] ?? null) : null;
+            if (is_string($zone) && is_string($c2) && trim($c2) !== '' && !empty($studio['patterns'][$zone])) { $colours["{$zone}_pattern"] = $c2; }
+        }
+        return $colours ?: ['all' => $this->color ?? 'any'];
     }
 
     // ── Scopes ────────────────────────────────────────────────────────────────

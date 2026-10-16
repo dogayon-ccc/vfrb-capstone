@@ -47,6 +47,9 @@ return [
         'key_3'     => env('GEMINI_KEY_3'),
         'key_count' => env('GEMINI_KEY_COUNT', 1),
         'model'     => env('GEMINI_MODEL', 'gemini-3.6-flash'),
+        'timeout'   => env('GEMINI_TIMEOUT', 30),   // seconds per request
+        'retries'   => env('GEMINI_RETRIES', 1),    // same-key retries on 503/504 or a dropped connection (0-2)
+        'budget'    => env('GEMINI_BUDGET', 75),    // seconds for one call across all keys and retries (under the browser's 120 s wait)
         // Legacy aliases — keeps old code working during transition
         'key'       => env('GEMINI_KEY_1'),
         'api_key'   => env('GEMINI_KEY_1'),

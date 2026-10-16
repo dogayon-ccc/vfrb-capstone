@@ -152,9 +152,11 @@ class MaterialCatalogMatcherTest extends TestCase
 
     public function test_gray_garment_never_gets_maroon_or_black_fabric(): void
     {
-        // Live order #22: gray scrub top with navy trim.
-        $ids = array_keys($this->m->eligible($this->colourCatalog(), 'Scrub Top', ['body' => '#808080', 'collar' => '#1B2A4A']));
-        $this->assertSame([68, 72, 73, 74, 78], $ids);
+        // Live order #22: gray scrub top with navy trim. The navy poplin is offered for the navy trim only (colour_match 'collar').
+        $e = $this->m->eligible($this->colourCatalog(), 'Scrub Top', ['body' => '#808080', 'collar' => '#1B2A4A']);
+        $this->assertSame([63, 68, 72, 73, 74, 78], array_keys($e));
+        $this->assertSame('collar', $e[63]['colour_match']);
+        $this->assertSame('any', $e[68]['colour_match']);
     }
 
     public function test_black_garment_gets_black_fabric_and_thread_only(): void
@@ -191,5 +193,92 @@ class MaterialCatalogMatcherTest extends TestCase
                   'Care Label (wash instructions)' => null, 'Standard' => null] as $in => $want) {
             $this->assertSame($want, $this->m->colourFamily($in), $in);
         }
+    }
+
+    // ── Phase 2 (2026-10-16): any valid colour, contrast zones, stock, garment profiles ──────────────────────────────
+
+    public function test_colour_formats_and_new_families(): void
+    {
+        foreach (['#abc' => 'blue', '#FFF' => 'white', '#1b2a4aff' => 'navy', 'rgb(255, 128, 0)' => 'orange', 'rgba(14,124,134,0.5)' => 'teal',
+                  '#0E7C86' => 'teal', '#8B4513' => 'brown', '#F57C00' => 'orange', 'Coral Pink' => 'orange', 'Turquoise' => 'teal',
+                  'Off-White' => 'white', 'Midnight Blue' => 'navy', 'not a colour' => null, '#12345' => null] as $in => $want) {
+            $this->assertSame($want, $this->m->colourFamily($in), $in);
+        }
+    }
+
+    public function test_near_colour_fabric_is_offered_and_labelled_not_hidden(): void
+    {
+        // A sky-blue design: no blue fabric exists, the navy one is offered as "near"; maroon and black fabric stay out.
+        $e = $this->m->eligible($this->colourCatalog(), 'Polo Shirt', ['body' => '#87CEEB']);
+        $this->assertSame('near', $e[63]['colour_match']);
+        $this->assertArrayNotHasKey(55, $e);
+        $this->assertArrayNotHasKey(65, $e);
+    }
+
+    public function test_two_tone_and_stripe_colours_open_contrast_fabric_and_thread(): void
+    {
+        // Black body, maroon collar, navy stripes: maroon fabric for the collar, navy thread for the stripe colour.
+        $e = $this->m->eligible($this->colourCatalog(), 'Polo Shirt', ['body' => '#111111', 'collar' => '#800000', 'body_pattern' => '#1B2A4A']);
+        $this->assertSame('collar', $e[55]['colour_match']);
+        $this->assertSame('body_pattern', $e[72]['colour_match']);
+        $this->assertSame('body', $e[56]['colour_match']);
+        $fb = array_column($this->m->fallback($e)['selections'], 'material_id');
+        $this->assertSame([56, 55, 69], $fb); // main body fabric, contrast fabric, matching thread
+    }
+
+    public function test_stock_flag_and_fallback_prefers_in_stock(): void
+    {
+        $rows = [
+            ['material_id' => 1, 'material_name' => 'Cotton Fabric', 'category' => 'Fabric', 'quantity_in_stock' => 0],
+            ['material_id' => 2, 'material_name' => 'Twill Fabric', 'category' => 'Fabric', 'quantity_in_stock' => 40],
+            ['material_id' => 3, 'material_name' => 'Polyester Thread', 'category' => 'Thread'],
+        ];
+        $e = $this->m->eligible($rows, 'Pants');
+        $this->assertSame([false, true, null], array_column($e, 'in_stock'));
+        $this->assertSame([2, 3], array_column($this->m->fallback($e)['selections'], 'material_id'));
+        // Only out-of-stock fabric: still suggested (staff confirm), never invented.
+        $this->assertSame([1, 3], array_column($this->m->fallback($this->m->eligible([$rows[0], $rows[2]], 'Pants'))['selections'], 'material_id'));
+    }
+
+    public function test_fallback_adds_the_closures_the_garment_needs_and_skips_lining_as_main_fabric(): void
+    {
+        $rows = [
+            ['material_id' => 1, 'material_name' => 'Satin Lining', 'category' => 'Fabric'],
+            ['material_id' => 2, 'material_name' => 'Twill Fabric', 'category' => 'Fabric'],
+            ['material_id' => 3, 'material_name' => 'Polyester Thread', 'category' => 'Thread'],
+            ['material_id' => 4, 'material_name' => 'YKK Zipper (7 inch)', 'category' => 'Accessories'],
+            ['material_id' => 5, 'material_name' => 'Plastic Buttons (Medium)', 'category' => 'Accessories'],
+            ['material_id' => 6, 'material_name' => 'Elastic Band (1 inch)', 'category' => 'Elastic'],
+        ];
+        $e = $this->m->eligible($rows, 'Pantsuit Trousers');
+        $p = $this->m->garmentProfile('Pantsuit Trousers');
+        $fb = $this->m->fallback($e, [], $p['needs']);
+        $this->assertSame([2, 3, 4, 5], array_column($fb['selections'], 'material_id'));
+        $this->assertFalse($this->m->hasForbiddenTerms(implode(' ', array_column($fb['selections'], 'reason'))));
+        $jog = $this->m->fallback($e, [], $this->m->garmentProfile('Custom Bottom', ['custom' => ['style' => 'jogger']])['needs']);
+        $this->assertSame([2, 3, 6], array_column($jog['selections'], 'material_id'));
+    }
+
+    public function test_garment_profiles_come_from_words_and_settings_not_a_fixed_list(): void
+    {
+        $p = fn ($g, $s = []) => $this->m->garmentProfile($g, $s);
+        $this->assertSame(['bottom', ['zipper', 'button']], [$p('Pantsuit Trousers')['kind'], $p('Pantsuit Trousers')['needs']]);
+        $this->assertSame(['bottom', ['elastic']], [$p("Women's Jogger Scrub Pants")['kind'], $p("Women's Jogger Scrub Pants")['needs']]);
+        $this->assertSame(['skirt', ['zipper']], [$p('Midi Pencil Skirt')['kind'], $p('Midi Pencil Skirt')['needs']]);
+        $this->assertSame([], $p('T-Shirt')['needs']);
+        $this->assertSame(['button', 'interfacing'], $p('Barong Shirt')['needs']);
+        $this->assertSame(['button', 'interfacing', 'lining'], $p('Short-Sleeve Notch Jacket')['needs']);
+        $this->assertSame(['button', 'interfacing'], $p('Custom Top', ['custom' => ['neckline' => 'mandarin']])['needs']);
+        $this->assertSame([], $p('Custom Top', ['custom' => ['neckline' => 'v']])['needs']);
+        $this->assertSame('top', $p('Some New Garment')['kind']);
+        $this->assertContains('Pants', $p("Men's Slacks")['aliases']);
+    }
+
+    public function test_applies_to_matches_the_garment_kind_alias(): void
+    {
+        $rows = [['material_id' => 1, 'material_name' => 'Trouser Hook', 'category' => 'Accessories', 'applies_to' => ['Pants']]];
+        $this->assertSame([], $this->m->eligible($rows, 'Pantsuit Trousers'));
+        $this->assertSame([1], array_keys($this->m->eligible($rows, 'Pantsuit Trousers', [], $this->m->garmentProfile('Pantsuit Trousers')['aliases'])));
+        $this->assertSame([], $this->m->eligible($rows, 'Polo Shirt', [], $this->m->garmentProfile('Polo Shirt')['aliases']));
     }
 }
