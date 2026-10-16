@@ -20,7 +20,13 @@ return new class extends Migration {
                 $t->unsignedBigInteger('updated_by')->nullable();
                 $t->foreign('updated_by')->references('user_id')->on('users')->nullOnDelete();
                 $t->timestamps();
-                $t->index(['is_active', 'scope_category', 'scope_garment']);
+                // Explicit name: the generated one is 68 chars, over MySQL's 64 limit.
+                $t->index(['is_active', 'scope_category', 'scope_garment'], 'rec_guidance_active_scope_garment_idx');
+            });
+        } elseif (!Schema::hasIndex('recommendation_guidance', 'rec_guidance_active_scope_garment_idx')) {
+            // Resume a run that created the table on MySQL but failed on the index.
+            Schema::table('recommendation_guidance', function (Blueprint $t) {
+                $t->index(['is_active', 'scope_category', 'scope_garment'], 'rec_guidance_active_scope_garment_idx');
             });
         }
 
