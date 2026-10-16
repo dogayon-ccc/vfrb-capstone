@@ -23,7 +23,11 @@ class Material extends Model
         'unit_cost',
         'ai_eligible',
         'applies_to',
+        'image_path',
+        'description',
     ];
+
+    protected $appends = ['image_url'];
 
     protected $casts = [
         'quantity_in_stock' => 'float',
@@ -79,5 +83,10 @@ class Material extends Model
     public function getIsLowStockAttribute(): bool
     {
         return $this->quantity_in_stock <= $this->reorder_threshold;
+    }
+
+    public function getImageUrlAttribute(): ?string
+    {
+        return $this->image_path ? asset($this->image_path) : null;
     }
 }

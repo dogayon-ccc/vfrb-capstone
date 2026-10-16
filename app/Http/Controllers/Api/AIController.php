@@ -427,7 +427,7 @@ class AIController extends Controller
         }
 
         $facts         = collect($this->withCatalogFacts($rows, $order))->keyBy('material_id')
-            ->map(fn ($r) => array_intersect_key($r, array_flip(['material_code', 'in_stock', 'colour_match'])))->all();
+            ->map(fn ($r) => array_intersect_key($r, array_flip(['id', 'name', 'note', 'image_url', 'description', 'material_code', 'in_stock', 'colour_match'])))->all();
         $materialsJson = [];
         $notesParts    = [];
         foreach ($rows as $row) {
@@ -732,12 +732,18 @@ PROMPT;
     {
         $families = $this->matcher->families($order->designColours());
         $catalog  = \App\Models\Material::whereIn('material_id', collect($rows)->pluck('material_id')->filter()->all())
-            ->get(['material_id', 'material_code', 'material_name', 'category', 'quantity_in_stock'])->keyBy('material_id');
+            ->get(['material_id', 'material_code', 'material_name', 'category', 'quantity_in_stock', 'image_path', 'description'])->keyBy('material_id');
         return collect($rows)->map(function ($r) use ($catalog, $families) {
             $row = is_array($r) ? $r : $r->toArray();
             $m   = $catalog->get($row['material_id'] ?? 0);
             $match = $m ? $this->matcher->colourMatch($m->toArray(), $families) : null;
             return $row + [
+                'id'            => $row['material_id'] ?? null,
+                'name'          => $row['material_name'] ?? $m?->material_name,
+                'category'      => $m?->category,
+                'note'          => $row['ai_note'] ?? null,
+                'image_url'     => $m?->image_url,
+                'description'   => $m?->description,
                 'material_code' => $m?->material_code,
                 'in_stock'      => $m ? $this->matcher->inStock($m->toArray()) : null,
                 'colour_match'  => $match === false ? 'other' : $match,
