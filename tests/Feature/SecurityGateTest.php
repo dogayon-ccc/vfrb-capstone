@@ -228,6 +228,14 @@ class SecurityGateTest extends TestCase
         $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertForbidden();
     }
 
+    // The admin login alias sits inside the authenticated admin group; it must stay reachable without a token.
+    public function test_admin_login_alias_signs_in_active_staff(): void
+    {
+        DB::table('users')->where('user_id', 4)->update(['password' => bcrypt('Sec#Test1234')]);
+        $email = DB::table('users')->where('user_id', 4)->value('email');
+        $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertOk()->assertJsonStructure(['token', 'user']);
+    }
+
     public function test_activate_deactivate_is_limited_to_staff_and_manager_accounts(): void
     {
         $this->actAs(1);

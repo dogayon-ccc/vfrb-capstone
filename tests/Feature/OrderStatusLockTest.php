@@ -101,10 +101,12 @@ class OrderStatusLockTest extends TestCase
 
     public function test_resending_the_current_status_is_not_a_transition_and_sends_no_duplicate_notice(): void
     {
+        $customerNotes = DB::table('orders')->where('order_id', 9)->value('notes');
         $this->patchJson('/api/admin/orders/9', ['status' => 'pending', 'notes' => 'still reviewing'])->assertOk();
 
         $this->assertSame('pending', $this->statusOf(9));
-        $this->assertSame('still reviewing', DB::table('orders')->where('order_id', 9)->value('notes'));
+        // The manager note goes to the customer message; orders.notes stays the customer's own.
+        $this->assertSame($customerNotes, DB::table('orders')->where('order_id', 9)->value('notes'));
         $this->assertSame(0, DB::table('notifications')->where('order_id', 9)->where('message', 'like', '%status has been updated%')->count());
     }
 

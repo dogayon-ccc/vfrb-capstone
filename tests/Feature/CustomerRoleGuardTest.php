@@ -19,6 +19,8 @@ class CustomerRoleGuardTest extends TestCase
     private function makeUser(?string $role = null): User
     {
         $user = User::create(['name' => 'Guard Test', 'email' => uniqid('guard') . '@example.test', 'password' => bcrypt('secret-pass')]);
+        // Customer routes require a verified email (RoleMiddleware); this test is about the role gate only.
+        $user->forceFill(['email_verified_at' => now()])->save();
         if ($role) {
             Role::firstOrCreate(['name' => $role, 'guard_name' => 'web']);
             $user->assignRole($role);
