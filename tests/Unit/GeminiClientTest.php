@@ -107,8 +107,37 @@ class GeminiClientTest extends TestCase
             throw new ConnectionException('timeout');
         }]);
 
+        config(['services.gemini.retries' => 0]);
         $this->assertNull((new GeminiClient())->call('hi'));
         $this->assertSame(2, $attempts);
+    }
+
+    public function test_a_dropped_connection_is_retried_a_bounded_number_of_times_per_key(): void
+    {
+        $this->keys('k1', 'k2');
+        $attempts = 0;
+        Http::fake(['*' => function () use (&$attempts) {
+            $attempts++;
+            throw new ConnectionException('timeout');
+        }]);
+
+        config(['services.gemini.retries' => 1]);
+        $this->assertNull((new GeminiClient())->call('hi'));
+        $this->assertSame(4, $attempts); // 2 keys x (1 try + 1 retry), never unbounded
+
+        config(['services.gemini.retries' => 99]);
+        $attempts = 0;
+        (new GeminiClient())->call('hi');
+        $this->assertSame(6, $attempts); // retries are capped at 2
+    }
+
+    public function test_a_500_is_not_retried(): void
+    {
+        $this->keys('k1');
+        Http::fake(['*' => Http::response('down', 500)]);
+        config(['services.gemini.retries' => 2]);
+        $this->assertNull((new GeminiClient())->call('hi'));
+        Http::assertSentCount(1);
     }
 
     public function test_empty_or_blocked_response_returns_null(): void
