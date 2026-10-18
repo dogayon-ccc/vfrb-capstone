@@ -63,7 +63,8 @@ class DesignController extends Controller
         $designs = Design::where('is_active', 1)
             ->where(function ($q) use ($userId) {
                 $q->whereNull('source_order_id')
-                  ->orWhereHas('orders', fn ($o) => $o->where('user_id', $userId));
+                  ->orWhereHas('orders', fn ($o) => $o->where('user_id', $userId))
+                  ->orWhereIn('source_order_id', fn ($o) => $o->select('order_id')->from('orders')->where('user_id', $userId));
             })
             ->orderByDesc('created_at')
             ->get();
@@ -79,6 +80,7 @@ class DesignController extends Controller
             'photo_path'  => $this->resolvePhotoUrl($d->photo_path),
             'config'      => $d->custom_builder_config ? json_decode($d->custom_builder_config, true) : null,
             'is_archived' => (bool) $d->source_order_id,
+            'order_id'    => $d->source_order_id,
             'showcase_status' => $d->showcase_status,
             'showcase_note'   => $d->showcase_status === 'rejected' ? ($notes[$d->design_id] ?? null) : null,
         ]));
@@ -86,25 +88,77 @@ class DesignController extends Controller
 
     // Scoped to the customer's own archived designs only — never a shared
     // starter template (source_order_id null), never another customer's.
+    // Copies keep the original's source_order_id, so they are matched through it as well as through orders.design_id.
     private function findOwnArchivedDesign(int $id): ?Design
     {
         return Design::whereNotNull('source_order_id')
-            ->whereHas('orders', fn ($o) => $o->where('user_id', Auth::id()))
+            ->where(fn ($q) => $q->whereHas('orders', fn ($o) => $o->where('user_id', Auth::id()))
+                ->orWhereIn('source_order_id', fn ($o) => $o->select('order_id')->from('orders')->where('user_id', Auth::id())))
             ->find($id);
     }
 
-    // InspoGallery.jsx: PUT /api/customer/designs/{id} — rename
+    // A design used by a confirmed order (proposal accepted, or confirmed and beyond) is read-only.
+    private function isLocked(Design $design): bool
+    {
+        return $design->orders()
+            ->where(fn ($q) => $q->whereNotIn('status', ['pending', 'cancelled'])->orWhere('proposal_status', 'accepted'))
+            ->exists();
+    }
+
+    // InspoGallery.jsx: PUT /api/customer/designs/{id} — rename, or change the saved config
     public function customerUpdate(Request $request, int $id)
     {
-        $validated = $request->validate(['design_name' => 'required|string|max:100']);
+        $validated = $request->validate([
+            'design_name'           => 'required_without:custom_builder_config|string|max:100',
+            'custom_builder_config' => 'sometimes|array',
+        ]);
+
+        $design = $this->findOwnArchivedDesign($id);
+        if (!$design) {
+            return response()->json(['message' => 'Design not found.'], 404);
+        }
+        if ($this->isLocked($design)) {
+            return response()->json([
+                'message' => 'This design belongs to a confirmed order and can no longer be changed. Make a copy to edit it.',
+                'locked'  => true,
+            ], 422);
+        }
+
+        $fields = array_filter(['design_name' => $validated['design_name'] ?? null], fn ($v) => $v !== null);
+        if (isset($validated['custom_builder_config'])) {
+            $fields['custom_builder_config'] = json_encode($validated['custom_builder_config']);
+        }
+        $design->update($fields);
+        return response()->json(['id' => $design->design_id, 'label' => $design->design_name]);
+    }
+
+    // POST /api/customer/designs/{id}/copy — an editable copy of an own design (the original stays as ordered).
+    public function customerCopy(Request $request, int $id)
+    {
+        $validated = $request->validate([
+            'design_name'           => 'nullable|string|max:100',
+            'custom_builder_config' => 'sometimes|array',
+        ]);
 
         $design = $this->findOwnArchivedDesign($id);
         if (!$design) {
             return response()->json(['message' => 'Design not found.'], 404);
         }
 
-        $design->update(['design_name' => $validated['design_name']]);
-        return response()->json(['id' => $design->design_id, 'label' => $design->design_name]);
+        $copy = $design->replicate(['showcase_status', 'showcase_label', 'submitted_by_user_id', 'showcase_approved_by', 'showcase_approved_at']);
+        $copy->design_name      = $validated['design_name'] ?? mb_substr("Copy of {$design->design_name}", 0, 100);
+        $copy->parent_design_id = $design->design_id;
+        $copy->source_order_id  = $design->source_order_id;
+        if (isset($validated['custom_builder_config'])) {
+            $copy->custom_builder_config = json_encode($validated['custom_builder_config']);
+        }
+        $copy->save();
+
+        return response()->json([
+            'id'     => $copy->design_id,
+            'label'  => $copy->design_name,
+            'config' => $copy->custom_builder_config ? json_decode($copy->custom_builder_config, true) : null,
+        ], 201);
     }
 
     // InspoGallery.jsx: DELETE /api/customer/designs/{id}

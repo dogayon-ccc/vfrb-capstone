@@ -27,11 +27,18 @@
 //   daily_output_logs:         total_output is GENERATED — never insert it
 //   qc_checklists:             the latest row's passed flag clears the gate (set by QCChecklistController:
 //                               80% of the sample AND every required check passes)
-//   material_recommendations:  actual_qty_issued, issued_at — written here,
-//                               now from staff-entered actual usage (see
-//                               issueMaterialsToProduction()), not a parsed
-//                               estimate. No formula/BOM exists in this
-//                               system as of Aug 28 2026.
+//   material_recommendations:  actual_qty_issued, issued_at — written here.
+//                               actual_qty_issued = fabric consumption staff
+//                               enter at Pattern (marker/yield is worked out
+//                               there); issued_at = when Cutting completed and
+//                               that quantity left stock. Staff-entered, never
+//                               a parsed estimate; no formula/BOM exists.
+//
+// INVENTORY TIMING (Oct 17 2026): consumption is RECORDED at Pattern and
+// DEDUCTED at Cutting, when the fabric is physically cut. Sewing and later
+// stages never deduct again. Orders that were already deducted at Pattern
+// under the old rule have issued_at set, so Cutting skips them (no double
+// deduction).
 //
 // STILL OPEN, deliberately not touched in this pass — flagged to Dave,
 // awaiting a decision separate from this file: ProductionController's
@@ -65,15 +72,19 @@ class ProductionStageService
         'sewing'      => 'qc',
         'qc'          => 'pressing',
         'pressing'    => 'packing',
-        'packing'     => 'completed',
+        'packing'     => 'for_delivery', // automatic once packed_total == ordered; admin then marks delivered (completed)
     ];
 
     const QC_PASS_THRESHOLD = 0.80;
 
+    // daily_output_logs size columns, as qty_{col}.
+    const SIZE_COLS = ['xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', 'custom'];
+
     /**
      * Log production output for one order+stage and, if the running total
      * now meets the target, advance the order's stage — with the QC gate,
-     * inventory deduction (Pattern), auto-delivery creation (Packing), and
+     * consumption recording (Pattern), inventory deduction (Cutting),
+     * auto-delivery creation (Packing), and
      * notifications all as one atomic unit.
      *
      * @param int   $orderId
@@ -81,8 +92,7 @@ class ProductionStageService
      *                           already validated this against the enum
      * @param array $qty         ['qty_xs'=>int, 'qty_s'=>int, ... 'qty_custom'=>int]
      * @param array $meta        ['staff_id'=>int, 'notes'=>?string,
-     *                            'log_date'=>string, 'defect_count'=>int,
-     *                            'alteration_count'=>int, 'defect_notes'=>?string]
+     *                            'log_date'=>string] — defects go through reportDefect()
      * @param array $materialActuals  [{'material_id'=>int, 'qty_used'=>float}, ...]
      *              — staff-entered ACTUAL quantities used, one entry per
      *              accepted+linked material_recommendations row on this
@@ -117,7 +127,9 @@ class ProductionStageService
         $qtyCustom = (int) ($qty['qty_custom'] ?? 0);
         $thisBatch = $qtyXs + $qtyS + $qtyM + $qtyL + $qtyXl + $qtyXxl + $qtyXxxl + $qtyCustom;
 
-        if ($thisBatch <= 0) {
+        // Zero pieces is allowed only to supply material consumption for a
+        // Pattern stage that is already complete but held (checked below).
+        if ($thisBatch <= 0 && empty($materialActuals)) {
             return ['error' => true, 'status' => 422, 'message' => 'At least 1 piece must be logged.', 'current_stage' => null];
         }
 
@@ -170,6 +182,9 @@ class ProductionStageService
 
             // Duplicate submit on a finished stage: log nothing, only retry the held advance below.
             $alreadyComplete = $qtyTarget > 0 && $done >= $qtyTarget;
+            if ($thisBatch <= 0 && !$alreadyComplete) {
+                return ['error' => true, 'status' => 422, 'message' => 'At least 1 piece must be logged.', 'current_stage' => $order->status];
+            }
             if (!$alreadyComplete && $qtyTarget > 0 && $done + $thisBatch > $qtyTarget) {
                 $left = $qtyTarget - $done;
                 return [
@@ -178,6 +193,13 @@ class ProductionStageService
                     'message'       => "{$label} is at {$done}/{$qtyTarget}; only {$left} more piece" . ($left === 1 ? '' : 's') . " can be logged.",
                     'current_stage' => $order->status,
                 ];
+            }
+
+            if (!$alreadyComplete && ($limit = $this->sizeLimitError($orderId, $stage, [
+                'xs' => $qtyXs, 's' => $qtyS, 'm' => $qtyM, 'l' => $qtyL,
+                'xl' => $qtyXl, 'xxl' => $qtyXxl, 'xxxl' => $qtyXxxl, 'custom' => $qtyCustom,
+            ]))) {
+                return ['error' => true, 'status' => 422, 'current_stage' => $order->status] + $limit;
             }
 
             $logId     = null;
@@ -199,9 +221,7 @@ class ProductionStageService
                     'qty_xxl'          => $qtyXxl,
                     'qty_xxxl'         => $qtyXxxl,
                     'qty_custom'       => $qtyCustom,
-                    'defect_count'     => (int) ($meta['defect_count'] ?? 0),
-                    'alteration_count' => (int) ($meta['alteration_count'] ?? 0),
-                    'defect_notes'     => $meta['defect_notes'] ?? null,
+                    'defect_count'     => 0,
                     'notes'            => $notes,
                     'created_at'       => now(),
                     'updated_at'       => now(),
@@ -233,6 +253,11 @@ class ProductionStageService
                     ]);
                     $newCompleted = $thisBatch;
                 }
+
+                // Partial delivery needs a delivery record as soon as anything is packed.
+                if ($stage === 'packing') {
+                    $this->autoCreateDelivery($orderId, $staffId, false);
+                }
             }
 
             $pct = $qtyTarget > 0 ? min(100, round($newCompleted / $qtyTarget * 100)) : 0;
@@ -260,23 +285,18 @@ class ProductionStageService
                     }
                 }
 
-                // ── Material-actuals gate — Pattern only ─────────────────────
-                // No formula/BOM anywhere in this system (locked design
-                // decision, Aug 28 2026): Gemini recommends material TYPES
-                // only. Automated deduction still happens on Pattern
-                // completion, but the QUANTITY now comes from staff manually
-                // entering actual usage, not a computed estimate. If there
-                // are accepted+linked recommendations on this order and the
-                // caller didn't supply an actual for every one of them, hold
-                // the advance — same shape as the QC gate above — rather
-                // than deduct a wrong/missing quantity or silently skip
-                // inventory movement.
+                // ── Material-consumption gate — Pattern only ─────────────────
+                // Fabric yield is worked out at Pattern (marker planning), so
+                // staff enter the consumption here. No formula/BOM: Gemini
+                // recommends material TYPES only. If any accepted+linked
+                // material lacks a quantity, hold the advance (same shape as
+                // the QC gate) rather than record a wrong/missing quantity.
                 if (!$qcBlocked && $stage === 'pattern') {
                     $materialsNeeding = $this->checkMaterialActualsGate($orderId, $actualsByMaterialId);
                     if (!empty($materialsNeeding)) {
                         $materialsBlocked = true;
                         $names = implode(', ', array_column($materialsNeeding, 'material_name'));
-                        $message = "Pattern quantity complete, but actual material usage must be entered before advancing to Segregation. Missing: {$names}.";
+                        $message = "Pattern quantity complete, but material consumption must be entered before advancing to Segregation. Missing: {$names}.";
                     }
                 }
 
@@ -285,26 +305,29 @@ class ProductionStageService
                     if ($nextStage) {
                         $this->moveStage($orderId, $stage, $nextStage);
 
-                        // ── Goods Issue to Production ──────────
-                        // Fires ONLY when Pattern completes (locked rule, was
-                        // previously only reachable via OutputLogController).
-                        // Quantity source: staff-entered $actualsByMaterialId,
-                        // gated above — never a parsed/computed estimate.
+                        // Pattern completes: record consumption only.
                         if ($stage === 'pattern') {
-                            $result         = $this->issueMaterialsToProduction($orderId, $staffId, $actualsByMaterialId);
+                            $this->recordMaterialConsumption($orderId, $actualsByMaterialId);
+                        }
+
+                        // ── Goods Issue to Production ──────────
+                        // Cutting completes: the fabric is cut, so the
+                        // consumption recorded at Pattern leaves stock now.
+                        if ($stage === 'cutting') {
+                            $result         = $this->issueMaterialsToProduction($orderId, $staffId);
                             $deductionLog   = $result['log'];
                             $lowStockAlerts = $result['low_stock'];
                         }
 
-                        // ── Auto-create delivery record on order completion ──
-                        if ($nextStage === 'completed') {
-                            $this->autoCreateDelivery($orderId, $staffId);
+                        // ── Fully packed: ready for delivery ──
+                        if ($nextStage === 'for_delivery') {
+                            $this->autoCreateDelivery($orderId, $staffId, true);
                             $this->archiveCompletedDesign($orderId, $order);
                         }
 
                         $advanced  = true;
                         $newStage  = $nextStage;
-                        $stageLabel = ucfirst($nextStage);
+                        $stageLabel = self::stageLabel($nextStage);
                         $message = "🎉 All {$qtyTarget} pieces completed — Order #{$orderId} advanced to {$stageLabel}!"
                             . (count($deductionLog) > 0 ? " " . count($deductionLog) . " materials issued to production." : "");
 
@@ -339,7 +362,180 @@ class ProductionStageService
 
     public static function stageLabel(string $stage): string
     {
-        return $stage === 'qc' ? 'QC' : ucfirst($stage);
+        return $stage === 'qc' ? 'QC' : ucwords(str_replace('_', ' ', $stage));
+    }
+
+    /** @return string[] pattern … packing */
+    public static function productionStages(): array
+    {
+        return array_slice(array_keys(self::STAGE_MAP), 1);
+    }
+
+    public static function sizeCol(string $label): string
+    {
+        return match (strtoupper(trim($label))) {
+            'XS' => 'xs', 'S' => 's', 'M' => 'm', 'L' => 'l', 'XL' => 'xl',
+            'XXL', '2XL' => 'xxl', 'XXXL', '3XL' => 'xxxl',
+            default => 'custom',
+        };
+    }
+
+    // Ordered pieces per size column from measurements (standard rows' qty; a custom-measurement row takes the rest
+    // of quantity_ordered). Null when the order has no size breakdown at all (older orders): only the total is enforced.
+    public static function orderedBySize(int $orderId): ?array
+    {
+        $map       = array_fill_keys(self::SIZE_COLS, 0);
+        $hasCustom = false;
+        foreach (DB::table('measurements')->where('order_id', $orderId)->get(['type', 'size_label', 'qty']) as $m) {
+            if ($m->type === 'custom') {
+                $hasCustom = true;
+            } elseif ((int) $m->qty > 0) {
+                $map[self::sizeCol((string) $m->size_label)] += (int) $m->qty;
+            }
+        }
+        if ($hasCustom) {
+            $ordered        = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered');
+            $map['custom'] += max(0, $ordered - array_sum($map));
+        }
+        return array_sum($map) > 0 ? $map : null;
+    }
+
+    // Logged pieces as [stage => [size col => n]] for every production stage.
+    public static function completedBySize(int $orderId): array
+    {
+        $out  = array_fill_keys(self::productionStages(), array_fill_keys(self::SIZE_COLS, 0));
+        $sums = array_map(fn ($c) => DB::raw("COALESCE(SUM(qty_{$c}), 0) as {$c}"), self::SIZE_COLS);
+        $rows = DB::table('daily_output_logs')->where('order_id', $orderId)->groupBy('stage')->select('stage', ...$sums)->get();
+        foreach ($rows as $r) {
+            if (!isset($out[$r->stage])) continue;
+            foreach (self::SIZE_COLS as $c) $out[$r->stage][$c] = (int) $r->{$c};
+        }
+        return $out;
+    }
+
+    // Per order, stage and size: only sizes the order contains, never more than ordered, and after the first stage
+    // never more than the previous stage has logged. Returns ['message', 'size', 'remaining'] or null when the batch fits.
+    public function sizeLimitError(int $orderId, string $stage, array $batch): ?array
+    {
+        $ordered = self::orderedBySize($orderId);
+        $done    = self::completedBySize($orderId);
+        $stages  = self::productionStages();
+        $prev    = $stages[array_search($stage, $stages, true) - 1] ?? null;
+        $label   = self::stageLabel($stage);
+
+        foreach ($batch as $col => $n) {
+            if ($n <= 0) continue;
+            $size = strtoupper($col);
+            if ($ordered !== null && $ordered[$col] <= 0) {
+                return ['message' => "Size {$size} is not in this order.", 'size' => $size, 'remaining' => 0];
+            }
+            $caps = [];
+            if ($ordered !== null) $caps[] = $ordered[$col];
+            if ($prev) $caps[] = $done[$prev][$col];
+            if (!$caps) continue;
+            $left = max(0, min($caps) - $done[$stage][$col]);
+            if ($n > $left) {
+                $why = $prev && ($ordered === null || $done[$prev][$col] < $ordered[$col])
+                    ? self::stageLabel($prev) . " has finished {$done[$prev][$col]}"
+                    : "the order has {$ordered[$col]}";
+                return [
+                    'message'   => "Size {$size}: only {$left} more can be logged at {$label} ({$why}; {$label} has {$done[$stage][$col]}).",
+                    'size'      => $size,
+                    'remaining' => $left,
+                ];
+            }
+        }
+        return null;
+    }
+
+    // Per stage {completed, total_ordered, in_progress = completed_prev - completed}, per size too, plus packed_total.
+    public function productionSummary(int $orderId): ?array
+    {
+        $order = DB::table('orders')->where('order_id', $orderId)->first(['order_id', 'status', 'quantity_ordered']);
+        if (!$order) return null;
+
+        $ordered = self::orderedBySize($orderId);
+        $done    = self::completedBySize($orderId);
+        $total   = (int) $order->quantity_ordered;
+        $sizes   = array_filter(self::SIZE_COLS, fn ($c) => $ordered ? $ordered[$c] > 0 : array_sum(array_column($done, $c)) > 0);
+
+        $stages = [];
+        $prev   = null;
+        foreach (self::productionStages() as $s) {
+            $completed = array_sum($done[$s]);
+            $bySize    = [];
+            foreach ($sizes as $c) {
+                $bySize[strtoupper($c)] = [
+                    'completed'     => $done[$s][$c],
+                    'total_ordered' => $ordered[$c] ?? null,
+                    'in_progress'   => $prev ? max(0, $done[$prev][$c] - $done[$s][$c]) : 0,
+                ];
+            }
+            $stages[] = [
+                'stage'         => $s,
+                'label'         => self::stageLabel($s),
+                'completed'     => $completed,
+                'total_ordered' => $total,
+                'in_progress'   => $prev ? max(0, array_sum($done[$prev]) - $completed) : 0,
+                'sizes'         => $bySize,
+            ];
+            $prev = $s;
+        }
+
+        $packed    = array_sum($done['packing']);
+        $delivered = (int) DB::table('delivery_tracking')->where('order_id', $orderId)->value('delivered_qty');
+        $defects   = DB::table('daily_output_logs')->where('order_id', $orderId)->where('defect_count', '>', 0)
+            ->groupBy('defect_size')->select('defect_size', DB::raw('SUM(defect_count) as qty'))->pluck('qty', 'defect_size');
+
+        return [
+            'order_id'           => (int) $order->order_id,
+            'status'             => $order->status,
+            'total_ordered'      => $total,
+            'ordered_by_size'    => $ordered ? array_change_key_case(array_filter($ordered), CASE_UPPER) : null,
+            'stages'             => $stages,
+            'packed_total'       => $packed,
+            'delivered_total'    => $delivered,
+            'ready_for_delivery' => max(0, $packed - $delivered),
+            'defects_by_size'    => $defects->map(fn ($q) => (int) $q),
+        ];
+    }
+
+    // Only the staff who sewed pieces of this size on this order may report them defective, up to what they sewed.
+    // Stored as a zero-output sewing row in daily_output_logs (defect_count, defect_size, defect_notes = reason).
+    public function reportDefect(int $orderId, int $staffId, string $size, int $qty, string $reason): array
+    {
+        $col  = self::sizeCol($size);
+        $size = strtoupper($col);
+
+        return DB::transaction(function () use ($orderId, $staffId, $col, $size, $qty, $reason) {
+            if (!DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->exists()) {
+                return ['error' => true, 'status' => 404, 'message' => 'Order not found.'];
+            }
+            $mine = DB::table('daily_output_logs')->where('order_id', $orderId)->where('stage', 'sewing')->where('logged_by', $staffId);
+            $sewn = (int) (clone $mine)->sum("qty_{$col}");
+            if ($sewn <= 0) {
+                return ['error' => true, 'status' => 403, 'message' => "Only the staff who sewed size {$size} pieces on order #{$orderId} can report a defect on them."];
+            }
+            $left = max(0, $sewn - (int) (clone $mine)->where('defect_size', $size)->sum('defect_count'));
+            if ($qty > $left) {
+                return ['error' => true, 'status' => 422, 'message' => "You can report at most {$left} more size {$size} defect" . ($left === 1 ? '' : 's') . " ({$sewn} sewn by you).", 'remaining' => $left];
+            }
+
+            $logId = DB::table('daily_output_logs')->insertGetId([
+                'order_id'     => $orderId,
+                'stage'        => 'sewing',
+                'logged_by'    => $staffId,
+                'log_date'     => now()->toDateString(),
+                'qty_xs' => 0, 'qty_s' => 0, 'qty_m' => 0, 'qty_l' => 0, 'qty_xl' => 0, 'qty_xxl' => 0, 'qty_xxxl' => 0, 'qty_custom' => 0,
+                'defect_count' => $qty,
+                'defect_size'  => $size,
+                'defect_notes' => $reason,
+                'created_at'   => now(),
+                'updated_at'   => now(),
+            ], 'log_id');
+
+            return ['error' => false, 'log_id' => $logId, 'size' => $size, 'qty' => $qty, 'remaining' => $left - $qty];
+        });
     }
 
     // Production stages before $stage (and $stage itself when $inclusive) that haven't met their target, e.g. ["QC 0/100"].
@@ -439,32 +635,50 @@ class ProductionStageService
         AuditLog::record('order_status_changed', 'orders', $orderId);
     }
 
-    // ── Goods Issue to Production ─────────────────────────────
-    // REWRITTEN Aug 28 2026 (scope correction, not a syntax fix): this used
-    // to parse a quantity out of estimated_range with a regex. That's gone —
-    // there is no formula/BOM anywhere in this system now, per the locked
-    // design decision. Gemini recommends material TYPES only; the actual
-    // quantity deducted here is exactly what staff typed in
-    // $actualsByMaterialId, gated by checkMaterialActualsGate() before this
-    // method is ever called (every accepted+linked material is guaranteed
-    // to have an entry by the time we get here — the ?? -1 fallback below is
-    // defensive only, it should never actually fire).
-    // Only deducts recommendations the customer explicitly accepted
-    // (customer_accepted = 1) AND that staff already linked to a real
-    // inventory item (material_id not null).
-    private function issueMaterialsToProduction(int $orderId, int $actorId, array $actualsByMaterialId): array
+    // ── Consumption at Pattern ────────────────────────────────
+    // Stores the staff-entered fabric/material consumption (worked out from
+    // the marker at Pattern) on each accepted+linked recommendation. Stock is
+    // NOT touched here; issueMaterialsToProduction() deducts it at Cutting.
+    // Rows already issued (issued_at set) are left alone.
+    private function recordMaterialConsumption(int $orderId, array $actualsByMaterialId): void
     {
         $recs = DB::table('material_recommendations')
             ->where('order_id', $orderId)
             ->where('customer_accepted', 1)
             ->whereNotNull('material_id')
+            ->whereNull('issued_at')
+            ->get(['rec_id', 'material_id']);
+
+        foreach ($recs as $rec) {
+            $qty = $actualsByMaterialId[$rec->material_id] ?? -1;
+            if ($qty < 0) continue; // gate already blocked a missing value; never guess one
+            DB::table('material_recommendations')
+                ->where('rec_id', $rec->rec_id)
+                ->update(['actual_qty_issued' => $qty, 'updated_at' => now()]);
+        }
+    }
+
+    // ── Goods Issue to Production (Cutting) ───────────────────
+    // Deducts the consumption recorded at Pattern (actual_qty_issued) once
+    // Cutting completes, then stamps issued_at so it can never deduct twice.
+    // Only recommendations the customer accepted AND staff linked to a real
+    // inventory item; no formula/BOM, the quantity is exactly what staff entered.
+    // Public so ProductionController::advance() (manager override) issues the same way.
+    public function issueMaterialsToProduction(int $orderId, int $actorId): array
+    {
+        $recs = DB::table('material_recommendations')
+            ->where('order_id', $orderId)
+            ->where('customer_accepted', 1)
+            ->whereNotNull('material_id')
+            ->whereNotNull('actual_qty_issued')
+            ->whereNull('issued_at')
             ->get();
 
         $log      = [];
         $lowStock = [];
 
         if ($recs->isEmpty()) {
-            Log::warning("No accepted+linked material recommendations for Order #{$orderId}");
+            Log::info("Order #{$orderId}: nothing left to issue at Cutting (no recorded consumption, or already issued)");
             return ['log' => [], 'low_stock' => []];
         }
 
@@ -485,17 +699,8 @@ class ProductionStageService
 
             if (!$material) continue;
 
-            // Staff-entered actual usage — NOT a computed estimate. -1
-            // sentinel ("no value given") should be unreachable here because
-            // checkMaterialActualsGate() already blocked the advance if any
-            // accepted+linked material lacked an actual; if it somehow still
-            // shows up, skip that material entirely (don't guess a quantity)
-            // and log it loudly rather than silently deduct 0.
-            $qty = $actualsByMaterialId[$rec->material_id] ?? -1;
-            if ($qty < 0) {
-                Log::warning("material_id {$rec->material_id} on Order #{$orderId} reached issueMaterialsToProduction() with no actual — gate should have caught this. Skipped, not deducted.");
-                continue;
-            }
+            // Consumption staff entered at Pattern — never a computed estimate.
+            $qty = (float) $rec->actual_qty_issued;
 
             // Client-supplied fabric on a subcontract order — record the
             // usage on the recommendation for the audit trail, but don't
@@ -522,7 +727,7 @@ class ProductionStageService
                     'recorded_by' => $actorId,
                     'type'        => 'stock_out',
                     'change_qty'  => -$qty,
-                    'reason'      => "Issued to production — Order #{$orderId} (Pattern stage, staff-entered actual usage)",
+                    'reason'      => "Issued to production — Order #{$orderId} (Cutting stage, consumption recorded at Pattern)",
                     'log_date'    => now(),
                     'created_at'  => now(),
                     'updated_at'  => now(),
@@ -567,35 +772,35 @@ class ProductionStageService
         return ['log' => $log, 'low_stock' => $lowStock];
     }
 
-    // ── Auto-create delivery record on order completion ────────────────────
-    // Ported verbatim from OutputLogController::autoCreateDelivery().
+    // ── Delivery record: created on the first packing log; customer notified once fully packed ──
     // Guards against a duplicate delivery row if ever triggered twice.
-    private function autoCreateDelivery(int $orderId, int $actorId): void
+    private function autoCreateDelivery(int $orderId, int $actorId, bool $notify): void
     {
-        $exists = DB::table('delivery_tracking')->where('order_id', $orderId)->exists();
-        if ($exists) return;
+        $order = DB::table('orders')->where('order_id', $orderId)->first();
 
-        $order   = DB::table('orders')->where('order_id', $orderId)->first();
-        $address = DB::table('users')->where('user_id', $order->user_id)->value('address');
+        if (!DB::table('delivery_tracking')->where('order_id', $orderId)->exists()) {
+            $address = DB::table('users')->where('user_id', $order->user_id)->value('address');
 
-        DB::table('delivery_tracking')->insert([
-            'order_id'                => $orderId,
-            'delivery_method'         => 'vfrb_deliver',
-            'delivery_status'         => 'preparing',
-            'delivery_address'        => $address ?? 'Address pending',
-            'estimated_delivery_date' => now()->addDays(3)->toDateString(),
-            'updated_by'              => $actorId,
-            'notes'                   => 'Auto-created on order completion.',
-            'created_at'              => now(),
-            'updated_at'              => now(),
-        ]);
+            DB::table('delivery_tracking')->insert([
+                'order_id'                => $orderId,
+                'delivery_method'         => 'vfrb_deliver',
+                'delivery_status'         => 'preparing',
+                'delivery_address'        => $address ?? 'Address pending',
+                'estimated_delivery_date' => now()->addDays(3)->toDateString(),
+                'updated_by'              => $actorId,
+                'notes'                   => 'Auto-created when packing started.',
+                'created_at'              => now(),
+                'updated_at'              => now(),
+            ]);
+        }
+        if (!$notify) return;
 
         DB::table('notifications')->insert([
             'user_id'   => $order->user_id,
             'order_id'  => $orderId,
             'type'      => 'success',
             'title'     => "Order #{$orderId} Ready for Delivery",
-            'message'   => "🎉 Order #{$orderId} is complete! Delivery is being prepared.",
+            'message'   => "🎉 Order #{$orderId} is fully packed and ready for delivery.",
             'is_read'   => 0,
             'date_sent' => now(),
             'created_at'=> now(),
@@ -659,8 +864,8 @@ class ProductionStageService
     // notifies all managers, not just the customer.
     private function notifyStageAdvance(int $orderId, int $customerId, string $fromStage, string $toStage, int $materialsDeductedCount = 0): void
     {
-        $fromLabel = ucfirst($fromStage);
-        $toLabel   = ucfirst($toStage);
+        $fromLabel = self::stageLabel($fromStage);
+        $toLabel   = self::stageLabel($toStage);
         $now       = now();
         $suffix    = $materialsDeductedCount > 0 ? " · {$materialsDeductedCount} materials issued to production." : "";
 

@@ -10,6 +10,7 @@ final class OrderStatusLabel
         'confirmed' => 'Confirmed',
         'pattern'   => 'In Production', 'segregation' => 'In Production', 'cutting' => 'In Production', 'sewing' => 'In Production',
         'qc'        => 'In Production', 'pressing'    => 'In Production', 'packing' => 'In Production',
+        'for_delivery' => 'In Production', // fully packed, awaiting delivery; keeps the four-label funnel
         'completed' => 'Delivered',
         'cancelled' => 'Cancelled',
     ];

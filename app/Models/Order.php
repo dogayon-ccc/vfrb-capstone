@@ -25,6 +25,15 @@ class Order extends Model
         'ai_recommendation_requested_at',
         'ai_recommendation_accepted_at',
         'qc_required','qc_passed_at',
+        // Proposal flow (2026_10_17_000002)
+        'promised_date','proposal_note','proposal_status','fabric_type',
+        'delivery_address','down_payment_received_at',
+    ];
+
+    // Fields only a manager may set; a customer request carrying any of them is rejected.
+    public const MANAGER_ONLY_FIELDS = [
+        'promised_date', 'total', 'agreed_total', 'status', 'down_payment_amount',
+        'down_payment_received_at', 'proposal_status', 'proposal_note',
     ];
 
     protected $casts = [
@@ -37,7 +46,32 @@ class Order extends Model
         'ai_recommendation_requested_at'    => 'datetime',
         'ai_recommendation_accepted_at'     => 'datetime',
         'qc_passed_at'                      => 'datetime',
+        'promised_date'                     => 'date',
+        'down_payment_received_at'          => 'datetime',
     ];
+
+    // ── Proposal rules (shared by OrderController and ProductionController; $order is a DB row) ──
+    // Every order: the promised date must be at least min_promised_days after the order was placed,
+    // so a customer date picked one week out stays valid while VFRB reviews it.
+    public static function promisedDateError(?string $promisedDate, $placedAt): ?string
+    {
+        $days = (int) config('vfrb.min_promised_days', 7);
+        $min  = \Illuminate\Support\Carbon::parse($placedAt ?? now())->startOfDay()->addDays($days);
+        if (!$promisedDate) {
+            return 'Set a promised date before the order is confirmed (send the customer a proposal first).';
+        }
+        return \Illuminate\Support\Carbon::parse($promisedDate)->lt($min)
+            ? "The promised date must be at least {$days} days after the order was placed (earliest: {$min->toDateString()})."
+            : null;
+    }
+
+    // Suggested promised date: lead days per 100 pieces (config, admin may override), never earlier than min_promised_days.
+    public static function suggestedPromisedDate(int $quantity, ?int $leadDaysPer100 = null): \Illuminate\Support\Carbon
+    {
+        $lead = $leadDaysPer100 ?? (int) config('vfrb.lead_days_per_100', 14);
+        $days = max((int) ceil(max($quantity, 1) / 100) * $lead, (int) config('vfrb.min_promised_days', 7));
+        return now()->startOfDay()->addDays($days);
+    }
 
     // ── Relationships ─────────────────────────────────────────────────────────
     public function user()            { return $this->belongsTo(User::class, 'user_id', 'user_id'); }

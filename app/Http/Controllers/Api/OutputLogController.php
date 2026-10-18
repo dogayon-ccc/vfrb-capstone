@@ -29,6 +29,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\ProductionStageService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -56,9 +57,6 @@ class OutputLogController extends Controller
             'qty_xxl'          => 'nullable|integer|min:0',
             'qty_xxxl'         => 'nullable|integer|min:0',
             'qty_custom'       => 'nullable|integer|min:0',
-            'defect_count'     => 'nullable|integer|min:0',
-            'alteration_count' => 'nullable|integer|min:0',
-            'defect_notes'     => 'nullable|string|max:1000',
             'notes'            => 'nullable|string|max:500',
             // See ProductionController::logProgress() for the full comment
             // on why this is shape-only validation, not required_if.
@@ -77,6 +75,9 @@ class OutputLogController extends Controller
         $order = DB::table('orders')->where('order_id', $request->order_id)->first();
         if (!$order) {
             return response()->json(['message' => 'Order not found.'], 404);
+        }
+        if (empty($order->down_payment_received_at)) {
+            return response()->json(['message' => "Production cannot start on order #{$order->order_id} until the down payment is recorded."], 422);
         }
 
         // CONSOLIDATED (Aug 28 2026): everything that used to run inline here
@@ -111,9 +112,6 @@ class OutputLogController extends Controller
                 'staff_id'         => Auth::id(),
                 'log_date'         => $request->log_date,
                 'notes'            => $request->input('notes'),
-                'defect_count'     => $request->input('defect_count',     0),
-                'alteration_count' => $request->input('alteration_count', 0),
-                'defect_notes'     => $request->input('defect_notes'),
             ],
             $request->input('material_actuals', [])
         );
@@ -128,9 +126,11 @@ class OutputLogController extends Controller
             // concurrent request could still slip past it before the first
             // committed. The service now performs the same check
             // authoritatively, inside lockForUpdate().
-            return response()->json([
-                'message' => $result['message'],
-            ], $result['status']);
+            return response()->json(array_filter([
+                'message'   => $result['message'],
+                'size'      => $result['size'] ?? null,
+                'remaining' => $result['remaining'] ?? null,
+            ], fn ($v) => $v !== null), $result['status']);
         }
 
         return response()->json([
@@ -157,6 +157,52 @@ class OutputLogController extends Controller
     // now call that one shared implementation instead of each having (or, in
     // logProgress()'s case, lacking) their own copy.
 
+    // ── GET /api/admin/orders/{id}/production-summary ─────────────────────────
+    public function productionSummary(int $id)
+    {
+        $summary = (new ProductionStageService())->productionSummary($id);
+        return $summary
+            ? response()->json($summary)
+            : response()->json(['message' => 'Order not found.'], 404);
+    }
+
+    // ── GET /api/admin/orders/production-summaries?ids=1,2,3 ──────────────────
+    // Same shape as productionSummary(), keyed by order_id. No ids = every order in production (cap 100).
+    public function productionSummaries(Request $request)
+    {
+        $ids = collect(explode(',', (string) $request->query('ids', '')))
+            ->map(fn ($v) => (int) trim($v))->filter(fn ($v) => $v > 0)->unique()->take(100)->values();
+        if ($ids->isEmpty()) {
+            $ids = DB::table('orders')->whereIn('status', [...ProductionStageService::productionStages(), 'for_delivery'])
+                ->orderBy('order_id')->limit(100)->pluck('order_id');
+        }
+
+        $service = new ProductionStageService();
+        $out = [];
+        foreach ($ids as $id) {
+            if ($s = $service->productionSummary((int) $id)) $out[(int) $id] = $s;
+        }
+        return response()->json(['data' => (object) $out]);
+    }
+
+    // ── POST /api/admin/orders/{id}/defects ───────────────────────────────────
+    // Only the staff who sewed the pieces reports them: { size, qty, reason }.
+    public function reportDefect(Request $request, int $id)
+    {
+        $request->validate([
+            'size'   => 'required|string|in:XS,S,M,L,XL,XXL,XXXL,2XL,3XL,CUSTOM,xs,s,m,l,xl,xxl,xxxl,2xl,3xl,custom',
+            'qty'    => 'required|integer|min:1',
+            'reason' => 'required|string|max:1000',
+        ]);
+
+        $result = (new ProductionStageService())->reportDefect($id, (int) Auth::id(), $request->input('size'), (int) $request->input('qty'), $request->input('reason'));
+        if ($result['error']) {
+            return response()->json(array_filter(['message' => $result['message'], 'remaining' => $result['remaining'] ?? null], fn ($v) => $v !== null), $result['status']);
+        }
+
+        return response()->json(['message' => "{$result['qty']} size {$result['size']} defect(s) reported."] + $result, 201);
+    }
+
     // ── GET /api/admin/output-logs/summary/{orderId} ──────────────────────────
     // DailyOutputLog.jsx calls: GET /api/admin/output-logs/summary/{form.order_id}
     // Route param version — summary() uses query param version above
@@ -173,7 +219,6 @@ class OutputLogController extends Controller
                 'stage',
                 DB::raw('SUM(qty_xs+qty_s+qty_m+qty_l+qty_xl+qty_xxl+qty_xxxl+qty_custom) as stage_total'),
                 DB::raw('SUM(defect_count)     as total_defects'),
-                DB::raw('SUM(alteration_count) as total_alterations'),
                 DB::raw('MAX(log_date)         as last_logged')
             )
             ->groupBy('stage')
@@ -260,7 +305,6 @@ class OutputLogController extends Controller
                 'log_date',
                 DB::raw('SUM(total_output) as daily_total'),
                 DB::raw('SUM(defect_count) as total_defects'),
-                DB::raw('SUM(alteration_count) as total_alterations'),
                 DB::raw('COUNT(*) as log_count')
             )
             ->groupBy('stage', 'log_date')
@@ -277,6 +321,19 @@ class OutputLogController extends Controller
         $row = DB::table('daily_output_logs')->where('log_id', $id)->first();
         if (!$row) {
             return response()->json(['message' => 'Log entry not found.'], 404);
+        }
+
+        // A stage may never fall below what the next stage already logged for a size.
+        $stages = ProductionStageService::productionStages();
+        $next   = $stages[array_search($row->stage, $stages, true) + 1] ?? null;
+        if ($next) {
+            $done = ProductionStageService::completedBySize((int) $row->order_id);
+            foreach (ProductionStageService::SIZE_COLS as $c) {
+                if ($done[$row->stage][$c] - (int) $row->{"qty_{$c}"} < $done[$next][$c]) {
+                    $size = strtoupper($c);
+                    return response()->json(['message' => "Can't delete: " . ProductionStageService::stageLabel($next) . " already logged {$done[$next][$c]} size {$size}, more than " . ProductionStageService::stageLabel($row->stage) . ' would have left.'], 422);
+                }
+            }
         }
 
         DB::table('daily_output_logs')->where('log_id', $id)->delete();

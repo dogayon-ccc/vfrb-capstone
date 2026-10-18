@@ -10,7 +10,7 @@ class DailyOutputLog extends Model
     protected $fillable = [
         'order_id','stage','logged_by',
         'qty_xs','qty_s','qty_m','qty_l','qty_xl','qty_xxl','qty_xxxl','qty_custom',
-        'defect_count','alteration_count','defect_notes',
+        'defect_count','defect_size','defect_notes', // alteration_count kept in the table, no longer used
         'log_date','notes','created_at','updated_at',
     ];
 

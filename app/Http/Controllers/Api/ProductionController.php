@@ -65,7 +65,7 @@ class ProductionController extends Controller
         'sewing'      => 'qc',
         'qc'          => 'pressing',
         'pressing'    => 'packing',
-        'packing'     => 'completed',
+        'packing'     => 'for_delivery',
     ];
 
     // QC pass threshold (80% per master prompt interview)
@@ -100,7 +100,7 @@ class ProductionController extends Controller
             ->get()
             ->keyBy('stage');
 
-        $stageNames = array_keys(array_filter(self::STAGE_MAP, fn($v) => $v !== 'completed'));
+        $stageNames = array_keys(array_filter(self::STAGE_MAP, fn($v) => $v !== 'for_delivery'));
         // All 7 production stages
         $productionStages = ['pattern','segregation','cutting','sewing','qc','pressing','packing'];
 
@@ -142,6 +142,9 @@ class ProductionController extends Controller
         if (!$nextStage) {
             return response()->json(['message' => "Order status '{$order->status}' cannot be advanced."], 422);
         }
+        if (empty($order->down_payment_received_at)) {
+            return response()->json(['message' => "Production cannot start on order #{$orderId} until the down payment is recorded."], 422);
+        }
 
         // Override skips the auto-advance timing, never the counts: the current stage and every earlier one must be complete.
         $open = (new ProductionStageService())->incompleteStages((int) $orderId, $order->status, true);
@@ -160,12 +163,33 @@ class ProductionController extends Controller
             ], 422);
         }
 
-        DB::table('orders')
-            ->where('order_id', $orderId)
-            ->update([
-                'status'     => $nextStage,
-                'updated_at' => now(),
-            ]);
+        // Override never skips material consumption: Cutting deducts what Pattern recorded.
+        if ($order->status === 'pattern') {
+            $missing = DB::table('material_recommendations')
+                ->where('order_id', $orderId)->where('customer_accepted', 1)
+                ->whereNotNull('material_id')->whereNull('actual_qty_issued')->whereNull('issued_at')
+                ->pluck('material_name');
+            if ($missing->isNotEmpty()) {
+                return response()->json([
+                    'message'           => 'Enter material consumption in the Daily Output Log before advancing past Pattern. Missing: ' . $missing->implode(', ') . '.',
+                    'materials_blocked' => true,
+                ], 422);
+            }
+        }
+
+        $deductionLog = [];
+        DB::transaction(function () use ($orderId, $nextStage, $order, &$deductionLog) {
+            DB::table('orders')
+                ->where('order_id', $orderId)
+                ->update([
+                    'status'     => $nextStage,
+                    'updated_at' => now(),
+                ]);
+            // Same Goods Issue as the auto-advance: leaving Cutting deducts the Pattern consumption once.
+            if ($order->status === 'cutting') {
+                $deductionLog = (new ProductionStageService())->issueMaterialsToProduction((int) $orderId, (int) Auth::id())['log'];
+            }
+        });
         AuditLog::record('order_status_changed', 'orders', (int) $orderId);
 
         if ($order->status === 'qc') {
@@ -178,8 +202,10 @@ class ProductionController extends Controller
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'   => "Order #{$orderId} advanced to " . ucfirst($nextStage) . ".",
-            'new_stage' => $nextStage,
+            'message'       => "Order #{$orderId} advanced to " . ProductionStageService::stageLabel($nextStage) . "."
+                . ($deductionLog ? ' ' . count($deductionLog) . ' material(s) deducted from stock.' : ''),
+            'new_stage'     => $nextStage,
+            'deduction_log' => $deductionLog,
         ]);
     }
 
@@ -294,6 +320,9 @@ class ProductionController extends Controller
             return response()->json([
                 'message' => "Order is '{$order->status}' — only pending orders can be confirmed.",
             ], 422);
+        }
+        if ($err = \App\Models\Order::promisedDateError($order->promised_date ?? null, $order->created_at)) {
+            return response()->json(['message' => $err], 422);
         }
 
         DB::table('orders')

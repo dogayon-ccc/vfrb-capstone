@@ -182,16 +182,28 @@ class OrderController extends Controller
         // type="date"> has no min attribute and validate() never checks
         // it. A blank/omitted deadline is still fine (nullable); a
         // supplied one must be in the future.
+        // Date, total, status and down payment are VFRB's to set (via propose / down-payment), never the customer's.
+        $blocked = array_values(array_filter(\App\Models\Order::MANAGER_ONLY_FIELDS, fn ($f) => $request->has($f)));
+        if ($blocked) {
+            return response()->json([
+                'message' => 'Only VFRB can set the promised date, total, status or down payment. Remove: ' . implode(', ', $blocked) . '.',
+                'errors'  => array_fill_keys($blocked, ['Only VFRB can set this field.']),
+            ], 422);
+        }
+
         $request->validate([
             'garment_type'     => 'required|string|max:60',
             'quantity_ordered' => 'required|integer|min:100',
+            'fabric_type'      => 'nullable|string|max:100',
+            'delivery_address' => 'nullable|string|max:1000',
             'color'            => 'nullable|string|max:50',
-            'order_type'       => 'nullable|in:direct,subcontract,bulk,rush',
+            'order_type'       => 'nullable|in:direct,subcontract,bulk', // no rush orders
             'sizing_type'      => 'nullable|in:standard,custom',
             'collar_type'      => 'nullable|string|max:60',
             'sleeve_type'      => 'nullable|string|max:60',
             'pocket_type'      => 'nullable|string|max:60',
-            'deadline'         => 'nullable|date|after:today',
+            // The customer picks the delivery date; it must be at least min_promised_days (1 week) away.
+            'deadline'         => 'required|date|after_or_equal:' . now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
             'po_reference'     => 'nullable|string|max:100',
             'client_design_notes' => 'required|string|min:15',
             'studio_config'    => 'nullable|string',    // JSON string from canvas
@@ -200,6 +212,11 @@ class OrderController extends Controller
             'sizes'            => 'nullable|string',    // JSON string
             'measurements'     => 'nullable|string',    // JSON string
             'custom_qty'       => 'nullable|integer|min:0',
+        ], [
+            'quantity_ordered.min' => 'The minimum order is 100 pieces.',
+            'order_type.in'        => 'VFRB does not take rush orders. Choose direct, subcontract or bulk.',
+            'deadline.required'    => 'Choose the date you need the order delivered.',
+            'deadline.after_or_equal' => 'The delivery date must be at least ' . (int) config('vfrb.min_promised_days', 7) . ' days from today.',
         ]);
 
         // Idempotency guard (Sept 22 2026): nothing previously stopped a
@@ -308,9 +325,11 @@ class OrderController extends Controller
                 'pocket_type'           => $request->input('pocket_type'),
                 'color'                 => $request->input('color'),
                 'quantity_ordered'      => (int) $request->input('quantity_ordered'),
-                'order_type'            => $request->input('order_type', 'direct'),
+                'order_type'            => 'direct', // customers place direct orders; a manager marks Ma'am Ronnaxe's (subcontract) ones
                 'sizing_type'           => $request->input('sizing_type', 'standard'),
                 'target_delivery_date'  => $request->input('deadline'),
+                'fabric_type'           => $request->input('fabric_type'),
+                'delivery_address'      => $request->input('delivery_address'),
                 'po_reference'          => $request->input('po_reference'),
                 'client_design_notes'   => $request->input('client_design_notes'),
                 'client_design_ref_file'=> $refFilePath,
@@ -589,7 +608,7 @@ class OrderController extends Controller
         }
 
         // Every field this endpoint changes is a manager decision (review & confirm, cancel with a reason).
-        if ($request->hasAny(['status', 'agreed_total', 'negotiated_delivery_date', 'notes']) && !$request->user()->isManager()) {
+        if ($request->hasAny(['status', 'agreed_total', 'negotiated_delivery_date', 'notes', 'order_type']) && !$request->user()->isManager()) {
             return response()->json(['message' => 'Only a manager can change the order status, total, delivery date or review notes.'], 403);
         }
 
@@ -598,6 +617,7 @@ class OrderController extends Controller
             'negotiated_delivery_date' => 'nullable|date',
             'notes' => 'nullable|string',
             'agreed_total' => 'nullable|numeric|min:0',
+            'order_type' => 'sometimes|in:direct,subcontract,bulk',
         ]);
 
         if (in_array($order->status, ['completed', 'cancelled'], true)) {
@@ -610,8 +630,21 @@ class OrderController extends Controller
             return response()->json(['message' => "A {$order->status} order cannot be set to {$target} here. Use the production steps to advance it."], 422);
         }
 
+        // The customer sees the cancel reason, so one is required.
+        if ($target === 'cancelled' && $order->status !== 'cancelled' && !$request->filled('notes')) {
+            return response()->json(['message' => 'Give a reason for cancelling; the customer will see it.', 'errors' => ['notes' => ['A cancel reason is required.']]], 422);
+        }
+        // The payment rule follows order_type, so it is fixed once the down payment is in.
+        if ($request->filled('order_type') && $request->input('order_type') !== $order->order_type && !empty($order->down_payment_received_at)) {
+            return response()->json(['message' => 'The order source cannot change after the down payment is recorded.'], 422);
+        }
+        if ($target === 'confirmed' && $order->status !== 'confirmed'
+            && ($err = \App\Models\Order::promisedDateError($order->promised_date ?? null, $order->created_at))) {
+            return response()->json(['message' => $err], 422);
+        }
+
         // `notes` is the manager's message to the customer (sent with the status change below); orders.notes keeps the customer's own notes.
-        $fields = collect($request->only(['status', 'negotiated_delivery_date']))
+        $fields = collect($request->only(['status', 'negotiated_delivery_date', 'order_type']))
             ->filter(fn($v) => !is_null($v))
             ->reject(fn($v, $k) => $k === 'status' && $v === $order->status)
             ->toArray();
@@ -637,6 +670,9 @@ class OrderController extends Controller
                 : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . "."
                     . ($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
             $this->notifyCustomer($order->user_id, $id, $statusMessage);
+            if ($fields['status'] === 'cancelled') {
+                $this->postOrderMessage($id, $request->user()->user_id, "Order cancelled by VFRB. Reason: {$request->input('notes')}");
+            }
 
             // Real email (Aug 25 2026) — deliberately restricted to only
             // these two statuses, not every value the enum allows. A
@@ -675,6 +711,207 @@ class OrderController extends Controller
         Cache::forget('dashboard_stats');
 
         return response()->json(DB::table('orders')->where('order_id', $id)->first());
+    }
+
+    // ── GET /api/admin/orders/{id}/suggested-date?lead_days= ──────────────────
+    // Manager: suggested promised date from config('vfrb.lead_days_per_100'); lead_days overrides it.
+    public function suggestedDate(Request $request, int $id)
+    {
+        $request->validate(['lead_days' => 'nullable|integer|min:1|max:365']);
+        $order = DB::table('orders')->where('order_id', $id)->first();
+        if (!$order) {
+            return response()->json(['message' => 'Order not found.'], 404);
+        }
+
+        $lead = $request->filled('lead_days') ? (int) $request->input('lead_days') : (int) config('vfrb.lead_days_per_100', 14);
+        return response()->json([
+            'suggested_promised_date' => \App\Models\Order::suggestedPromisedDate((int) $order->quantity_ordered, $lead)->toDateString(),
+            'lead_days_per_100'       => $lead,
+        ]);
+    }
+
+    // ── POST /api/admin/orders/{id}/propose ───────────────────────────────────
+    // Manager: proposes promised_date + total with a note (fabric availability, cheaper/better alternative, reason).
+    public function propose(Request $request, int $id)
+    {
+        $order = DB::table('orders')->where('order_id', $id)->first();
+        if (!$order) {
+            return response()->json(['message' => 'Order not found.'], 404);
+        }
+
+        $request->validate([
+            'promised_date' => 'nullable|date|after:today',
+            'lead_days'     => 'nullable|integer|min:1|max:365',
+            'total'         => 'required|numeric|min:0',
+            'proposal_note' => 'required|string|min:10|max:5000',
+        ], [
+            'proposal_note.required' => 'Add a note for the customer: fabric availability, any cheaper or better alternative, and the reason for the date and total.',
+        ]);
+
+        if ($order->status !== 'pending') {
+            return response()->json(['message' => "Order #{$id} is {$order->status}; proposals can only be sent for pending orders."], 422);
+        }
+        if (($order->proposal_status ?? null) === 'accepted') {
+            return response()->json(['message' => "The customer already accepted a proposal for order #{$id}."], 422);
+        }
+
+        $promised = $request->input('promised_date')
+            ?: ($order->target_delivery_date ? substr((string) $order->target_delivery_date, 0, 10) : null)
+            ?: \App\Models\Order::suggestedPromisedDate((int) $order->quantity_ordered, $request->filled('lead_days') ? (int) $request->input('lead_days') : null)->toDateString();
+
+        if ($err = \App\Models\Order::promisedDateError($promised, $order->created_at)) {
+            return response()->json(['message' => $err, 'errors' => ['promised_date' => [$err]]], 422);
+        }
+
+        DB::table('orders')->where('order_id', $id)->update([
+            'promised_date'   => $promised,
+            'agreed_total'    => $request->input('total'),
+            'proposal_note'   => $request->input('proposal_note'),
+            'proposal_status' => 'pending',
+            'updated_at'      => now(),
+        ]);
+        AuditLog::record('order_proposal_sent', 'orders', $id);
+
+        $total = number_format((float) $request->input('total'), 2);
+        $this->notifyCustomer($order->user_id, $id, "VFRB sent a proposal for order #{$id}: delivery by {$promised}, total ₱{$total}. Please accept or decline.");
+        \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\PortalMailNotification(
+            "Proposal for your VFRB order #{$id}",
+            ["Promised delivery date: {$promised}", "Total: ₱{$total}", "Note from VFRB: {$request->input('proposal_note')}", 'Please accept or decline the proposal in the portal.'],
+            'Review proposal', "/customer/orders/{$id}"));
+
+        Cache::forget('dashboard_stats');
+        return response()->json(['message' => "Proposal sent for order #{$id}.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+    }
+
+    // ── POST /api/admin/orders/{id}/down-payment ──────────────────────────────
+    // Manager: records the down payment; production cannot start before this.
+    public function recordDownPayment(Request $request, int $id)
+    {
+        $order = DB::table('orders')->where('order_id', $id)->first();
+        if (!$order) {
+            return response()->json(['message' => 'Order not found.'], 404);
+        }
+        $request->validate(['down_payment_amount' => 'required|numeric|min:0.01']);
+
+        if (in_array($order->status, ['completed', 'cancelled'], true)) {
+            return response()->json(['message' => "Order #{$id} is {$order->status}; a down payment can no longer be recorded."], 422);
+        }
+        if (!empty($order->down_payment_received_at)) {
+            return response()->json(['message' => "The down payment for order #{$id} was already recorded."], 422);
+        }
+
+        // Direct/bulk orders: at least 80% down, 20% on delivery. Subcontract orders
+        // (arranged by Ma'am Ronnaxe): full payment up front.
+        if ($order->agreed_total === null) {
+            return response()->json(['message' => "Set the order total (send a proposal) before recording a payment for order #{$id}."], 422);
+        }
+        $total  = round((float) $order->agreed_total, 2);
+        $amount = round((float) $request->input('down_payment_amount'), 2);
+        $full   = $order->order_type === 'subcontract';
+        $min    = $full ? $total : round($total * 0.8, 2);
+        if ($amount < $min || $amount > $total) {
+            $err = $full
+                ? "Orders arranged by Ma'am Ronnaxe are paid in full: record ₱" . number_format($total, 2) . '.'
+                : 'Direct orders need at least 80% down: between ₱' . number_format($min, 2) . ' and ₱' . number_format($total, 2) . '.';
+            return response()->json(['message' => $err, 'errors' => ['down_payment_amount' => [$err]]], 422);
+        }
+
+        DB::table('orders')->where('order_id', $id)->update([
+            'down_payment_amount'      => $request->input('down_payment_amount'),
+            'down_payment_received_at' => now(),
+            'updated_at'               => now(),
+        ]);
+        AuditLog::record('order_down_payment_received', 'orders', $id);
+        $this->notifyCustomer($order->user_id, $id, "VFRB received your down payment for order #{$id}.");
+
+        return response()->json(['message' => "Down payment recorded for order #{$id}.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+    }
+
+    // ── POST /api/customer/orders/{id}/accept ─────────────────────────────────
+    public function customerAcceptProposal(int $id)
+    {
+        $order = $this->customerProposalOrder($id);
+        if ($order instanceof \Illuminate\Http\JsonResponse) {
+            return $order;
+        }
+        // Confirmation happens now, so the 7-day rule is checked against today.
+        if ($err = \App\Models\Order::promisedDateError($order->promised_date, $order->created_at)) {
+            return response()->json(['message' => $err . ' Please message VFRB for a new date.'], 422);
+        }
+
+        DB::table('orders')->where('order_id', $id)->update([
+            'proposal_status' => 'accepted',
+            'status'          => 'confirmed',
+            'updated_at'      => now(),
+        ]);
+        AuditLog::record('order_status_changed', 'orders', $id);
+
+        $managerIds = $this->notifyManagers($id, "Customer accepted the proposal for order #{$id}. Order confirmed; waiting for the down payment.");
+        \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+            "Proposal accepted: order #{$id}", ["The customer accepted the proposal for order #{$id}. Record the down payment before production starts."],
+            'Open order', "/admin/orders/{$id}"));
+        \App\Support\EmailNotify::users([$order->user_id], new OrderStatusNotification($id, 'confirmed'));
+
+        Cache::forget('dashboard_stats');
+        return response()->json(['message' => "Order #{$id} confirmed. Production starts once VFRB receives the down payment.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+    }
+
+    // ── POST /api/customer/orders/{id}/decline { reason } ─────────────────────
+    public function customerDeclineProposal(Request $request, int $id)
+    {
+        $request->validate(['reason' => 'required|string|min:5|max:2000'], [
+            'reason.required' => 'Tell VFRB why you are declining so they can send a better proposal.',
+        ]);
+        $order = $this->customerProposalOrder($id);
+        if ($order instanceof \Illuminate\Http\JsonResponse) {
+            return $order;
+        }
+
+        DB::table('orders')->where('order_id', $id)->update(['proposal_status' => 'declined', 'updated_at' => now()]);
+        AuditLog::record('order_proposal_declined', 'orders', $id);
+
+        // Kept in the order's message thread so the customer and VFRB both see the reason.
+        $this->postOrderMessage($id, Auth::id(), "Proposal declined. Reason: {$request->input('reason')}");
+        $managerIds = $this->notifyManagers($id, "Customer declined the proposal for order #{$id}. Reason: {$request->input('reason')}");
+        \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+            "Proposal declined: order #{$id}", ["The customer declined the proposal for order #{$id}.", "Reason: {$request->input('reason')}"],
+            'Open order', "/admin/orders/{$id}"));
+
+        return response()->json(['message' => 'Proposal declined. VFRB has been told your reason.', 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+    }
+
+    // ── POST /api/customer/orders/{id}/message { body } ───────────────────────
+    // Same thread, ownership check and staff notifications as MessageController::customerStore.
+    public function customerProposalMessage(Request $request, int $id)
+    {
+        $request->merge(['order_id' => $id]);
+        return app(MessageController::class)->customerStore($request);
+    }
+
+    // Owned, pending order with a pending proposal — or the 404/422 response to return.
+    private function customerProposalOrder(int $id)
+    {
+        $order = DB::table('orders')->where('order_id', $id)->where('user_id', Auth::id())->first();
+        if (!$order) {
+            return response()->json(['message' => 'Order not found.'], 404);
+        }
+        if ($order->status !== 'pending' || ($order->proposal_status ?? null) !== 'pending') {
+            return response()->json(['message' => "There is no open proposal for order #{$id}."], 422);
+        }
+        return $order;
+    }
+
+    private function postOrderMessage(int $orderId, int $senderId, string $body): void
+    {
+        DB::table('order_messages')->insert([
+            'order_id'   => $orderId,
+            'sender_id'  => $senderId,
+            'body'       => $body,
+            'is_read'    => 0,
+            'sent_at'    => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────

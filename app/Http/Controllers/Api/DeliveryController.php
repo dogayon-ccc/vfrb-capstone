@@ -126,11 +126,13 @@ class DeliveryController extends Controller
     }
 
     // ── PATCH /api/admin/deliveries/{id}/status ───────────────────────────────
-    // Staff updates delivery_status (NOT "status")
+    // Ready-for-delivery is automatic (order status for_delivery once fully packed); the only manual moves left
+    // are delivered (optionally partial: delivered_qty, capped at packed_total) and returned.
     public function updateStatus(Request $request, int $id)
     {
         $request->validate([
-            'delivery_status'      => 'required|in:preparing,dispatched,in_transit,delivered,returned',
+            'delivery_status'      => 'required|in:delivered,returned',
+            'delivered_qty'        => 'nullable|integer|min:1',
             'courier_name'         => 'nullable|string|max:100',
             'tracking_number'      => 'nullable|string|max:100',
             'actual_delivery_date' => 'nullable|date',
@@ -146,6 +148,41 @@ class DeliveryController extends Controller
         $newStatus = $request->input('delivery_status');
         if ($request->filled('delivery_address')) {
             $row->delivery_address = trim($request->input('delivery_address'));
+        }
+
+        if ($newStatus === 'delivered') {
+            if ($row->delivery_status === 'delivered') {
+                return response()->json(['message' => "Order #{$row->order_id} is already delivered."], 422);
+            }
+            $ordered   = (int) DB::table('orders')->where('order_id', $row->order_id)->value('quantity_ordered');
+            $packed    = (int) DB::table('daily_output_logs')->where('order_id', $row->order_id)->where('stage', 'packing')->sum('total_output');
+            $already   = (int) ($row->delivered_qty ?? 0);
+            $available = max(0, $packed - $already);
+            $qty       = (int) $request->input('delivered_qty', $available);
+            if ($qty < 1 || $qty > $available) {
+                return response()->json(['message' => "Only {$available} packed piece" . ($available === 1 ? '' : 's') . " can be delivered now ({$already} of {$packed} packed already delivered).", 'remaining' => $available], 422);
+            }
+
+            // Partial delivery: record the count only; the order closes when everything ordered is delivered.
+            if ($already + $qty < $ordered) {
+                if ($blocker = $this->addressBlocker($row)) {
+                    return response()->json(['message' => $blocker], 422);
+                }
+                $update = ['delivered_qty' => $already + $qty, 'updated_by' => Auth::id(), 'updated_at' => now()];
+                if ($request->filled('delivery_address')) $update['delivery_address'] = $row->delivery_address;
+                if ($request->filled('notes'))            $update['notes']            = $request->input('notes');
+                DB::table('delivery_tracking')->where('tracking_id', $id)->update($update);
+                $customerId = DB::table('orders')->where('order_id', $row->order_id)->value('user_id');
+                $this->notifyCustomer((int) $customerId, (int) $row->order_id, "{$qty} piece" . ($qty === 1 ? '' : 's') . " of order #{$row->order_id} delivered ({$update['delivered_qty']} of {$ordered} so far).");
+                Cache::forget('dashboard_stats');
+
+                return response()->json([
+                    'message'         => "Partial delivery recorded: {$update['delivered_qty']} of {$ordered}.",
+                    'delivery_status' => $row->delivery_status,
+                    'delivered_qty'   => $update['delivered_qty'],
+                    'packed_total'    => $packed,
+                ]);
+            }
         }
 
         // Delivered acts on the whole uniform set; every piece must pass the same checks before any is marked.
@@ -186,8 +223,12 @@ class DeliveryController extends Controller
             DB::table('delivery_tracking')->where('tracking_id', $id)->update($update);
             if ($newStatus !== 'delivered') return;
 
+            // Fully delivered: each row's delivered_qty becomes its order's quantity.
+            $deliveredQty = DB::raw('(SELECT quantity_ordered FROM orders WHERE orders.order_id = delivery_tracking.order_id)');
+            DB::table('delivery_tracking')->where('tracking_id', $id)->update(['delivered_qty' => $deliveredQty]);
             DB::table('delivery_tracking')->whereIn('tracking_id', $setRows->pluck('tracking_id'))->update([
                 'delivery_status'      => 'delivered',
+                'delivered_qty'        => $deliveredQty,
                 'actual_delivery_date' => $update['actual_delivery_date'],
                 'updated_by'           => $update['updated_by'],
                 'updated_at'           => now(),
@@ -221,6 +262,11 @@ class DeliveryController extends Controller
         if ($open) {
             return "Order #{$row->order_id} is still in production (" . implode(', ', $open) . '). Finish every stage before marking it delivered.';
         }
+        return $this->addressBlocker($row);
+    }
+
+    private function addressBlocker(object $row): ?string
+    {
         $address = trim((string) $row->delivery_address);
         if ($row->delivery_method !== 'pickup' && ($address === '' || strcasecmp($address, 'Address pending') === 0)) {
             return "Order #{$row->order_id} has no delivery address. Add the address before marking it delivered.";

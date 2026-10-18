@@ -164,12 +164,26 @@ class BillingController extends Controller
 
     private function invoiceDocument(Request $request, Invoice $invoice)
     {
-        $order = DB::table('orders')->where('order_id', $invoice->order_id)
-            ->select('order_id', 'garment_type', 'quantity_ordered', 'po_reference')->first();
+        $order = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
+            ->where('orders.order_id', $invoice->order_id)
+            ->select('orders.order_id', 'orders.garment_type', 'orders.quantity_ordered', 'orders.po_reference',
+                     'orders.fabric_type', 'orders.delivery_address', 'orders.promised_date',
+                     'orders.down_payment_amount', 'orders.down_payment_received_at',
+                     'users.name as customer_name', 'users.organization_name')
+            ->first();
+
+        // Per-size quantities as the customer submitted them (measurements.size_label, qty).
+        $sizes = DB::table('measurements')->where('order_id', $invoice->order_id)
+            ->whereNotNull('size_label')->where('qty', '>', 0)
+            ->orderBy('measurement_id')
+            ->get(['size_label', 'qty'])
+            ->groupBy(fn ($m) => strtoupper($m->size_label))
+            ->map(fn ($rows) => (int) $rows->sum('qty'));
 
         return $this->render($request, 'billing.invoice', "{$invoice->invoice_number}", [
             'invoice'  => $invoice,
             'order'    => $order,
+            'sizes'    => $sizes,
             'receipts' => PaymentReceipt::where('order_id', $invoice->order_id)->orderBy('paid_at')->get(),
             'paid'     => $this->billing->paidToDate($invoice->order_id),
             'balance'  => $this->billing->balance($invoice->order_id, $invoice->total_amount),

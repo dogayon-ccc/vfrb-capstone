@@ -153,6 +153,10 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::get('/orders',     [OrderController::class, 'customerIndex']);
     Route::post('/orders',    [OrderController::class, 'customerStore']);
     Route::get('/orders/{id}', [OrderController::class, 'customerShow']);
+    // Proposal replies: accept confirms the order; decline needs a reason; message goes to the order thread.
+    Route::post('/orders/{id}/accept',  [OrderController::class, 'customerAcceptProposal']);
+    Route::post('/orders/{id}/decline', [OrderController::class, 'customerDeclineProposal']);
+    Route::post('/orders/{id}/message', [OrderController::class, 'customerProposalMessage']);
 
     // ── AI Material Recommendation ───────────────────────────────
     // AIMaterials.jsx: POST /api/customer/ai/recommend-materials  { order_id: selId }
@@ -190,6 +194,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // own auto-archived past designs (see DesignController).
     Route::get('/designs', [DesignController::class, 'customerIndex']);
     Route::put('/designs/{id}', [DesignController::class, 'customerUpdate']);
+    Route::post('/designs/{id}/copy', [DesignController::class, 'customerCopy']);
     Route::delete('/designs/{id}', [DesignController::class, 'customerDestroy']);
     Route::get('/designs/showcase', [DesignController::class, 'customerShowcaseIndex']);
     Route::post('/designs/{id}/submit-showcase', [DesignController::class, 'customerSubmitShowcase']);
@@ -316,6 +321,8 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     // real TypeError in storage/logs/laravel.log: adminShow(): Argument
     // #1 ($id) must be of type int, string given.
     Route::get('/orders/garment-types', [OrderController::class, 'garmentTypes']);
+    // Orders.jsx column + Dashboard.jsx "Orders in production" card (also before {id}).
+    Route::get('/orders/production-summaries', [OutputLogController::class, 'productionSummaries']);
     Route::get('/orders',      [OrderController::class, 'adminIndex']);
 
     // ── Client master data (read-only) — CustomersMaster.jsx: GET /api/admin/customers
@@ -341,6 +348,8 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     // ProductionStageService::logOutput() with no unique code of its own —
     // confirmed zero functional loss, removed as dead code (Aug 28 2026).
     Route::get('/orders/{id}/production',    [ProductionController::class, 'stages']);
+    Route::get('/orders/{id}/production-summary', [OutputLogController::class, 'productionSummary']);
+    Route::post('/orders/{id}/defects',           [OutputLogController::class, 'reportDefect'])->middleware('jobfn:production');
 
     // ── Production Incidents (machine breakdown / cutting damage) ─
     // ProductionIncidents.jsx: added Aug 25 2026, per interview transcript.
@@ -522,6 +531,11 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::get('/reports',                 [AdminReportController::class, 'index']);
     Route::get('/reports/sales',           [AdminReportController::class, 'salesSummary']);
     Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
+
+    // ── Order proposal + down payment (Oct 17 2026): manager sets date, total and down payment ──
+    Route::get('/orders/{id}/suggested-date', [OrderController::class, 'suggestedDate']);
+    Route::post('/orders/{id}/propose',       [OrderController::class, 'propose']);
+    Route::post('/orders/{id}/down-payment',  [OrderController::class, 'recordDownPayment']);
 
     // ── Billing actions (Oct 14 2026): amounts come only from orders.agreed_total and recorded payments ──
     Route::post('/orders/{id}/invoice',       [BillingController::class, 'issue']);

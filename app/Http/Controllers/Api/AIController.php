@@ -33,7 +33,7 @@ class AIController extends Controller
     // AI LAYER 1 — Raw Material Recommendation
     // POST /api/customer/ai/recommend-materials
     // =========================================================================
-    private const LOCKED_STATUSES = ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing', 'completed', 'cancelled'];
+    private const LOCKED_STATUSES = ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing', 'for_delivery', 'completed', 'cancelled'];
 
     private function materialsLocked(Order $order): bool
     {

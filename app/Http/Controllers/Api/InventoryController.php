@@ -356,16 +356,25 @@ class InventoryController extends Controller
         }
 
         $request->validate([
-            'quantity' => 'required|numeric|min:0.01',
-            'reason'   => 'nullable|string|max:255',
+            'quantity'  => 'required|numeric|min:0.01',
+            'reason'    => 'nullable|string|max:255',
+            'issued_to' => 'nullable|string|max:120', // stock-out accountability: department or employee who received it
         ]);
+
+        // No extra column: the recipient is stored at the front of the audit note.
+        $reason   = trim((string) $request->input('reason'));
+        $issuedTo = $type === 'stock_out' ? trim((string) $request->input('issued_to')) : '';
+        if ($issuedTo !== '') {
+            $reason = mb_substr("Issued to: {$issuedTo}" . ($reason !== '' ? " — {$reason}" : ''), 0, 255);
+        }
+        $reason = $reason !== '' ? $reason : null;
 
         $qty   = (float) $request->input('quantity');
         $delta = in_array($type, ['stock_out', 'wastage']) ? -abs($qty) : abs($qty);
 
         // Locked transaction — was a read-modify-write race, concurrent
         // adjustments on the same material could silently lose one.
-        $newStock = DB::transaction(function () use ($id, $delta, $type, $request) {
+        $newStock = DB::transaction(function () use ($id, $delta, $type, $reason) {
             $locked = DB::table('materials')->where('material_id', $id)->lockForUpdate()->first();
             // A removal larger than the stock is refused (nothing written), so the log always reconciles with the stock.
             if ($locked->quantity_in_stock + $delta < 0) {
@@ -383,7 +392,7 @@ class InventoryController extends Controller
                 'recorded_by' => Auth::id(),
                 'type'        => $type,
                 'change_qty'  => $delta,
-                'reason'      => $request->input('reason'),
+                'reason'      => $reason,
                 'log_date'    => now(),
                 'created_at'  => now(),
                 'updated_at'  => now(),
