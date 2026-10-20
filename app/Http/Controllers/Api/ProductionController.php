@@ -142,7 +142,7 @@ class ProductionController extends Controller
         if (!$nextStage) {
             return response()->json(['message' => "Order status '{$order->status}' cannot be advanced."], 422);
         }
-        if (empty($order->down_payment_received_at)) {
+        if ($order->order_type !== 'subcontract' && empty($order->down_payment_received_at)) {
             return response()->json(['message' => "Production cannot start on order #{$orderId} until the down payment is recorded."], 422);
         }
 
@@ -220,18 +220,7 @@ class ProductionController extends Controller
         $toLabel   = ucfirst($toStage);
         $now       = now();
 
-        // Customer notification
-        DB::table('notifications')->insert([
-            'user_id'    => $customerId,
-            'order_id'   => $orderId,
-            'message'    => "Your order #{$orderId} has advanced from {$fromLabel} to {$toLabel}.",
-            'type'       => 'production',
-            'is_read'    => 0,
-            'date_sent'  => $now,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
+        // Clients are not told about production stages: that is VFRB's decision (Oct 18 2026).
         // All managers
         $managers = DB::table('model_has_roles')
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
@@ -249,23 +238,6 @@ class ProductionController extends Controller
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
-        }
-
-        // Real email to the customer only (Aug 25 2026) — managers already
-        // get their own in-app notification above and don't need an email
-        // for every stage move across every order; that would be far too
-        // noisy for day-to-day staff use. Wrapped in try/catch for the same
-        // reliability reason as OrderStatusNotification: the actual stage
-        // advance already succeeded in the database by this point, so a
-        // Mailtrap hiccup should never surface as a failed production
-        // action to the staff member who just logged the output.
-        try {
-            $customer = User::find($customerId);
-            if ($customer) {
-                $customer->notify(new StageAdvancedNotification($orderId, $fromStage, $toStage));
-            }
-        } catch (\Throwable $e) {
-            \Log::warning("StageAdvancedNotification failed for order #{$orderId}: " . $e->getMessage());
         }
     }
 

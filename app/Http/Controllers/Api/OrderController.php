@@ -107,7 +107,18 @@ class OrderController extends Controller
             $query->whereIn('status', $statuses);
         }
 
-        return response()->json($query->paginate($perPage));
+        $page = $query->paginate($perPage);
+        $page->getCollection()->transform(fn ($o) => self::clientStatus($o));
+        return response()->json($page);
+    }
+
+    // Clients see only pending / confirmed / completed / cancelled; production stages stay inside VFRB.
+    private static function clientStatus($o)
+    {
+        if (isset($o->status) && !in_array($o->status, ['pending', 'confirmed', 'completed', 'cancelled'], true)) {
+            $o->status = 'confirmed';
+        }
+        return $o;
     }
 
     // ── GET /api/customer/orders/{id} ─────────────────────────────────────────
@@ -122,6 +133,8 @@ class OrderController extends Controller
         if (!$order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
+
+        $order = self::clientStatus($order);
 
         // Decode studio_config JSON for the frontend color zones
         if ($order->studio_config) {
@@ -143,16 +156,10 @@ class OrderController extends Controller
             ->orderBy('display_order')
             ->get(\App\Models\MaterialRecommendation::CUSTOMER_COLUMNS);
 
-        // Attach production tracking per stage
-        $tracking = DB::table('order_production_tracking')
-            ->where('order_id', $id)
-            ->get()
-            ->keyBy('stage');
-
         return response()->json([
             'order'            => $order,
             'recommendations'  => $recommendations,
-            'production_stages'=> $tracking,
+            'production_stages'=> (object) [], // hidden from clients
         ]);
     }
 
@@ -325,7 +332,7 @@ class OrderController extends Controller
                 'pocket_type'           => $request->input('pocket_type'),
                 'color'                 => $request->input('color'),
                 'quantity_ordered'      => (int) $request->input('quantity_ordered'),
-                'order_type'            => 'direct', // customers place direct orders; a manager marks Ma'am Ronnaxe's (subcontract) ones
+                'order_type'            => 'direct', // customers place direct orders; a manager marks subcontract ones
                 'sizing_type'           => $request->input('sizing_type', 'standard'),
                 'target_delivery_date'  => $request->input('deadline'),
                 'fabric_type'           => $request->input('fabric_type'),
@@ -669,7 +676,10 @@ class OrderController extends Controller
                 ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
                 : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . "."
                     . ($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
-            $this->notifyCustomer($order->user_id, $id, $statusMessage);
+            // Production stages (pattern ... packing) are never sent to the client.
+            if (in_array($fields['status'], ['confirmed', 'completed', 'cancelled'], true)) {
+                $this->notifyCustomer($order->user_id, $id, $statusMessage);
+            }
             if ($fields['status'] === 'cancelled') {
                 $this->postOrderMessage($id, $request->user()->user_id, "Order cancelled by VFRB. Reason: {$request->input('notes')}");
             }
@@ -801,18 +811,18 @@ class OrderController extends Controller
         }
 
         // Direct/bulk orders: at least 80% down, 20% on delivery. Subcontract orders
-        // (arranged by Ma'am Ronnaxe): full payment up front.
+        // have no down payment: they are invoiced per delivery and paid after delivery.
+        if ($order->order_type === 'subcontract') {
+            return response()->json(['message' => "Subcontract order #{$id} is paid after delivery; no down payment is recorded."], 422);
+        }
         if ($order->agreed_total === null) {
             return response()->json(['message' => "Set the order total (send a proposal) before recording a payment for order #{$id}."], 422);
         }
         $total  = round((float) $order->agreed_total, 2);
         $amount = round((float) $request->input('down_payment_amount'), 2);
-        $full   = $order->order_type === 'subcontract';
-        $min    = $full ? $total : round($total * 0.8, 2);
+        $min    = round($total * 0.8, 2);
         if ($amount < $min || $amount > $total) {
-            $err = $full
-                ? "Orders arranged by Ma'am Ronnaxe are paid in full: record ₱" . number_format($total, 2) . '.'
-                : 'Direct orders need at least 80% down: between ₱' . number_format($min, 2) . ' and ₱' . number_format($total, 2) . '.';
+            $err = 'Direct orders need at least 80% down: between ₱' . number_format($min, 2) . ' and ₱' . number_format($total, 2) . '.';
             return response()->json(['message' => $err, 'errors' => ['down_payment_amount' => [$err]]], 422);
         }
 

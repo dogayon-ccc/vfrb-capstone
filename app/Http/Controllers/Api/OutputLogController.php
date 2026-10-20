@@ -76,7 +76,7 @@ class OutputLogController extends Controller
         if (!$order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
-        if (empty($order->down_payment_received_at)) {
+        if ($order->order_type !== 'subcontract' && empty($order->down_payment_received_at)) {
             return response()->json(['message' => "Production cannot start on order #{$order->order_id} until the down payment is recorded."], 422);
         }
 

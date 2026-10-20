@@ -14,6 +14,20 @@ class GeminiClient
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
     public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null): ?string
     {
+        $primary  = (string) config('services.gemini.model', 'gemini-3.6-flash');
+        $fallback = (string) config('services.gemini.fallback_model', 'gemini-3.6-flash');
+        $started  = microtime(true);
+
+        $text = $this->callModel($primary, $prompt, $maxTokens, $jsonSchema);
+        if ($text === null && $fallback !== '' && $fallback !== $primary && (microtime(true) - $started) < 30) {
+            Log::warning('Gemini: primary model failed, trying fallback', ['primary' => $primary, 'fallback' => $fallback]);
+            $text = $this->callModel($fallback, $prompt, $maxTokens, $jsonSchema);
+        }
+        return $text;
+    }
+
+    private function callModel(string $model, string $prompt, int $maxTokens, ?array $jsonSchema): ?string
+    {
         // GEMINI_KEY_COUNT used to gate this loop directly — if it's unset
         // or wrong on a given deploy (defaults to 1), key_2/key_3 are never
         // tried even when configured. Derive the count from which keys are
@@ -24,7 +38,6 @@ class GeminiClient
             2 => config('services.gemini.key_2'),
             3 => config('services.gemini.key_3'),
         ]);
-        $model   = config('services.gemini.model', 'gemini-3.6-flash');
         $timeout = max(5, (int) config('services.gemini.timeout', 30));
         // Bounded retry on the same key for transient provider trouble (503/504 overload, a dropped connection or timeout).
         // A 500 or a 4xx request error fails the same way on every attempt, so it is not retried.

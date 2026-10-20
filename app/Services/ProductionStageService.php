@@ -869,17 +869,7 @@ class ProductionStageService
         $now       = now();
         $suffix    = $materialsDeductedCount > 0 ? " · {$materialsDeductedCount} materials issued to production." : "";
 
-        DB::table('notifications')->insert([
-            'user_id'    => $customerId,
-            'order_id'   => $orderId,
-            'message'    => "Your order #{$orderId} has advanced from {$fromLabel} to {$toLabel}.{$suffix}",
-            'type'       => 'production',
-            'is_read'    => 0,
-            'date_sent'  => $now,
-            'created_at' => $now,
-            'updated_at' => $now,
-        ]);
-
+        // Managers only: the client does not see production stages.
         $managers = DB::table('model_has_roles')
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('roles.name', 'manager')
