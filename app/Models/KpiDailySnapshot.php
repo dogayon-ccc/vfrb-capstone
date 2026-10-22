@@ -30,7 +30,7 @@ class KpiDailySnapshot extends Model
         if (static::where('snapshot_date', $today)->exists()) return;
 
         $materialCount = DB::table('materials')->count();
-        $lowStock      = DB::table('materials')->whereRaw('quantity_in_stock <= reorder_threshold')->count();
+        $lowStock      = DB::table('materials')->whereRaw(\App\Services\ClientMaterialService::lowStockSql())->count();
 
         static::create([
             'snapshot_date'    => $today,

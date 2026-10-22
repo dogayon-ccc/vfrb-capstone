@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Support\FileUrl;
 use App\Models\Design;
 use App\Models\DesignShowcaseAudit;
+use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
@@ -70,6 +71,7 @@ class DesignController extends Controller
             ->get();
 
         $notes = $this->showcaseNotes($designs->where('showcase_status', 'rejected')->pluck('design_id')->all());
+        $locked = Order::whereIn('design_id', $designs->pluck('design_id'))->where(fn ($q) => $this->lockingOrders($q))->pluck('design_id')->flip();
 
         return response()->json($designs->map(fn (Design $d) => [
             'id'          => $d->design_id,
@@ -81,6 +83,8 @@ class DesignController extends Controller
             'config'      => $d->custom_builder_config ? json_decode($d->custom_builder_config, true) : null,
             'is_archived' => (bool) $d->source_order_id,
             'order_id'    => $d->source_order_id,
+            'locked'      => $locked->has($d->design_id),
+            'is_copy'     => (bool) $d->parent_design_id,
             'showcase_status' => $d->showcase_status,
             'showcase_note'   => $d->showcase_status === 'rejected' ? ($notes[$d->design_id] ?? null) : null,
         ]));
@@ -100,9 +104,12 @@ class DesignController extends Controller
     // A design used by a confirmed order (proposal accepted, or confirmed and beyond) is read-only.
     private function isLocked(Design $design): bool
     {
-        return $design->orders()
-            ->where(fn ($q) => $q->whereNotIn('status', ['pending', 'cancelled'])->orWhere('proposal_status', 'accepted'))
-            ->exists();
+        return $design->orders()->where(fn ($q) => $this->lockingOrders($q))->exists();
+    }
+
+    private function lockingOrders($q)
+    {
+        return $q->whereNotIn('status', ['pending', 'cancelled'])->orWhere('proposal_status', 'accepted');
     }
 
     // InspoGallery.jsx: PUT /api/customer/designs/{id} — rename, or change the saved config
@@ -149,6 +156,7 @@ class DesignController extends Controller
         $copy->design_name      = $validated['design_name'] ?? mb_substr("Copy of {$design->design_name}", 0, 100);
         $copy->parent_design_id = $design->design_id;
         $copy->source_order_id  = $design->source_order_id;
+        $copy->is_active        = true;
         if (isset($validated['custom_builder_config'])) {
             $copy->custom_builder_config = json_encode($validated['custom_builder_config']);
         }
@@ -169,6 +177,12 @@ class DesignController extends Controller
         $design = $this->findOwnArchivedDesign($id);
         if (!$design) {
             return response()->json(['message' => 'Design not found.'], 404);
+        }
+        if ($this->isLocked($design)) {
+            return response()->json([
+                'message' => 'This design belongs to a confirmed order and cannot be deleted.',
+                'locked'  => true,
+            ], 422);
         }
 
         // Deleting a design also withdraws it from the showcase: consent ends with the design.

@@ -264,7 +264,7 @@ class PurchaseOrderController extends Controller
 
         return response()->json([
             'message'        => $mismatch
-                ? 'Goods received with COLOR MISMATCH. Cutting is held pending manager confirmation.'
+                ? 'Goods received with COLOR MISMATCH. Cutting is held pending Administrator confirmation.'
                 : 'Goods received successfully. Stock updated.',
             'color_mismatch' => (bool) $mismatch,
             'po_status'      => 'received',

@@ -38,8 +38,10 @@ use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BillingController;
+use App\Http\Controllers\Api\ClientMaterialController;
 use App\Http\Controllers\Api\BillingProfileController;
 use App\Http\Controllers\Api\NotificationPreferenceController;
+use App\Http\Controllers\Api\CustomerContactController;
 use App\Http\Controllers\Api\CustomerFabricPreferenceController;
 use App\Http\Controllers\Api\DeliveryController;
 use App\Http\Controllers\Api\DesignController;
@@ -50,7 +52,6 @@ use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\OutputLogController;
 use App\Http\Controllers\Api\PhysicalCountController;
 use App\Http\Controllers\Api\ProductionController;
-use App\Http\Controllers\Api\ProductionIncidentController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\QCChecklistController;
 use App\Http\Controllers\Api\SettingsController;
@@ -76,7 +77,7 @@ Route::get('/version', [VersionController::class, 'show']);
 
 // ── Customer auth ─────────────────────────────────────────────
 Route::post('/login',    [AuthController::class, 'login'])->middleware('throttle:10,1');
-Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:5,1');
+// Self-registration is disabled: an Administrator creates customer accounts (POST /api/admin/users).
 
 // ── Admin auth (alias so both /api/admin/login and /api/login work) ──
 Route::post('/admin/login', [AuthController::class, 'adminLogin'])->middleware('throttle:10,1');
@@ -153,6 +154,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::get('/orders',     [OrderController::class, 'customerIndex']);
     Route::post('/orders',    [OrderController::class, 'customerStore']);
     Route::get('/orders/{id}', [OrderController::class, 'customerShow']);
+    Route::get('/orders/{id}/spec-sheet', [OrderController::class, 'customerSpecSheet']);
     // Proposal replies: accept confirms the order; decline needs a reason; message goes to the order thread.
     Route::post('/orders/{id}/accept',  [OrderController::class, 'customerAcceptProposal']);
     Route::post('/orders/{id}/decline', [OrderController::class, 'customerDeclineProposal']);
@@ -184,7 +186,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // GET /api/customer/orders/{id}/ai-recommendation — routed here now.
     Route::get('/orders/{id}/ai-recommendation', [AIController::class, 'showForOrder']);
 
-    // ── Billing (Oct 14 2026): own orders only; ?format=pdf (A4) or ?format=html (mobile) ──
+    // ── Billing: own orders only; no amounts on screen, amount-free PDFs (?format=pdf or ?format=html) ──
     Route::get('/orders/{id}/billing',      [BillingController::class, 'customerOrderBilling']);
     Route::get('/invoices/{id}/document',   [BillingController::class, 'customerInvoiceDocument']);
     Route::get('/receipts/{id}/document',   [BillingController::class, 'customerReceiptDocument']);
@@ -207,6 +209,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // OrderDetail.jsx: GET  /api/customer/messages/{id}    (same — order messages)
     //                  POST /api/customer/messages         (quick reply from detail page)
     Route::get('/messages',     [MessageController::class, 'customerIndex']);
+    Route::get('/messages/unread-count', [MessageController::class, 'customerUnreadCount']);
     Route::post('/messages',    [MessageController::class, 'customerStore']);
     Route::get('/messages/{id}', [MessageController::class, 'customerShow']);
 
@@ -275,7 +278,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
 // AdminLayout.jsx polls notifications and dashboard widgets fairly
 // actively during a normal work shift. Still low enough to stop a
 // scripted scrape or a runaway retry loop.
-Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
+Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
 
     // AI recommendation feedback (Oct 13 2026): staff accept/reject per recommended line.
     Route::patch('/material-recommendations/{recId}/feedback', [RecommendationGuidanceController::class, 'feedback'])->whereNumber('recId');
@@ -284,9 +287,6 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     // Dashboard.jsx: GET /api/admin/dashboard
     //                GET /api/admin/notifications (bell dropdown — reads same table)
     Route::get('/dashboard', [AdminDashboardController::class, 'index']);
-
-    // StaffDashboard.jsx (general/sales/production staff): GET /api/admin/dashboard/staff
-    Route::get('/dashboard/staff', [AdminDashboardController::class, 'staffIndex']);
 
     // ── Feedback (Aug 27 2026) — any staff/manager can also submit; only
     // managers can view the list (see role:manager group below).
@@ -305,7 +305,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
 
     // ── Auth ─────────────────────────────────────────────────────
     // The excluded role string must match the group's exactly, or RoleMiddleware answers every login with 401.
-    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:staff,manager,owner'])->middleware('throttle:10,1');
+    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly'])->middleware('throttle:10,1');
 
     // ── Orders ───────────────────────────────────────────────────
     // Orders.jsx:           GET /api/admin/orders
@@ -328,12 +328,20 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     // ── Client master data (read-only) — CustomersMaster.jsx: GET /api/admin/customers
     // Customers live in `users` (role 'customer'); staff + manager may view, nobody edits from here.
     Route::get('/customers', [UserController::class, 'adminCustomers']);
+
+    // ── Walk-in customer contacts: the manager records them. No account is created.
+    Route::get('/customer-contacts',  [CustomerContactController::class, 'index']);
+    Route::post('/customer-contacts', [CustomerContactController::class, 'store']);
     Route::get('/orders/{id}', [OrderController::class, 'adminShow']);
     // Invoice.jsx "Download PDF" button moved to the manager-only group
     // below (Sept 15 2026, QA account) — Invoice is manager-exclusive per
     // the locked business rules; this endpoint was reachable by any staff
     // bearer token here, a real RBAC gap.
     Route::patch('/orders/{id}', [OrderController::class, 'adminUpdate']);
+
+    // Client-supplied materials per order (receive / wastage / return; Cutting issues automatically).
+    Route::get('/orders/{id}/client-materials',  [ClientMaterialController::class, 'show']);
+    Route::post('/orders/{id}/client-materials', [ClientMaterialController::class, 'store'])->middleware('jobfn:inventory');
 
     // ── Production Stage Advance ──────────────────────────────────
     // ProductionTracking.jsx: GET  /api/admin/orders/{id}/production  → stages()
@@ -350,15 +358,6 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     Route::get('/orders/{id}/production',    [ProductionController::class, 'stages']);
     Route::get('/orders/{id}/production-summary', [OutputLogController::class, 'productionSummary']);
     Route::post('/orders/{id}/defects',           [OutputLogController::class, 'reportDefect'])->middleware('jobfn:production');
-
-    // ── Production Incidents (machine breakdown / cutting damage) ─
-    // ProductionIncidents.jsx: added Aug 25 2026, per interview transcript.
-    // Not manager-exclusive — any staff can report/acknowledge/resolve,
-    // same tier as QCChecklist/PhysicalCount.
-    Route::get('/production-incidents',                 [ProductionIncidentController::class, 'index'])->middleware('jobfn:production');
-    Route::post('/production-incidents',                [ProductionIncidentController::class, 'store'])->middleware('jobfn:production');
-    Route::patch('/production-incidents/{id}/acknowledge',[ProductionIncidentController::class, 'acknowledge'])->middleware('jobfn:production');
-    Route::patch('/production-incidents/{id}/resolve',   [ProductionIncidentController::class, 'resolve'])->middleware('jobfn:production');
 
     // ── QC Checklist ─────────────────────────────────────────────
     // DailyOutputLog.jsx (inline at the QC stage): GET/POST /api/admin/orders/{orderId}/qc
@@ -387,6 +386,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     // where type is 'in' or 'out' — routes must match exactly
     Route::get('/inventory',      [InventoryController::class, 'index']);
     Route::get('/inventory/logs', [InventoryController::class, 'allLogs']); // FIX: was 'logs' → 500
+    Route::get('/inventory/client-stock', [InventoryController::class, 'clientStock']); // client-supplied material per open order
     Route::get('/inventory/export', [InventoryController::class, 'export']); // ?format=csv|pdf, stock only (no costs)
     Route::post('/inventory/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
     Route::post('/inventory/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
@@ -432,6 +432,7 @@ Route::middleware(['auth:sanctum', 'role:staff,manager,owner', 'owner.readonly',
     //                  GET  /api/admin/messages/{id}   (thread for order)
     //                  POST /api/admin/messages        (send)
     Route::get('/messages',      [MessageController::class, 'adminIndex']);
+    Route::get('/messages/unread-count', [MessageController::class, 'adminUnreadCount']);
     Route::get('/messages/{id}', [MessageController::class, 'adminShow']);
     Route::post('/messages',     [MessageController::class, 'adminStore']);
 
@@ -531,6 +532,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::get('/reports',                 [AdminReportController::class, 'index']);
     Route::get('/reports/sales',           [AdminReportController::class, 'salesSummary']);
     Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
+    Route::get('/orders/{id}/spec-sheet',  [OrderController::class, 'adminSpecSheet']);
 
     // ── Order proposal + down payment (Oct 17 2026): manager sets date, total and down payment ──
     Route::get('/orders/{id}/suggested-date', [OrderController::class, 'suggestedDate']);

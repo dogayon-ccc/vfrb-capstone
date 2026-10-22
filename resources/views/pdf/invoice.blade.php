@@ -175,7 +175,7 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
   </tr>
   @if(!empty($order['po_reference']))
   <tr>
-    <td class="lbl">Client PO#</td>
+    <td class="lbl">Customer PO#</td>
     <td class="val" colspan="3">{{ $order['po_reference'] }}</td>
   </tr>
   @endif
@@ -185,12 +185,13 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
     <td class="val" colspan="3">{{ $order['client_design_notes'] }}</td>
   </tr>
   @endif
-  @if(!empty($order['negotiated_delivery_date']) || !empty($order['target_delivery_date']))
+  @php $dueDate = $order['promised_date'] ?? $order['negotiated_delivery_date'] ?? $order['target_delivery_date'] ?? null; @endphp
+  @if(!empty($dueDate))
   <tr>
     <td class="lbl">Delivery Date</td>
     <td class="val" colspan="3">
-      {{ \Carbon\Carbon::parse($order['negotiated_delivery_date'] ?? $order['target_delivery_date'])->format('F d, Y') }}
-      @if(!empty($order['negotiated_delivery_date']) && !empty($order['target_delivery_date']))
+      {{ \Carbon\Carbon::parse($dueDate)->format('F d, Y') }}
+      @if(!empty($order['target_delivery_date']) && substr((string) $dueDate, 0, 10) !== substr((string) $order['target_delivery_date'], 0, 10))
         <span style="color:#9ca3af;">(originally requested {{ \Carbon\Carbon::parse($order['target_delivery_date'])->format('M d, Y') }})</span>
       @endif
     </td>
@@ -220,16 +221,15 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
 </div>
 @endif
 
-{{-- BOM TABLE — real material_recommendations, deterministic rate engine --}}
+{{-- Recommended material types for this order; no quantities. --}}
 @if(!empty($order['recommendations']) && count($order['recommendations']) > 0)
-<div class="sec">Bill of Materials</div>
+<div class="sec">Recommended Materials</div>
 <table class="bom">
   <thead>
     <tr>
-      <th style="width:34%">Material</th>
-      <th style="width:18%">Category</th>
-      <th style="width:30%">Estimated Amount</th>
-      <th style="width:18%">Linked Stock</th>
+      <th style="width:44%">Material</th>
+      <th style="width:24%">Category</th>
+      <th style="width:32%">Linked Material</th>
     </tr>
   </thead>
   <tbody>
@@ -237,10 +237,9 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
     <tr>
       <td style="font-weight:500;">{{ $r['material_name'] ?? '—' }}</td>
       <td><span class="t-cat">{{ $r['category'] ?? 'Other' }}</span></td>
-      <td>{{ $r['estimated_range'] ?? '—' }}</td>
       <td>
         @if(!empty($r['material']['material_name']))
-          {{ number_format((float)($r['material']['quantity_in_stock'] ?? 0), 2) }} {{ $r['material']['unit'] ?? '' }} in stock
+          {{ $r['material']['material_name'] }}@if(!empty($r['material']['unit'])) ({{ $r['material']['unit'] }})@endif
         @else
           Not yet linked
         @endif
@@ -251,11 +250,11 @@ body { font-family:'DejaVu Sans',Arial,sans-serif; font-size:11px; color:#1a1a2e
 </table>
 
 <div class="ai">
-  <div class="ai-title">🤖 Material Recommendation — Deterministic, Not AI-Generated</div>
+  <div class="ai-title">🤖 Material Recommendation — Types Only</div>
   <div class="ai-row">
-    Quantities come from a staff-configured usage rate (material × garment type), not from the AI.
-    Google Gemini is used only to explain the recommendation in plain language — it never computes
-    the numbers. Same rate, same order quantity → same result, every time.
+    Google Gemini suggests material types only, guided by VFRB's rules and Administrator feedback.
+    It never sets quantities, yardage or prices; actual material usage is recorded by an Administrator
+    during production.
   </div>
 </div>
 @elseif(($order['order_type'] ?? '') === 'subcontract')

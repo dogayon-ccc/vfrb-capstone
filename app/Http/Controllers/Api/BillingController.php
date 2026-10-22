@@ -67,8 +67,7 @@ class BillingController extends Controller
         }
 
         if ($result['receipt']) {
-            $this->notifyCustomer($invoice->order_id, 'Payment Received',
-                'Payment of ₱' . number_format($result['receipt']->amount, 2) . " received for Order #{$invoice->order_id}. Account settled.");
+            $this->notifyCustomer($invoice->order_id, 'Payment Received', "Payment received for Order #{$invoice->order_id}. Account settled.");
         }
         Cache::forget('dashboard_stats');
 
@@ -97,33 +96,39 @@ class BillingController extends Controller
     }
 
     // ── Customer: own orders only ────────────────────────────────────────────
-    // GET /api/customer/orders/{id}/billing
+    // GET /api/customer/orders/{id}/billing — status, numbers and dates only; customers never receive amounts.
     public function customerOrderBilling(int $id)
     {
         if (!$this->ownsOrder($id)) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
-        return response()->json($this->billingSummary($id, false));
+        $invoice = Invoice::where('order_id', $id)->live()->first();
+        return response()->json([
+            'invoice'  => $invoice?->only(['invoice_id', 'invoice_number', 'status', 'issued_at', 'due_date', 'paid_at', 'billed_to_name']),
+            'receipts' => PaymentReceipt::where('order_id', $id)->orderBy('paid_at')
+                ->get(['receipt_id', 'receipt_number', 'payment_method', 'reference_no', 'paid_at']),
+            'labels'   => collect($this->billing->labels())->only(['invoice_title', 'receipt_title'])->all(),
+        ]);
     }
 
-    // GET /api/customer/invoices/{id}/document — voided invoices are not shown to customers.
+    // GET /api/customer/invoices/{id}/document — amount-free copy; voided invoices are not shown to customers.
     public function customerInvoiceDocument(Request $request, int $id)
     {
         $invoice = Invoice::live()->find($id);
         if (!$invoice || !$this->ownsOrder($invoice->order_id)) {
             return response()->json(['message' => 'Invoice not found.'], 404);
         }
-        return $this->invoiceDocument($request, $invoice);
+        return $this->invoiceDocument($request, $invoice, false);
     }
 
-    // GET /api/customer/receipts/{id}/document
+    // GET /api/customer/receipts/{id}/document — amount-free copy.
     public function customerReceiptDocument(Request $request, int $id)
     {
         $receipt = PaymentReceipt::find($id);
         if (!$receipt || !$this->ownsOrder($receipt->order_id)) {
             return response()->json(['message' => 'Receipt not found.'], 404);
         }
-        return $this->receiptDocument($request, $receipt);
+        return $this->receiptDocument($request, $receipt, false);
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
@@ -162,7 +167,7 @@ class BillingController extends Controller
         return $out;
     }
 
-    private function invoiceDocument(Request $request, Invoice $invoice)
+    private function invoiceDocument(Request $request, Invoice $invoice, bool $amounts = true)
     {
         $order = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
             ->where('orders.order_id', $invoice->order_id)
@@ -187,10 +192,11 @@ class BillingController extends Controller
             'receipts' => PaymentReceipt::where('order_id', $invoice->order_id)->orderBy('paid_at')->get(),
             'paid'     => $this->billing->paidToDate($invoice->order_id),
             'balance'  => $this->billing->balance($invoice->order_id, $invoice->total_amount),
+            'amounts'  => $amounts,
         ]);
     }
 
-    private function receiptDocument(Request $request, PaymentReceipt $receipt)
+    private function receiptDocument(Request $request, PaymentReceipt $receipt, bool $amounts = true)
     {
         $invoice = $receipt->invoice_id ? Invoice::find($receipt->invoice_id) : null;
         $order   = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
@@ -204,6 +210,7 @@ class BillingController extends Controller
             'order'      => $order,
             'receivedBy' => DB::table('users')->where('user_id', $receipt->issued_by)->value('name'),
             'payer'      => $invoice->billed_to_name ?? ($order->organization_name ?: $order->name),
+            'amounts'    => $amounts,
         ]);
     }
 

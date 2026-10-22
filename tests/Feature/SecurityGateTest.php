@@ -9,7 +9,7 @@ use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 // Run against a MySQL database loaded from vfrb_db.sql (NOT RefreshDatabase — the schema is not migration-built).
-// Seed assumed: users 1=manager, 4=staff, 5/6=customers; order 1 -> user 5, order 2 -> user 6.
+// Seed assumed: users 1=manager, 4=retired staff, 5/6=customers; order 1 -> user 5, order 2 -> user 6.
 // Every test runs inside a rolled-back transaction.
 //   php artisan test --filter SecurityGateTest
 class SecurityGateTest extends TestCase
@@ -61,7 +61,12 @@ class SecurityGateTest extends TestCase
 
     public function test_customer_cannot_touch_another_customers_design(): void
     {
-        $mine  = $this->design(1);
+        // A design on a confirmed order is locked, so "mine" sits on a fresh pending order.
+        $pending = DB::table('orders')->insertGetId([
+            'user_id' => 5, 'garment_type' => 'Polo Shirt', 'quantity_ordered' => 100, 'status' => 'pending',
+            'created_at' => now(), 'updated_at' => now(),
+        ], 'order_id');
+        $mine  = $this->design($pending);
         $other = $this->design(2);
         $this->actAs(5);
         $this->putJson("/api/customer/designs/{$mine}", ['design_name' => 'renamed'])->assertOk();
@@ -106,41 +111,33 @@ class SecurityGateTest extends TestCase
         }
     }
 
-    public function test_staff_is_blocked_from_manager_only_endpoints(): void
+    // The staff role is retired: user 4 keeps its row but every admin route refuses it.
+    public function test_retired_staff_is_refused_everywhere(): void
     {
         $this->actAs(4);
+        $this->getJson('/api/admin/orders')->assertForbidden();
+        $this->getJson('/api/admin/dashboard')->assertForbidden();
         $this->getJson('/api/admin/reports')->assertForbidden();
-        $this->getJson('/api/admin/users')->assertForbidden();
-        $this->getJson('/api/admin/activity-log')->assertForbidden();
-        $this->postJson('/api/admin/suppliers', ['supplier_name' => 'x'])->assertForbidden();
         $this->patchJson('/api/admin/orders/1', ['status' => 'completed'])->assertForbidden();
-        $this->postJson('/api/admin/orders/1/advance')->assertForbidden();
-        $this->deleteJson('/api/admin/output-logs/1')->assertForbidden();
         $this->assertNotSame('completed', DB::table('orders')->where('order_id', 1)->value('status'));
     }
 
-    public function test_only_inventory_staff_can_receive_a_purchase_order(): void
+    public function test_public_registration_is_closed(): void
     {
-        DB::table('users')->where('user_id', 4)->update(['job_function' => 'production']);
-        $this->actAs(4);
-        $this->patchJson('/api/admin/purchase-orders/999999/receive')->assertForbidden();
-
-        DB::table('users')->where('user_id', 4)->update(['job_function' => 'inventory']);
-        $this->actAs(4);
-        $this->patchJson('/api/admin/purchase-orders/999999/receive')->assertNotFound();
+        $this->postJson('/api/register', ['name' => 'X', 'email' => 'self-signup@gmail.com'])->assertNotFound();
+        $this->assertFalse(DB::table('users')->where('email', 'self-signup@gmail.com')->exists());
     }
 
-    public function test_admin_cannot_create_or_promote_customer_accounts(): void
+    public function test_customer_accounts_need_organization_and_type_and_are_never_promoted(): void
     {
         $this->actAs(1);
         $body = ['name' => 'X', 'email' => 'new-cust@gmail.com', 'password' => 'Secret#123', 'password_confirmation' => 'Secret#123', 'role' => 'customer'];
-        foreach (['/api/admin/users', '/api/admin/users/create'] as $url) {
-            $this->postJson($url, $body)->assertStatus(422)->assertJsonValidationErrors('role');
-        }
+        $this->postJson('/api/admin/users', $body)->assertStatus(422)->assertJsonValidationErrors(['organization_name', 'client_type']);
+        $this->postJson('/api/admin/users', ['role' => 'staff'] + $body)->assertStatus(422)->assertJsonValidationErrors('role');
         $this->assertFalse(DB::table('users')->where('email', 'new-cust@gmail.com')->exists());
 
-        // An existing customer account (user 5) cannot be turned into staff from User Management.
-        $this->putJson('/api/admin/users/5', ['role' => 'staff'])->assertStatus(422);
+        // An existing customer account (user 5) cannot be turned into an admin from User Management.
+        $this->putJson('/api/admin/users/5', ['role' => 'manager'])->assertStatus(422);
         $this->assertSame(['customer'], DB::table('model_has_roles')->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
             ->where('model_has_roles.model_id', 5)->pluck('roles.name')->all());
     }
@@ -206,37 +203,34 @@ class SecurityGateTest extends TestCase
         $this->withToken($token)->getJson('/api/customer/orders/1')->assertUnauthorized();
     }
 
-    public function test_deactivating_staff_revokes_tokens_and_blocks_access(): void
+    public function test_manager_can_still_deactivate_the_retired_staff_account(): void
     {
         $staffToken = User::findOrFail(4)->createToken('sec-test')->plainTextToken;
-        $this->withToken($staffToken)->getJson('/api/admin/orders')->assertOk();
+        $this->withToken($staffToken)->getJson('/api/admin/orders')->assertForbidden();
 
+        $this->app['auth']->forgetGuards();
         $this->actAs(1);
         $this->patchJson('/api/admin/users/4/toggle')->assertOk()->assertJson(['is_active' => false]);
         $this->assertSame(0, DB::table('personal_access_tokens')->where('tokenable_id', 4)->count());
-
-        $this->app['auth']->forgetGuards();
-        $this->actAs(4);
-        $this->getJson('/api/admin/orders')->assertForbidden();
     }
 
-    public function test_deactivated_staff_cannot_log_in(): void
+    public function test_retired_staff_cannot_log_in(): void
     {
-        DB::table('users')->where('user_id', 4)->update(['email_verified_at' => null, 'password' => bcrypt('Sec#Test1234')]);
+        DB::table('users')->where('user_id', 4)->update(['password' => bcrypt('Sec#Test1234')]);
         $email = DB::table('users')->where('user_id', 4)->value('email');
         $this->postJson('/api/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertForbidden();
         $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertForbidden();
     }
 
     // The admin login alias sits inside the authenticated admin group; it must stay reachable without a token.
-    public function test_admin_login_alias_signs_in_active_staff(): void
+    public function test_admin_login_alias_signs_in_the_manager(): void
     {
-        DB::table('users')->where('user_id', 4)->update(['password' => bcrypt('Sec#Test1234')]);
-        $email = DB::table('users')->where('user_id', 4)->value('email');
-        $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertOk()->assertJsonStructure(['token', 'user']);
+        DB::table('users')->where('user_id', 1)->update(['password' => bcrypt('Sec#Test1234')]);
+        $email = DB::table('users')->where('user_id', 1)->value('email');
+        $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertOk()->assertJsonPath('user.role', 'manager');
     }
 
-    public function test_activate_deactivate_is_limited_to_staff_and_manager_accounts(): void
+    public function test_activate_deactivate_is_limited_to_admin_accounts(): void
     {
         $this->actAs(1);
         $this->patchJson('/api/admin/users/5/toggle')->assertStatus(422);

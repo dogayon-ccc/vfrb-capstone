@@ -162,7 +162,7 @@ class AiRecommendationTest extends TestCase
         Http::fake(['*' => Http::response(['error' => ['message' => 'SECRET-UPSTREAM-DETAIL key=abc']], 500)]);
         $this->actAs(5);
         $this->assertCatalogFallback($this->recommend());
-        Http::assertSentCount(1); // a 500 is not retried
+        Http::assertSentCount(2); // a 500 is not retried on the same model; the fallback model is tried once
     }
 
     public function test_missing_gemini_key_uses_the_fallback_without_any_request(): void
@@ -374,6 +374,7 @@ class AiRecommendationTest extends TestCase
     public function test_describe_design_errors_keep_the_error_key_the_studio_reads(): void
     {
         Http::fake(['*' => Http::sequence()
+            ->push('down', 500)
             ->push('down', 500)
             ->push(['candidates' => [['content' => ['parts' => [['text' => json_encode(['category' => 'PE/Sports'])]]]]]])]);
 

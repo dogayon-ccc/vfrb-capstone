@@ -37,7 +37,11 @@ class AdminDashboardController extends Controller
         // doc comment. Cheap (early-returns once today's row exists), so
         // safe to call on every dashboard load rather than only from the
         // scheduler.
-        KpiDailySnapshot::captureToday();
+        // Once per day per server instead of an exists() round trip on every load.
+        Cache::remember('kpi_snapshot_' . now()->toDateString(), now()->endOfDay(), function () {
+            KpiDailySnapshot::captureToday();
+            return true;
+        });
 
         $data = Cache::remember('dashboard_stats', 120, function () {
             $now         = now();
@@ -45,41 +49,51 @@ class AdminDashboardController extends Controller
             $startWeek   = $now->copy()->startOfWeek();
 
             // ── Order counts ─────────────────────────────────────────────────
-            $totalOrders     = DB::table('orders')->count();
-            $pendingOrders   = DB::table('orders')->where('status', 'pending')->count();
-            $confirmedOrders = DB::table('orders')->where('status', 'confirmed')->count();
-            $inProduction    = DB::table('orders')
-                ->whereIn('status', ['pattern','segregation','cutting','sewing','qc','pressing','packing'])
-                ->count();
-            $completedOrders = DB::table('orders')->where('status', 'completed')->count();
-            $cancelledOrders = DB::table('orders')->where('status', 'cancelled')->count();
-            $newThisMonth    = DB::table('orders')->where('created_at', '>=', $startMonth)->count();
-            $newThisWeek     = DB::table('orders')->where('created_at', '>=', $startWeek)->count();
+            // One pass over orders (each count was its own ~100 ms round trip).
+            $o = DB::table('orders')->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) as confirmed,
+                SUM(CASE WHEN status IN ('pattern','segregation','cutting','sewing','qc','pressing','packing') THEN 1 ELSE 0 END) as in_production,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) as cancelled,
+                SUM(CASE WHEN status = 'qc' THEN 1 ELSE 0 END) as qc,
+                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as new_month,
+                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as new_week", [$startMonth, $startWeek])->first();
+            $totalOrders     = (int) $o->total;
+            $pendingOrders   = (int) $o->pending;
+            $confirmedOrders = (int) $o->confirmed;
+            $inProduction    = (int) $o->in_production;
+            $completedOrders = (int) $o->completed;
+            $cancelledOrders = (int) $o->cancelled;
+            $newThisMonth    = (int) $o->new_month;
+            $newThisWeek     = (int) $o->new_week;
 
             // ── Revenue ──────────────────────────────────────────────────────
-            $revenueTotal = DB::table('sales_transactions')->sum('amount_paid');
-            $revenueMonth = DB::table('sales_transactions')
-                ->where('payment_date', '>=', $startMonth->toDateString())
-                ->sum('amount_paid');
-            $revenueWeek  = DB::table('sales_transactions')
-                ->where('payment_date', '>=', $startWeek->toDateString())
-                ->sum('amount_paid');
+            $rev = DB::table('sales_transactions')->selectRaw('
+                COALESCE(SUM(amount_paid), 0) as total,
+                COALESCE(SUM(CASE WHEN payment_date >= ? THEN amount_paid ELSE 0 END), 0) as month,
+                COALESCE(SUM(CASE WHEN payment_date >= ? THEN amount_paid ELSE 0 END), 0) as week',
+                [$startMonth->toDateString(), $startWeek->toDateString()])->first();
+            $revenueTotal = $rev->total;
+            $revenueMonth = $rev->month;
+            $revenueWeek  = $rev->week;
 
             // ── Inventory alerts ─────────────────────────────────────────────
-            $lowStockCount = DB::table('materials')
-                ->whereRaw('quantity_in_stock <= reorder_threshold')
-                ->count();
+            $mat = DB::table('materials')->selectRaw('COUNT(*) as total, SUM(CASE WHEN '
+                . \App\Services\ClientMaterialService::lowStockSql() . ' THEN 1 ELSE 0 END) as low')->first();
+            $lowStockCount = (int) $mat->low;
 
             // Stock health % — this exact field keeps getting dropped when this
             // file gets resynced from an older branch; re-verify it's still
             // here before assuming Dashboard.jsx's Stock Health KPI card works.
-            $materialCount  = DB::table('materials')->count();
+            $materialCount  = (int) $mat->total;
             $stockHealthPct = $materialCount > 0
                 ? round((($materialCount - $lowStockCount) / $materialCount) * 100, 2)
                 : 0;
 
             // ── QC / color hold alerts ────────────────────────────────────────
-            $qcBlockedCount = DB::table('orders')->where('status', 'qc')->count();
+            $qcBlockedCount = (int) $o->qc;
 
             $colorHoldCount = DB::table('purchase_orders')
                 ->where('color_mismatch', 1)
@@ -90,6 +104,26 @@ class AdminDashboardController extends Controller
             $outputToday = (int) DB::table('daily_output_logs')
                 ->whereDate('log_date', $now->toDateString())
                 ->sum('total_output');
+
+            // Today's output per stage, so the owner (no output-logs access) gets the breakdown.
+            $outputByStage = DB::table('daily_output_logs')
+                ->whereDate('log_date', $now->toDateString())
+                ->select('stage', DB::raw('SUM(total_output) as total'))
+                ->groupBy('stage')
+                ->get()
+                ->map(fn($r) => ['stage' => $r->stage, 'total' => (int) $r->total])
+                ->values();
+
+            // On-time delivery, last 90 days: delivered with actual date on or before the estimate.
+            $onTime = DB::table('delivery_tracking')
+                ->where('delivery_status', 'delivered')
+                ->whereNotNull('estimated_delivery_date')
+                ->whereNotNull('actual_delivery_date')
+                ->where('actual_delivery_date', '>=', $now->copy()->subDays(90)->toDateString())
+                ->selectRaw('COUNT(*) as total, SUM(CASE WHEN actual_delivery_date <= estimated_delivery_date THEN 1 ELSE 0 END) as on_time')
+                ->first();
+            $onTimeTotal = (int) ($onTime->total ?? 0);
+            $onTimeCount = (int) ($onTime->on_time ?? 0);
 
             // ── Delivery counts ───────────────────────────────────────────────
             // delivery_status — NOT "status"
@@ -122,7 +156,7 @@ class AdminDashboardController extends Controller
 
             // ── Low-stock materials ───────────────────────────────────────────
             $lowStockMaterials = DB::table('materials')
-                ->whereRaw('quantity_in_stock <= reorder_threshold')
+                ->whereRaw(\App\Services\ClientMaterialService::lowStockSql())
                 ->select('material_id', 'material_name', 'quantity_in_stock',
                          'reorder_threshold', 'unit', 'unit_cost')
                 ->orderByRaw('quantity_in_stock / NULLIF(reorder_threshold, 0) ASC')
@@ -284,6 +318,15 @@ class AdminDashboardController extends Controller
                     'delayed_orders' => $delayedOrders,
                     'delayed_count'  => $delayedOrders->count(),
                     'delayed_threshold_days' => $delayedThresholdDays,
+                    'output_by_stage' => $outputByStage,
+                ],
+                'delivery' => [
+                    'on_time' => [
+                        'on_time'     => $onTimeCount,
+                        'total'       => $onTimeTotal,
+                        'pct'         => $onTimeTotal > 0 ? round($onTimeCount / $onTimeTotal * 100, 1) : null,
+                        'window_days' => 90,
+                    ],
                 ],
                 'recent_orders' => $recentOrders,
                 'generated_at'  => $now->toIso8601String(),
@@ -319,7 +362,7 @@ class AdminDashboardController extends Controller
             ->whereIn('status', ['pattern','segregation','cutting','sewing','qc','pressing','packing'])
             ->count();
         $lowStockMaterials = DB::table('materials')
-            ->whereRaw('quantity_in_stock <= reorder_threshold')
+            ->whereRaw(\App\Services\ClientMaterialService::lowStockSql())
             ->select('material_id','material_name','quantity_in_stock','reorder_threshold','unit')
             ->orderByRaw('quantity_in_stock / NULLIF(reorder_threshold, 0) ASC')
             ->limit(5)->get();

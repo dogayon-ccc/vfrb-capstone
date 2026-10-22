@@ -9,6 +9,7 @@ namespace App\Http\Middleware;
 
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class RoleMiddleware
@@ -21,14 +22,7 @@ class RoleMiddleware
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        // Direct DB query — bypasses Spatie guard_name='web' vs Sanctum guard='api' mismatch.
-        // getRoleNames() returns empty because Spatie uses guard_name='web' while Sanctum uses 'api'.
-        // This is the correct fix: skip Spatie's in-memory lookup, query the junction table directly.
-        $userRole = DB::table('model_has_roles as mr')
-            ->join('roles as r', 'r.id', '=', 'mr.role_id')
-            ->where('mr.model_type', 'App\\Models\\User')
-            ->where('mr.model_id', $user->user_id)
-            ->value('r.name');
+        $userRole = self::roleOf($request);
 
         // FIX: was '$user->supplier_id ?: customer' — supplier_id column removed in DB v4
         // DB role name is 'customer' (roles.id=3) — do not rename to 'client' here. UI/routes
@@ -38,9 +32,14 @@ class RoleMiddleware
             $userRole = 'customer';
         }
 
-        // Staff/manager accounts are auto-verified on creation, so a null email_verified_at
-        // means a manager deactivated them (UserController::adminToggle).
-        if (in_array($userRole, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
+        // The staff role is retired: its existing tokens are refused everywhere.
+        if ($userRole === 'staff') {
+            return response()->json(['message' => 'Staff accounts have been retired. Ask an Administrator for access.'], 403);
+        }
+
+        // Admin accounts are auto-verified on creation, so a null email_verified_at
+        // means they were deactivated (UserController::adminToggle).
+        if (in_array($userRole, ['manager', 'owner'], true) && is_null($user->email_verified_at)) {
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
@@ -64,5 +63,39 @@ class RoleMiddleware
             'required_role' => implode(' or ', $roles),
             'your_role'     => $userRole,
         ], 403);
+    }
+
+    // The user's DB role, looked up once per request (each DB round trip is ~130 ms on Supabase).
+    public static function roleOf(Request $request): ?string
+    {
+        if ($request->attributes->has('vfrb_role')) {
+            return $request->attributes->get('vfrb_role');
+        }
+        $role = self::roleFor($request->user()->user_id);
+        $request->attributes->set('vfrb_role', $role);
+
+        return $role;
+    }
+
+    // Cached for 10 minutes; UserController calls forgetRole() whenever it writes a role.
+    // Direct query: Spatie's guard_name='web' doesn't match Sanctum's 'api', so getRoleNames() comes back empty.
+    public static function roleFor(int $userId): ?string
+    {
+        return Cache::remember(self::roleKey($userId), 600, fn () => DB::table('model_has_roles as mr')
+            ->join('roles as r', 'r.id', '=', 'mr.role_id')
+            ->where('mr.model_type', 'App\\Models\\User')
+            ->where('mr.model_id', $userId)
+            ->value('r.name'));
+    }
+
+    public static function forgetRole(int $userId): void
+    {
+        Cache::forget(self::roleKey($userId));
+    }
+
+    // Keyed by database too: the local QA stack shares this file cache with the Supabase setup, and user ids overlap.
+    private static function roleKey(int $userId): string
+    {
+        return 'vfrb_role:' . DB::connection()->getDatabaseName() . ":{$userId}";
     }
 }

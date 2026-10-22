@@ -34,6 +34,7 @@ class OrderStatusLockTest extends TestCase
 
     public function test_pending_order_can_be_confirmed_and_the_customer_is_notified(): void
     {
+        DB::table('orders')->where('order_id', 9)->update(['promised_date' => now()->addDays(14)->toDateString()]);
         $this->patchJson('/api/admin/orders/9', ['status' => 'confirmed', 'agreed_total' => 15000])->assertOk();
 
         $this->assertSame('confirmed', $this->statusOf(9));
@@ -77,6 +78,7 @@ class OrderStatusLockTest extends TestCase
         $this->assertSame('pattern', $this->statusOf(1));
 
         // The manager override only advances a stage whose output is fully logged.
+        DB::table('orders')->where('order_id', 1)->update(['down_payment_received_at' => now()]);
         $target = (int) DB::table('orders')->where('order_id', 1)->value('quantity_ordered');
         DB::table('order_production_tracking')->updateOrInsert(['order_id' => 1, 'stage' => 'pattern'],
             ['qty_target' => $target, 'qty_completed' => $target, 'updated_at' => now()]);

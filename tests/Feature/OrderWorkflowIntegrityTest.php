@@ -34,6 +34,7 @@ class OrderWorkflowIntegrityTest extends TestCase
         return DB::table('orders')->insertGetId(array_merge([
             'user_id' => 5, 'garment_type' => 'Polo Shirt', 'color' => 'Navy', 'quantity_ordered' => 100,
             'order_type' => 'direct', 'status' => $status, 'qc_required' => 0, 'created_at' => now(), 'updated_at' => now(),
+            'promised_date' => now()->addDays(14)->toDateString(), 'down_payment_received_at' => now(),
         ], $over), 'order_id');
     }
 
@@ -43,6 +44,11 @@ class OrderWorkflowIntegrityTest extends TestCase
             DB::table('order_production_tracking')->insert([
                 'order_id' => $orderId, 'stage' => $s, 'qty_target' => 100, 'qty_completed' => 100,
                 'updated_by' => 4, 'created_at' => now(), 'updated_at' => now(),
+            ]);
+            // Per-size flow and the packed delivery cap both read output logs, not just the tracking row.
+            DB::table('daily_output_logs')->insert([
+                'order_id' => $orderId, 'stage' => $s, 'logged_by' => 4, 'qty_m' => 100,
+                'log_date' => now()->toDateString(), 'created_at' => now(), 'updated_at' => now(),
             ]);
         }
     }
@@ -71,7 +77,7 @@ class OrderWorkflowIntegrityTest extends TestCase
 
     public function test_resubmitting_a_finished_held_stage_logs_nothing_and_never_exceeds_target(): void
     {
-        $this->actAs(4);
+        $this->actAs(1);
         $id = $this->order('pattern');
         $mat = DB::table('materials')->value('material_id');
         DB::table('material_recommendations')->insert([
@@ -94,7 +100,7 @@ class OrderWorkflowIntegrityTest extends TestCase
 
     public function test_a_batch_that_would_overshoot_the_target_is_rejected(): void
     {
-        $this->actAs(4);
+        $this->actAs(1);
         $id = $this->order('cutting');
         $this->complete($id, ['pattern', 'segregation']);
 
@@ -120,11 +126,12 @@ class OrderWorkflowIntegrityTest extends TestCase
 
     public function test_logging_a_stage_does_not_advance_while_an_earlier_stage_is_open(): void
     {
-        $this->actAs(4);
+        $this->actAs(1);
         $id = $this->order('pressing');
         $this->complete($id, ['pattern', 'segregation', 'cutting', 'sewing']); // QC left at 0/100
 
-        $this->log($id, 'pressing', 100)->assertCreated()->assertJson(['advanced' => false]);
+        $this->log($id, 'pressing', 100)->assertStatus(422)
+            ->assertJsonFragment(['message' => 'Size M: only 0 more can be logged at Pressing (QC has finished 0; Pressing has 0).']);
         $this->assertSame('pressing', DB::table('orders')->where('order_id', $id)->value('status'));
     }
 

@@ -54,14 +54,14 @@ class InventoryController extends Controller
                 $query->where('category', $category);
             }
             if ($lowStock) {
-                $query->whereRaw('quantity_in_stock <= reorder_threshold');
+                $query->whereRaw(\App\Services\ClientMaterialService::lowStockSql());
             }
 
             $perPage = min((int) $request->input('per_page', 20), 200);
             $items = $query->orderBy('material_name')->paginate($perPage);
 
             $items->getCollection()->transform(function ($m) {
-                $m->low_stock = $m->quantity_in_stock <= $m->reorder_threshold;
+                $m->low_stock = !\App\Services\ClientMaterialService::isClientOwned($m) && $m->quantity_in_stock <= $m->reorder_threshold;
                 return $m;
             });
 
@@ -75,7 +75,8 @@ class InventoryController extends Controller
     {
         $request->validate(['format' => 'required|in:csv,pdf']);
 
-        $query = DB::table('materials')->select('material_name', 'category', 'unit', 'quantity_in_stock', 'reorder_threshold');
+        $query = DB::table('materials')->select('material_name', 'category', 'unit', 'quantity_in_stock', 'reorder_threshold')
+            ->when(\App\Services\ClientMaterialService::ready(), fn ($q) => $q->where('ownership', 'vfrb')); // VFRB stock only
         if ($q = $request->input('search')) {
             $query->where('material_name', Sql::like(), "%{$q}%");
         }
@@ -83,7 +84,7 @@ class InventoryController extends Controller
             $query->where('category', $category);
         }
         if ($request->boolean('low_stock')) {
-            $query->whereRaw('quantity_in_stock <= reorder_threshold');
+            $query->whereRaw(\App\Services\ClientMaterialService::lowStockSql());
         }
 
         $rows = $query->orderBy('material_name')->get()->map(fn ($m) => [
@@ -134,13 +135,15 @@ class InventoryController extends Controller
             ->limit(30)
             ->get();
 
-        $material->low_stock = $material->quantity_in_stock <= $material->reorder_threshold;
+        $material->low_stock = !\App\Services\ClientMaterialService::isClientOwned($material) && $material->quantity_in_stock <= $material->reorder_threshold;
         $material->logs      = $logs;
 
         return response()->json($material);
     }
 
     // ── POST /api/admin/materials ─────────────────────────────────────────────
+    // Master data only. An opening stock, if given, is booked as the material's
+    // first inventory_logs movement so the ledger always explains the quantity.
     public function store(Request $request)
     {
         $request->validate([
@@ -148,22 +151,47 @@ class InventoryController extends Controller
             'material_name'     => 'required|string|max:100',
             'category'          => 'required|string|max:50',
             'unit'              => 'required|string|max:20',
-            'quantity_in_stock' => 'required|numeric|min:0',
+            'opening_stock'     => 'nullable|numeric|min:0',
             'reorder_threshold' => 'required|numeric|min:0',
             'unit_cost'         => 'required|numeric|min:0',
+            'ownership'         => 'sometimes|in:vfrb,client',
         ]);
 
-        $id = DB::table('materials')->insertGetId([
-            'material_code'     => $request->input('material_code') ?: \App\Models\Material::nextCode($request->input('category')),
-            'material_name'     => $request->input('material_name'),
-            'category'          => $request->input('category'),
-            'unit'              => $request->input('unit'),
-            'quantity_in_stock' => $request->input('quantity_in_stock'),
-            'reorder_threshold' => $request->input('reorder_threshold'),
-            'unit_cost'         => $request->input('unit_cost'),
-            'created_at'        => now(),
-            'updated_at'        => now(),
-        ], 'material_id');
+        $opening   = (float) $request->input('opening_stock', 0);
+        $ownership = \App\Services\ClientMaterialService::ready() ? $request->input('ownership', 'vfrb') : null;
+        if ($ownership === 'client' && $opening > 0) {
+            return response()->json(['message' => 'Client-supplied materials have no VFRB stock. Record what the client delivers on the order instead.'], 422);
+        }
+
+        $id = DB::transaction(function () use ($request, $opening, $ownership) {
+            $id = DB::table('materials')->insertGetId(array_filter([
+                'material_code'     => $request->input('material_code') ?: \App\Models\Material::nextCode($request->input('category')),
+                'material_name'     => $request->input('material_name'),
+                'category'          => $request->input('category'),
+                'ownership'         => $ownership,
+                'unit'              => $request->input('unit'),
+                'quantity_in_stock' => $opening,
+                'reorder_threshold' => $request->input('reorder_threshold'),
+                'unit_cost'         => $request->input('unit_cost'),
+                'created_at'        => now(),
+                'updated_at'        => now(),
+            ], fn ($v) => $v !== null), 'material_id');
+
+            if ($opening > 0) {
+                DB::table('inventory_logs')->insert([
+                    'material_id' => $id,
+                    'recorded_by' => Auth::id(),
+                    'type'        => 'stock_in',
+                    'change_qty'  => $opening,
+                    'reason'      => 'Opening balance (new material)',
+                    'log_date'    => now(),
+                    'created_at'  => now(),
+                    'updated_at'  => now(),
+                ]);
+            }
+
+            return $id;
+        });
 
         Cache::forget('materials_list');
         Cache::forget('dashboard_stats');
@@ -184,19 +212,38 @@ class InventoryController extends Controller
             return response()->json(['message' => 'Material not found.'], 404);
         }
 
+        // Stock is never edited here: it moves only through stock in/out, wastage,
+        // PO receipts, production usage and count reconciliation (all logged).
+        if ($request->has('quantity_in_stock') && (float) $request->input('quantity_in_stock') !== (float) $material->quantity_in_stock) {
+            return response()->json(['message' => 'Stock quantity can\'t be edited in master data. Record a Stock In, Stock Out or Wastage in Inventory, or reconcile a physical count.'], 422);
+        }
+
         $request->validate([
             'material_code'     => ['sometimes', 'nullable', 'string', 'max:20', 'regex:' . \App\Models\Material::CODE_REGEX, "unique:materials,material_code,{$id},material_id"],
             'material_name'     => 'sometimes|string|max:100',
             'category'          => 'sometimes|string|max:50',
             'unit'              => 'sometimes|string|max:20',
-            'quantity_in_stock' => 'sometimes|numeric|min:0',
             'reorder_threshold' => 'sometimes|numeric|min:0',
             'unit_cost'         => 'sometimes|numeric|min:0',
+            'ownership'         => 'sometimes|in:vfrb,client',
         ]);
+
+        $ledger = \App\Services\ClientMaterialService::ready();
+        if ($ledger && $request->input('ownership') === 'vfrb' && $material->ownership === 'client'
+            && DB::table('client_material_ledger')->where('material_id', $id)
+                ->selectRaw("SUM(CASE WHEN type = 'received' THEN qty ELSE -qty END) as bal")->value('bal') > 0.0001) {
+            return response()->json(['message' => "Orders still hold the client's {$material->material_name}. Return or use it before marking it VFRB-owned."], 422);
+        }
+
+        // Changing the unit after stock has moved would silently reinterpret every logged quantity.
+        if ($request->filled('unit') && $request->input('unit') !== $material->unit
+            && DB::table('inventory_logs')->where('material_id', $id)->exists()) {
+            return response()->json(['message' => "The unit can't change after stock movements are recorded ({$material->unit}). Create a new material for the new unit instead."], 422);
+        }
 
         $fields = collect($request->only([
             'material_code', 'material_name', 'category', 'unit',
-            'quantity_in_stock', 'reorder_threshold', 'unit_cost',
+            'reorder_threshold', 'unit_cost', ...($ledger ? ['ownership'] : []),
         ]))->filter(fn($v) => !is_null($v))->toArray();
 
         $fields['updated_at'] = now();
@@ -210,7 +257,7 @@ class InventoryController extends Controller
 
         $updated = DB::table('materials')->where('material_id', $id)->first();
 
-        if ($updated->quantity_in_stock <= $updated->reorder_threshold) {
+        if (!\App\Services\ClientMaterialService::isClientOwned($updated) && $updated->quantity_in_stock <= $updated->reorder_threshold) {
             $this->notifyLowStock($updated->material_id, $updated->material_name, $updated->quantity_in_stock, $updated->reorder_threshold, $updated->unit);
         }
 
@@ -291,6 +338,16 @@ class InventoryController extends Controller
         return $this->adjustStock($request, $id, $type);
     }
 
+    // ── GET /api/admin/inventory/client-stock ─────────────────────────────────
+    // Inventory.jsx "Client-supplied" tab: per open order, what the client owes, VFRB holds and must return.
+    public function clientStock(\App\Services\ClientMaterialService $svc)
+    {
+        return response()->json([
+            'ready'  => \App\Services\ClientMaterialService::ready(),
+            'orders' => $svc->openOrders(),
+        ]);
+    }
+
     // ── GET /api/admin/inventory/logs  ← FIX: new method, no $id parameter ───
     // Global transaction log for Inventory.jsx "Transaction Log" tab.
     // Returns the 50 most recent inventory_logs entries across all materials.
@@ -353,6 +410,9 @@ class InventoryController extends Controller
         $material = DB::table('materials')->where('material_id', $id)->first();
         if (!$material) {
             return response()->json(['message' => 'Material not found.'], 404);
+        }
+        if (\App\Services\ClientMaterialService::isClientOwned($material)) {
+            return response()->json(['message' => "{$material->material_name} is client-supplied, so it isn't VFRB stock. Record deliveries, wastage and returns on the order (Client materials)."], 422);
         }
 
         $request->validate([

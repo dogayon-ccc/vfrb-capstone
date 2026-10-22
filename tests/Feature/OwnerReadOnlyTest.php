@@ -3,8 +3,10 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Notifications\CustomResetPasswordNotification;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
 
@@ -81,5 +83,19 @@ class OwnerReadOnlyTest extends TestCase
             ->putJson("/api/admin/users/{$owner->user_id}", ['role' => 'manager'])->assertStatus(403);
         $this->assertSame('owner', DB::table('model_has_roles')->join('roles', 'roles.id', '=', 'model_has_roles.role_id')
             ->where('model_has_roles.model_id', $owner->user_id)->value('roles.name'));
+    }
+
+    public function test_a_new_customer_is_emailed_a_password_link_and_no_hash_is_returned(): void
+    {
+        Notification::fake();
+        Role::firstOrCreate(['name' => 'customer', 'guard_name' => 'web']);
+        $email = uniqid('cust') . '@gmail.com';
+        $this->actingAs($this->makeUser('manager'), 'sanctum')->postJson('/api/admin/users', [
+            'name' => 'New Customer', 'email' => $email, 'role' => 'customer',
+            'organization_name' => 'Test School', 'client_type' => 'school',
+            'password' => 'Secret-pass1!', 'password_confirmation' => 'Secret-pass1!',
+        ])->assertStatus(201)->assertJsonPath('password_link_sent', true)->assertJsonMissingPath('password');
+
+        Notification::assertSentTo(User::where('email', $email)->firstOrFail(), CustomResetPasswordNotification::class);
     }
 }

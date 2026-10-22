@@ -31,6 +31,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
+use App\Models\CustomerContact;
 use App\Models\User;
 use App\Notifications\CustomVerifyEmailNotification;
 use Illuminate\Auth\Events\Registered;
@@ -67,7 +68,8 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
-        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
+        // Retired staff accounts and deactivated admins cannot sign in.
+        if ($role === 'staff' || (in_array($role, ['manager', 'owner'], true) && is_null($user->email_verified_at))) {
             AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
@@ -101,13 +103,14 @@ class AuthController extends Controller
 
         $role = $this->getRoleName($user->user_id);
 
-        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
+        // Retired staff accounts and deactivated admins cannot sign in.
+        if ($role === 'staff' || (in_array($role, ['manager', 'owner'], true) && is_null($user->email_verified_at))) {
             AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
-        // Admin portal: only staff, manager and the read-only owner may log in here
-        if (!in_array($role, ['staff', 'manager', 'owner'])) {
+        // Admin portal: only manager and owner may log in here
+        if (!in_array($role, ['manager', 'owner'], true)) {
             AuditLog::record('login_failed', userId: $user->user_id);
             return response()->json([
                 'message' => 'This account does not have admin access.',
@@ -124,82 +127,6 @@ class AuthController extends Controller
     }
 
     // ── POST /api/register — Customer self-registration ───────────────────────
-    public function register(Request $request)
-    {
-        $request->merge(['username' => strtolower(trim((string) $request->input('username')))]);
-        $request->validate([
-            'name'                  => 'required|string|max:100',
-            'username'              => ['required', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
-            // rfc,dns: not just syntactically valid — the domain must actually
-            // have a mail-exchanger record, so 'a@b.com' with a domain that
-            // doesn't receive mail is rejected here, not after signup.
-            'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
-            'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
-            'contact_number'        => 'nullable|string|max:20',
-            'organization_name'     => 'required|string|max:100',
-            'client_type'           => 'required|in:corporate,school,government,medical,organization',
-            'business_registration_number' => ['nullable', 'string', 'max:30', 'regex:/^[A-Za-z0-9][A-Za-z0-9 \-]*$/'],
-        ], [
-            'email.unique' => 'An account with this email already exists.',
-            'username.unique' => 'That username is taken.',
-            'username.regex'  => 'Use 3-30 letters, numbers, dots or underscores.',
-            'email.email'  => 'Please enter a real, valid email address.',
-            'password.min' => 'Password must be at least 8 characters.',
-        ]);
-
-        $userId = DB::table('users')->insertGetId([
-            'name'              => $request->input('name'),
-            'username'          => $request->input('username'),
-            'email'             => $request->input('email'),
-            'password'          => Hash::make($request->input('password')),
-            'contact_number'    => $request->input('contact_number'),
-            'organization_name' => $request->input('organization_name'),
-            'business_registration_number' => $request->input('business_registration_number') ?: null,
-            'client_type'       => $request->input('client_type'),
-            'created_at'        => now(),
-            'updated_at'        => now(),
-        ], 'user_id');
-
-        // Assign customer role via Spatie model_has_roles
-        $customerRoleId = DB::table('roles')->where('name', 'customer')->value('id');
-        if ($customerRoleId) {
-            DB::table('model_has_roles')->insert([
-                'role_id'    => $customerRoleId,
-                'model_type' => 'App\\Models\\User',
-                'model_id'   => $userId,
-            ]);
-        }
-
-        $user  = DB::table('users')->where('user_id', $userId)->first();
-        $token = $this->createToken($userId);
-
-        // Real verification email (Aug 25 2026) — this was previously
-        // commented out (`// event(new Registered($user));`), left that way
-        // from before mail delivery was confirmed working end-to-end. Now
-        // that it's verified working (CustomResetPasswordNotification
-        // delivered successfully via Mailtrap), wiring in the real,
-        // already-built CustomVerifyEmailNotification directly rather than
-        // Laravel's generic Registered event — the generic event would
-        // fire Laravel's DEFAULT VerifyEmail notification, not this
-        // project's custom one with its own branding and signed-URL flow.
-        // notify() needs a real Eloquent model (for the Notifiable trait),
-        // not the plain stdClass $user above — hence the separate lookup.
-        // Wrapped in try/catch: registration itself already succeeded by
-        // this point; a mail hiccup must never turn a successful signup
-        // into a failed one.
-        try {
-            User::find($userId)?->notify(new CustomVerifyEmailNotification());
-        } catch (\Throwable $e) {
-            \Log::warning("CustomVerifyEmailNotification failed for new user #{$userId}: " . $e->getMessage());
-        }
-
-        return response()->json([
-            'token'   => $token,
-            'user'    => $this->formatUser($user, 'customer'),
-            'message' => 'Account created. Please verify your email.',
-        ], 201);
-    }
-
     // ── GET /auth/google/redirect — Customer Google Sign-In (start) ───────────
     // Real implementation, Aug 23 2026. Was fully decorative before this
     // (confirmed by investigation earlier this session — the frontend button
@@ -253,7 +180,7 @@ class AuthController extends Controller
             if ($role !== 'customer') {
                 AuditLog::record('login_failed', userId: $existing->user_id);
                 return redirect($frontend . '/login?google_error=' . urlencode(
-                    'This email belongs to a staff/manager account. Google sign-in here is for customers only — please sign in with your email and password instead.'
+                    'This email belongs to an Administrator account. Google sign-in here is for customers only — please sign in with your email and password instead.'
                 ));
             }
 
@@ -268,41 +195,16 @@ class AuthController extends Controller
                 $existing = DB::table('users')->where('user_id', $existing->user_id)->first();
             }
 
+            CustomerContact::linkVerifiedUser($existing->user_id, $email);
             $token   = $this->createToken($existing->user_id);
             $payload = $this->formatUser($existing, 'customer');
             AuditLog::record('login', userId: $existing->user_id);
         } else {
-            // New email — create a new customer account. Mirrors register()
-            // exactly: raw insert + manual model_has_roles assignment.
-            // Password is an unusable random string — this account can only
-            // ever be accessed via Google from now on, which is fine since
-            // Google already verified the email (so email_verified_at is
-            // set immediately, unlike the manual-registration path).
-            $userId = DB::table('users')->insertGetId([
-                'name'              => $googleUser->getName() ?: ($googleUser->getNickname() ?: 'Customer'),
-                'email'             => $email,
-                'password'          => Hash::make(Str::random(40)),
-                'google_id'         => $googleUser->getId(),
-                'avatar'            => $googleUser->getAvatar(),
-                'client_type'       => null,
-                'email_verified_at' => now(),
-                'created_at'        => now(),
-                'updated_at'        => now(),
-            ], 'user_id');
-
-            $customerRoleId = DB::table('roles')->where('name', 'customer')->value('id');
-            if ($customerRoleId) {
-                DB::table('model_has_roles')->insert([
-                    'role_id'    => $customerRoleId,
-                    'model_type' => 'App\\Models\\User',
-                    'model_id'   => $userId,
-                ]);
-            }
-
-            $newUser = DB::table('users')->where('user_id', $userId)->first();
-            $token   = $this->createToken($userId);
-            $payload = $this->formatUser($newUser, 'customer');
-            AuditLog::record('login', userId: $userId);
+            // Unknown email: accounts are provisioned by an Administrator, never created here.
+            AuditLog::record('login_failed');
+            return redirect($frontend . '/login?google_error=' . urlencode(
+                'No VFRB account uses this Google email. Ask VFRB to create your account first.'
+            ));
         }
 
         // Hand the token back to the SPA. A full-page redirect can't set an
@@ -443,6 +345,7 @@ class AuthController extends Controller
         }
 
         $user->forceFill(['email_verified_at' => now()])->save();
+        CustomerContact::linkVerifiedUser($user->user_id, $user->email);
 
         return redirect($frontendUrl . '/verify-email?status=verified');
     }

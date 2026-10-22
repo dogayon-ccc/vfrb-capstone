@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/ProductionController.php
 // VFRB Enterprise — Production Stage Advance Engine
 //
@@ -45,27 +46,30 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
-use App\Models\User;
-use App\Notifications\StageAdvancedNotification;
+use App\Models\Order;
+use App\Notifications\OrderStatusNotification;
+use App\Services\ClientMaterialService;
+use App\Services\MaterialShortageService;
 use App\Services\ProductionStageService;
+use App\Support\EmailNotify;
 use App\Support\StudioSet;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 class ProductionController extends Controller
 {
     // ── Stage sequence (locked — never reorder) ───────────────────────────────
     const STAGE_MAP = [
-        'confirmed'   => 'pattern',
-        'pattern'     => 'segregation',
+        'confirmed' => 'pattern',
+        'pattern' => 'segregation',
         'segregation' => 'cutting',
-        'cutting'     => 'sewing',
-        'sewing'      => 'qc',
-        'qc'          => 'pressing',
-        'pressing'    => 'packing',
-        'packing'     => 'for_delivery',
+        'cutting' => 'sewing',
+        'sewing' => 'qc',
+        'qc' => 'pressing',
+        'pressing' => 'packing',
+        'packing' => 'for_delivery',
     ];
 
     // QC pass threshold (80% per master prompt interview)
@@ -90,7 +94,7 @@ class ProductionController extends Controller
             )
             ->first();
 
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
@@ -100,31 +104,31 @@ class ProductionController extends Controller
             ->get()
             ->keyBy('stage');
 
-        $stageNames = array_keys(array_filter(self::STAGE_MAP, fn($v) => $v !== 'for_delivery'));
+        $stageNames = array_keys(array_filter(self::STAGE_MAP, fn ($v) => $v !== 'for_delivery'));
         // All 7 production stages
-        $productionStages = ['pattern','segregation','cutting','sewing','qc','pressing','packing'];
+        $productionStages = ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing'];
 
         $stages = [];
         foreach ($productionStages as $stage) {
             $row = $trackingRows[$stage] ?? null;
-            $qtyTarget    = $row->qty_target    ?? $order->quantity_ordered ?? 0;
+            $qtyTarget = $row->qty_target ?? $order->quantity_ordered ?? 0;
             $qtyCompleted = $row->qty_completed ?? 0;
-            $isComplete   = $qtyCompleted >= $qtyTarget && $qtyTarget > 0;
-            $pct          = $qtyTarget > 0 ? min(100, round($qtyCompleted / $qtyTarget * 100)) : 0;
+            $isComplete = $qtyCompleted >= $qtyTarget && $qtyTarget > 0;
+            $pct = $qtyTarget > 0 ? min(100, round($qtyCompleted / $qtyTarget * 100)) : 0;
 
             $stages[] = [
-                'stage'         => $stage,
-                'qty_target'    => (int) $qtyTarget,
+                'stage' => $stage,
+                'qty_target' => (int) $qtyTarget,
                 'qty_completed' => (int) $qtyCompleted,
-                'is_complete'   => $isComplete,
-                'pct'           => $pct,
-                'is_current'    => $order->status === $stage,
-                'tracking_id'   => $row->tracking_id ?? null,
+                'is_complete' => $isComplete,
+                'pct' => $pct,
+                'is_current' => $order->status === $stage,
+                'tracking_id' => $row->tracking_id ?? null,
             ];
         }
 
         return response()->json([
-            'order'  => $order,
+            'order' => $order,
             'stages' => $stages,
         ]);
     }
@@ -134,12 +138,12 @@ class ProductionController extends Controller
     public function advance(Request $request, $orderId)
     {
         $order = DB::table('orders')->where('order_id', $orderId)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
         $nextStage = self::STAGE_MAP[$order->status] ?? null;
-        if (!$nextStage) {
+        if (! $nextStage) {
             return response()->json(['message' => "Order status '{$order->status}' cannot be advanced."], 422);
         }
         if ($order->order_type !== 'subcontract' && empty($order->down_payment_received_at)) {
@@ -147,18 +151,18 @@ class ProductionController extends Controller
         }
 
         // Override skips the auto-advance timing, never the counts: the current stage and every earlier one must be complete.
-        $open = (new ProductionStageService())->incompleteStages((int) $orderId, $order->status, true);
+        $open = (new ProductionStageService)->incompleteStages((int) $orderId, $order->status, true);
         if ($open) {
             return response()->json([
-                'message'           => 'Finish logging output before advancing: ' . implode(', ', $open) . '.',
+                'message' => 'Finish logging output before advancing: '.implode(', ', $open).'.',
                 'incomplete_stages' => $open,
             ], 422);
         }
 
         // QC gate still applies for manager override too
-        if ($order->status === 'qc' && \App\Services\ProductionStageService::qcBlocked($order)) {
+        if ($order->status === 'qc' && ProductionStageService::qcBlocked($order)) {
             return response()->json([
-                'message'    => 'The latest QC checklist has not passed. Submit a passing QC checklist before advancing to Pressing.',
+                'message' => 'The latest QC checklist has not passed. Submit a passing QC checklist before advancing to Pressing.',
                 'qc_blocked' => true,
             ], 422);
         }
@@ -171,8 +175,19 @@ class ProductionController extends Controller
                 ->pluck('material_name');
             if ($missing->isNotEmpty()) {
                 return response()->json([
-                    'message'           => 'Enter material consumption in the Daily Output Log before advancing past Pattern. Missing: ' . $missing->implode(', ') . '.',
+                    'message' => 'Enter material consumption in the Daily Output Log before advancing past Pattern. Missing: '.$missing->implode(', ').'.',
                     'materials_blocked' => true,
+                ], 422);
+            }
+        }
+
+        // Override never skips client supply either: Cutting needs the client's materials on hand.
+        if (in_array('cutting', [$order->status, $nextStage], true)) {
+            $clientSvc = new ClientMaterialService;
+            if ($short = $clientSvc->shortages((int) $orderId)) {
+                return response()->json([
+                    'message' => $clientSvc->shortageMessage((int) $orderId, $short),
+                    'client_materials_short' => $short,
                 ], 422);
             }
         }
@@ -182,12 +197,12 @@ class ProductionController extends Controller
             DB::table('orders')
                 ->where('order_id', $orderId)
                 ->update([
-                    'status'     => $nextStage,
+                    'status' => $nextStage,
                     'updated_at' => now(),
                 ]);
             // Same Goods Issue as the auto-advance: leaving Cutting deducts the Pattern consumption once.
             if ($order->status === 'cutting') {
-                $deductionLog = (new ProductionStageService())->issueMaterialsToProduction((int) $orderId, (int) Auth::id())['log'];
+                $deductionLog = (new ProductionStageService)->issueMaterialsToProduction((int) $orderId, (int) Auth::id())['log'];
             }
         });
         AuditLog::record('order_status_changed', 'orders', (int) $orderId);
@@ -202,9 +217,9 @@ class ProductionController extends Controller
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'       => "Order #{$orderId} advanced to " . ProductionStageService::stageLabel($nextStage) . "."
-                . ($deductionLog ? ' ' . count($deductionLog) . ' material(s) deducted from stock.' : ''),
-            'new_stage'     => $nextStage,
+            'message' => "Order #{$orderId} advanced to ".ProductionStageService::stageLabel($nextStage).'.'
+                .($deductionLog ? ' '.count($deductionLog).' material(s) deducted from stock.' : ''),
+            'new_stage' => $nextStage,
             'deduction_log' => $deductionLog,
         ]);
     }
@@ -217,8 +232,8 @@ class ProductionController extends Controller
     private function notifyStageAdvance(int $orderId, int $customerId, string $fromStage, string $toStage): void
     {
         $fromLabel = ucfirst($fromStage);
-        $toLabel   = ucfirst($toStage);
-        $now       = now();
+        $toLabel = ucfirst($toStage);
+        $now = now();
 
         // Clients are not told about production stages: that is VFRB's decision (Oct 18 2026).
         // All managers
@@ -229,18 +244,17 @@ class ProductionController extends Controller
 
         foreach ($managers as $managerId) {
             DB::table('notifications')->insert([
-                'user_id'    => $managerId,
-                'order_id'   => $orderId,
-                'message'    => "Order #{$orderId} advanced: {$fromLabel} → {$toLabel}.",
-                'type'       => 'production',
-                'is_read'    => 0,
-                'date_sent'  => $now,
+                'user_id' => $managerId,
+                'order_id' => $orderId,
+                'message' => "Order #{$orderId} advanced: {$fromLabel} → {$toLabel}.",
+                'type' => 'production',
+                'is_read' => 0,
+                'date_sent' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
         }
     }
-
 
     // ── PATCH /api/admin/orders/{id}/confirm ──────────────────────────────────
     // Moves order from pending → confirmed. Manager only (enforced in route middleware).
@@ -285,7 +299,7 @@ class ProductionController extends Controller
     public function confirm(Request $request, $orderId)
     {
         $order = DB::table('orders')->where('order_id', $orderId)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
         if ($order->status !== 'pending') {
@@ -293,7 +307,7 @@ class ProductionController extends Controller
                 'message' => "Order is '{$order->status}' — only pending orders can be confirmed.",
             ], 422);
         }
-        if ($err = \App\Models\Order::promisedDateError($order->promised_date ?? null, $order->created_at)) {
+        if ($err = Order::promisedDateError($order->promised_date ?? null)) {
             return response()->json(['message' => $err], 422);
         }
 
@@ -304,25 +318,26 @@ class ProductionController extends Controller
 
         // Notify customer
         DB::table('notifications')->insert([
-            'user_id'    => $order->user_id,
-            'order_id'   => $orderId,
-            'message'    => "Your order #{$orderId} has been confirmed. Production will begin soon.",
-            'type'       => 'order',
-            'is_read'    => 0,
-            'date_sent'  => now(),
+            'user_id' => $order->user_id,
+            'order_id' => $orderId,
+            'message' => "Your order #{$orderId} has been confirmed. Production will begin soon.",
+            'type' => 'order',
+            'is_read' => 0,
+            'date_sent' => now(),
             'created_at' => now(),
             'updated_at' => now(),
         ]);
         // Same email as confirming from Order Detail (OrderController::adminUpdate).
-        \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\OrderStatusNotification((int) $orderId, 'confirmed'));
+        EmailNotify::users([$order->user_id], new OrderStatusNotification((int) $orderId, 'confirmed'));
 
         $setConfirmed = StudioSet::confirmPendingSiblings((int) $orderId);
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'          => "Order #{$orderId} confirmed." . ($setConfirmed ? ' Same uniform set: order #' . implode(', #', $setConfirmed) . ' confirmed too.' : ''),
-            'new_stage'        => 'confirmed',
-            'set_confirmed_ids'=> $setConfirmed,
+            'message' => "Order #{$orderId} confirmed.".($setConfirmed ? ' Same uniform set: order #'.implode(', #', $setConfirmed).' confirmed too.' : ''),
+            'new_stage' => 'confirmed',
+            'set_confirmed_ids' => $setConfirmed,
+            'material_warnings' => app(MaterialShortageService::class)->forOrder((int) $orderId),
         ]);
     }
 }

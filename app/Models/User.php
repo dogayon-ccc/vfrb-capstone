@@ -44,12 +44,7 @@ class User extends Authenticatable
     // Raw query: Spatie hasRole() returns false for Sanctum-authenticated users (guard mismatch).
     public function isManager(): bool
     {
-        return \Illuminate\Support\Facades\DB::table('model_has_roles as mr')
-            ->join('roles as r', 'r.id', '=', 'mr.role_id')
-            ->where('mr.model_type', self::class)
-            ->where('mr.model_id', $this->user_id)
-            ->where('r.name', 'manager')
-            ->exists();
+        return \App\Http\Middleware\RoleMiddleware::roleFor($this->user_id) === 'manager';
     }
 
     public function hasJobAccess(string $area): bool

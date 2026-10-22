@@ -234,9 +234,11 @@ class OutputLogController extends Controller
     }
 
     // ── GET /api/admin/output-logs ────────────────────────────────────────────
-    // List all output logs (optionally filtered by order or stage)
+    // List all output logs (optionally filtered by order, stage or log_date)
     public function index(Request $request)
     {
+        $request->validate(['date' => 'nullable|date_format:Y-m-d']);
+        $date    = $request->input('date');
         $orderId = $request->input('order_id');
         $stage   = $request->input('stage');
         $perPage = (int) $request->input('per_page', 20);
@@ -257,6 +259,10 @@ class OutputLogController extends Controller
 
         if ($stage) {
             $query->where('daily_output_logs.stage', $stage);
+        }
+
+        if ($date) {
+            $query->whereDate('daily_output_logs.log_date', $date);
         }
 
         return response()->json(

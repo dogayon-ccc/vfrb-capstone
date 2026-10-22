@@ -195,6 +195,20 @@ class ProductionStageService
                 ];
             }
 
+            // Client-supplied materials must be on hand before any cutting is logged.
+            if ($stage === 'cutting' && !$alreadyComplete) {
+                $clientSvc = new ClientMaterialService;
+                if ($short = $clientSvc->shortages($orderId)) {
+                    return [
+                        'error'                  => true,
+                        'status'                 => 422,
+                        'message'                => $clientSvc->shortageMessage($orderId, $short),
+                        'current_stage'          => $order->status,
+                        'client_materials_short' => $short,
+                    ];
+                }
+            }
+
             if (!$alreadyComplete && ($limit = $this->sizeLimitError($orderId, $stage, [
                 'xs' => $qtyXs, 's' => $qtyS, 'm' => $qtyM, 'l' => $qtyL,
                 'xl' => $qtyXl, 'xxl' => $qtyXxl, 'xxxl' => $qtyXxxl, 'custom' => $qtyCustom,
@@ -514,7 +528,7 @@ class ProductionStageService
             $mine = DB::table('daily_output_logs')->where('order_id', $orderId)->where('stage', 'sewing')->where('logged_by', $staffId);
             $sewn = (int) (clone $mine)->sum("qty_{$col}");
             if ($sewn <= 0) {
-                return ['error' => true, 'status' => 403, 'message' => "Only the staff who sewed size {$size} pieces on order #{$orderId} can report a defect on them."];
+                return ['error' => true, 'status' => 403, 'message' => "Only the Administrator who sewed size {$size} pieces on order #{$orderId} can report a defect on them."];
             }
             $left = max(0, $sewn - (int) (clone $mine)->where('defect_size', $size)->sum('defect_count'));
             if ($qty > $left) {
@@ -682,14 +696,12 @@ class ProductionStageService
             return ['log' => [], 'low_stock' => []];
         }
 
-        // Interview transcript (Ma'am Fe, Apr 30 2026), Bahagi D: for
-        // subcontract jobs "Ang tela, supply ng OTG yan. Ang sinulid, garter
-        // at iba pa, ino-order namin sa ibang supplier" — OTG supplies the
-        // fabric; VFRB only sources thread/notions itself for those orders.
-        // Without this, every subcontract order silently drained fabric
-        // from VFRB's own materials.quantity_in_stock for stock VFRB never
-        // actually bought for that job.
-        $orderType = DB::table('orders')->where('order_id', $orderId)->value('order_type');
+        // VFRB is a subcontractor: client-owned materials (materials.ownership = 'client',
+        // e.g. OTG fabric) are issued from that order's client ledger, never from VFRB stock.
+        // Before the ledger migration runs, the old rule applies: subcontract fabric is client-owned, unlogged.
+        $clientSvc = new ClientMaterialService;
+        $ledger    = ClientMaterialService::ready();
+        $orderType = $ledger ? null : DB::table('orders')->where('order_id', $orderId)->value('order_type');
 
         foreach ($recs as $rec) {
             $material = DB::table('materials')
@@ -702,13 +714,12 @@ class ProductionStageService
             // Consumption staff entered at Pattern — never a computed estimate.
             $qty = (float) $rec->actual_qty_issued;
 
-            // Client-supplied fabric on a subcontract order — record the
-            // usage on the recommendation for the audit trail, but don't
-            // touch VFRB's own stock or the inventory log; VFRB never held
-            // this fabric. Non-fabric categories (thread, elastic, trims)
-            // still deduct normally even on a subcontract order — those are
-            // the materials VFRB sources itself regardless of order type.
-            $isClientSuppliedFabric = $orderType === 'subcontract' && $material->category === 'Fabric';
+            $isClientSupplied = $ledger
+                ? $material->ownership === 'client'
+                : $orderType === 'subcontract' && $material->category === 'Fabric';
+            if ($qty > 0 && $isClientSupplied && $ledger) {
+                $clientSvc->insert($orderId, (int) $material->material_id, 'issued', $qty, "Issued at Cutting — Order #{$orderId}", $actorId);
+            }
 
             $before = (float) $material->quantity_in_stock;
             $after  = max(0, $before - $qty); // clamped — a typo'd qty_used can't push stock negative
@@ -717,7 +728,7 @@ class ProductionStageService
             // actually used. A confirmed-zero usage still gets recorded on
             // the recommendation itself (below) so the audit trail shows it
             // was reviewed, not just skipped.
-            if ($qty > 0 && !$isClientSuppliedFabric) {
+            if ($qty > 0 && !$isClientSupplied) {
                 DB::table('materials')
                     ->where('material_id', $material->material_id)
                     ->update(['quantity_in_stock' => $after, 'updated_at' => now()]);
@@ -742,11 +753,9 @@ class ProductionStageService
                     'updated_at'        => now(),
                 ]);
 
-            // Client-supplied fabric never leaves this method's $log/$lowStock
-            // — it never touched VFRB's stock, so it has no "before/after" or
-            // low-stock state to report, and DailyOutputLog.jsx's "N
-            // material(s) deducted from stock" count would be wrong if it did.
-            if ($isClientSuppliedFabric) {
+            // Client-supplied material went to the client ledger, not VFRB stock, so it has no
+            // before/after or low-stock state here (DailyOutputLog.jsx counts VFRB deductions only).
+            if ($isClientSupplied) {
                 continue;
             }
 
@@ -779,14 +788,18 @@ class ProductionStageService
         $order = DB::table('orders')->where('order_id', $orderId)->first();
 
         if (!DB::table('delivery_tracking')->where('order_id', $orderId)->exists()) {
-            $address = DB::table('users')->where('user_id', $order->user_id)->value('address');
+            // The order's own address wins; the account address is only a fallback.
+            $address = trim((string) ($order->delivery_address ?? '')) ?: DB::table('users')->where('user_id', $order->user_id)->value('address');
+            $eta = ! empty($order->promised_date) && $order->promised_date >= now()->toDateString()
+                ? $order->promised_date
+                : now()->addDays(3)->toDateString();
 
             DB::table('delivery_tracking')->insert([
                 'order_id'                => $orderId,
                 'delivery_method'         => 'vfrb_deliver',
                 'delivery_status'         => 'preparing',
                 'delivery_address'        => $address ?? 'Address pending',
-                'estimated_delivery_date' => now()->addDays(3)->toDateString(),
+                'estimated_delivery_date' => $eta,
                 'updated_by'              => $actorId,
                 'notes'                   => 'Auto-created when packing started.',
                 'created_at'              => now(),

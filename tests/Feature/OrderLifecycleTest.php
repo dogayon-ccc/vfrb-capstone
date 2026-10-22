@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\User;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
@@ -29,7 +30,7 @@ class OrderLifecycleTest extends TestCase
             'colors' => ['body' => '#1e3a5f', 'collar' => '#c8a96e', 'sleeve' => '#1e3a5f', 'pocket' => '#c8a96e', 'tipping' => null],
             'patterns' => ['body' => 'solid', 'collar' => 'solid', 'sleeve' => 'solid', 'pocket' => 'solid'],
             'frontOverlays' => [['type' => 'i-text', 'text' => 'FRONT-MARK']],
-            'backOverlays'  => [['type' => 'i-text', 'text' => 'BACK-MARK']],
+            'backOverlays' => [['type' => 'i-text', 'text' => 'BACK-MARK']],
             'previewPng' => 'data:image/png;base64,AAAA',
         ];
     }
@@ -53,11 +54,12 @@ class OrderLifecycleTest extends TestCase
     {
         Storage::fake('public');
         $this->actAs(5);
-        $res  = $this->post('/api/customer/orders', $this->payload(['user_id' => 6, 'status' => 'completed']), ['Accept' => 'application/json']);
+        $this->post('/api/customer/orders', $this->payload(['status' => 'completed']), ['Accept' => 'application/json'])->assertStatus(422);
+        $res = $this->post('/api/customer/orders', $this->payload(['user_id' => 6]), ['Accept' => 'application/json']);
         $res->assertStatus(201);
         $id = $res->json('order.order_id');
 
-        // Client-supplied owner/status are ignored.
+        // Client-supplied status is rejected; client-supplied owner is ignored.
         $row = DB::table('orders')->where('order_id', $id)->first();
         $this->assertSame(5, (int) $row->user_id);
         $this->assertSame('pending', $row->status);
@@ -159,10 +161,89 @@ class OrderLifecycleTest extends TestCase
         $this->actAs(5);
         $h = ['Accept' => 'application/json'];
         $this->post('/api/customer/orders', $this->payload(['quantity_ordered' => 99, 'sizes' => json_encode(['S' => 99])]), $h)->assertStatus(422);
-        $this->post('/api/customer/orders', $this->payload(['deadline' => '2020-01-01']), $h)->assertStatus(422);
+        $this->post('/api/customer/orders', $this->payload(['preferred_date' => '2020-01-01']), $h)->assertStatus(422);
         $this->post('/api/customer/orders', $this->payload(['design_ref_file' => UploadedFile::fake()->create('shell.php', 5, 'application/x-php')]), $h)->assertStatus(422);
         $this->post('/api/customer/orders', $this->payload(['design_preview_file' => UploadedFile::fake()->create('x.html', 5, 'text/html')]), $h)->assertStatus(422);
         $this->assertSame([], Storage::disk('public')->allFiles());
+    }
+
+    public function test_preferred_date_is_optional_but_never_a_rush_date(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $h = ['Accept' => 'application/json'];
+
+        $id = $this->post('/api/customer/orders', $this->payload(), $h)->assertStatus(201)->json('order.order_id');
+        $this->assertNull(DB::table('orders')->where('order_id', $id)->value('target_delivery_date'));
+        Cache::lock('order-submit:5')->forceRelease();
+
+        foreach (['preferred_date', 'deadline'] as $field) {
+            $this->post('/api/customer/orders', $this->payload([$field => now()->addDays(6)->toDateString()]), $h)
+                ->assertStatus(422)->assertJsonValidationErrors($field);
+        }
+        $preferred = now()->addDays(7)->toDateString();
+        $id = $this->post('/api/customer/orders', $this->payload(['preferred_date' => $preferred]), $h)->assertStatus(201)->json('order.order_id');
+        $this->assertSame($preferred, substr((string) DB::table('orders')->where('order_id', $id)->value('target_delivery_date'), 0, 10));
+    }
+
+    public function test_customer_cannot_set_promised_date_total_status_or_down_payment(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $before = DB::table('orders')->count();
+        foreach (['promised_date' => now()->addDays(30)->toDateString(), 'agreed_total' => 1, 'total' => 1, 'status' => 'confirmed', 'down_payment_amount' => 1] as $field => $value) {
+            $this->post('/api/customer/orders', $this->payload([$field => $value]), ['Accept' => 'application/json'])
+                ->assertStatus(422)->assertJsonValidationErrors($field);
+        }
+        $this->assertSame($before, DB::table('orders')->count());
+    }
+
+    public function test_vfrb_promises_a_date_at_least_seven_days_after_confirmation_and_the_customer_accepts(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $id = $this->post('/api/customer/orders', $this->payload(['preferred_date' => now()->addDays(10)->toDateString()]), ['Accept' => 'application/json'])
+            ->assertStatus(201)->json('order.order_id');
+
+        $this->actAs(1);
+        $note = ['total' => 25000, 'proposal_note' => 'Customer supplies the fabric; threads and logo patch from VFRB.'];
+        $this->postJson("/api/admin/orders/{$id}/propose", $note + ['promised_date' => now()->addDays(6)->toDateString()])
+            ->assertStatus(422)->assertJsonValidationErrors('promised_date');
+        $this->patchJson("/api/admin/orders/{$id}", ['status' => 'confirmed'])->assertStatus(422);
+
+        // No promised_date sent: VFRB keeps the customer's preferred date.
+        $this->postJson("/api/admin/orders/{$id}/propose", $note)->assertOk()->assertJsonPath('order.proposal_status', 'pending');
+        $row = DB::table('orders')->where('order_id', $id)->first();
+        $this->assertSame(now()->addDays(10)->toDateString(), substr((string) $row->promised_date, 0, 10));
+        $this->assertEquals(25000, (float) $row->agreed_total);
+
+        // Four days later the date is under 7 days from confirmation, so accepting is refused.
+        $this->travel(4)->days();
+        $this->actAs(5);
+        $this->postJson("/api/customer/orders/{$id}/accept")->assertStatus(422);
+        $this->assertSame('pending', DB::table('orders')->where('order_id', $id)->value('status'));
+
+        $this->actAs(1);
+        $this->postJson("/api/admin/orders/{$id}/propose", $note + ['promised_date' => now()->addDays(7)->toDateString()])->assertOk();
+        $this->actAs(5);
+        $this->postJson("/api/customer/orders/{$id}/accept")->assertOk();
+        $row = DB::table('orders')->where('order_id', $id)->first();
+        $this->assertSame(['confirmed', 'accepted'], [$row->status, $row->proposal_status]);
+    }
+
+    public function test_customer_declines_a_proposal_with_a_reason(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $id = $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
+        $this->actAs(1);
+        $this->postJson("/api/admin/orders/{$id}/propose", ['total' => 25000, 'proposal_note' => 'Earliest feasible date with current workers.'])->assertOk();
+
+        $this->actAs(5);
+        $this->postJson("/api/customer/orders/{$id}/decline", [])->assertStatus(422)->assertJsonValidationErrors('reason');
+        $this->postJson("/api/customer/orders/{$id}/decline", ['reason' => 'Too late for our event.'])->assertOk();
+        $row = DB::table('orders')->where('order_id', $id)->first();
+        $this->assertSame(['pending', 'declined'], [$row->status, $row->proposal_status]);
     }
 
     public function test_draft_is_per_user_and_survives_until_deleted(): void

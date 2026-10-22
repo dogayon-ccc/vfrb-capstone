@@ -44,7 +44,7 @@ class MessageController extends Controller
                 'users.name as customer_name',
                 'users.organization_name',
                 DB::raw('MAX(order_messages.sent_at) as last_message_at'),
-                DB::raw('COUNT(CASE WHEN order_messages.is_read = 0 AND order_messages.sender_id != ' . Auth::id() . ' THEN 1 END) as unread_count'),
+                DB::raw('COUNT(CASE WHEN order_messages.is_read = 0 AND order_messages.sender_id = orders.user_id THEN 1 END) as unread_count'),
                 DB::raw('(SELECT body FROM order_messages om2 WHERE om2.order_id = orders.order_id ORDER BY om2.sent_at DESC LIMIT 1) as last_body')
             )
             ->groupBy(
@@ -61,10 +61,11 @@ class MessageController extends Controller
     // {id} = order_id. Returns all messages for that order thread.
     public function adminShow(int $orderId)
     {
-        // Mark messages from customer as read
+        // Only the customer's messages; other staff replies stay unread for the customer.
+        $customerId = DB::table('orders')->where('order_id', $orderId)->value('user_id');
         DB::table('order_messages')
             ->where('order_id', $orderId)
-            ->where('sender_id', '!=', Auth::id())
+            ->where('sender_id', $customerId)
             ->where('is_read', 0)
             ->update(['is_read' => 1, 'updated_at' => now()]);
 
@@ -140,6 +141,18 @@ class MessageController extends Controller
         return response()->json(['message' => $msg], 201);
     }
 
+    // ── GET /api/admin/messages/unread-count ──────────────────────────────────
+    // Unread customer messages across all threads, shared by the Administrator side.
+    public function adminUnreadCount()
+    {
+        $threads = DB::table('order_messages')
+            ->join('orders', 'order_messages.order_id', '=', 'orders.order_id')
+            ->whereColumn('order_messages.sender_id', 'orders.user_id')
+            ->where('order_messages.is_read', 0);
+
+        return response()->json($this->unreadCountPayload($threads));
+    }
+
     // ── GET /api/customer/messages ────────────────────────────────────────────
     // customer/Messages.jsx thread list (customer's own orders with messages)
     public function customerIndex(Request $request)
@@ -162,6 +175,7 @@ class MessageController extends Controller
             ->groupBy('orders.order_id', 'orders.garment_type', 'orders.status', 'orders.color')
             ->orderByDesc('last_message_at')
             ->paginate($perPage);
+        $threads->getCollection()->transform(fn ($t) => OrderController::clientStatus($t));
 
         return response()->json($threads);
     }
@@ -207,6 +221,19 @@ class MessageController extends Controller
             ->each(fn ($m) => $m->sender_avatar = UploadDisk::url($m->sender_avatar));
 
         return response()->json(['messages' => $messages]);
+    }
+
+    // ── GET /api/customer/messages/unread-count ───────────────────────────────
+    // Unread staff messages on the customer's own orders only.
+    public function customerUnreadCount()
+    {
+        $threads = DB::table('order_messages')
+            ->join('orders', 'order_messages.order_id', '=', 'orders.order_id')
+            ->where('orders.user_id', Auth::id())
+            ->whereColumn('order_messages.sender_id', '!=', 'orders.user_id')
+            ->where('order_messages.is_read', 0);
+
+        return response()->json($this->unreadCountPayload($threads));
     }
 
     // ── POST /api/customer/messages ───────────────────────────────────────────
@@ -271,5 +298,17 @@ class MessageController extends Controller
             "New customer message on order #{$orderId}", ["A customer sent a message about order #{$orderId}."], 'Open messages', "/admin/messages?order={$orderId}"));
 
         return response()->json(['message' => $msg], 201);
+    }
+
+    private function unreadCountPayload(\Illuminate\Database\Query\Builder $unreadMessages): array
+    {
+        $threads = $unreadMessages
+            ->groupBy('order_messages.order_id')
+            ->orderBy('order_messages.order_id')
+            ->select('order_messages.order_id', DB::raw('COUNT(*) as unread_count'))
+            ->get()
+            ->map(fn ($t) => ['order_id' => (int) $t->order_id, 'unread_count' => (int) $t->unread_count]);
+
+        return ['unread_count' => $threads->sum('unread_count'), 'threads' => $threads->values()];
     }
 }

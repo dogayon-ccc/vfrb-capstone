@@ -44,12 +44,12 @@ class AdminReportController extends Controller
         // 5-minute cache — invalidated by order/transaction writes
         return Cache::remember('admin_reports_index', 300, function () {
 
-            // ── Order status counts ───────────────────────────────────────────
-            $statusCounts = DB::table('orders')
-                ->selectRaw('status, COUNT(*) as cnt')
+            // ── Order status counts + pipeline: one query (each Supabase round trip ~130 ms) ──
+            $pipelineRaw = DB::table('orders')
+                ->selectRaw('status, COUNT(*) as count, SUM(quantity_ordered) as total_pieces')
                 ->groupBy('status')
-                ->pluck('cnt', 'status')
-                ->toArray();
+                ->get();
+            $statusCounts = $pipelineRaw->pluck('count', 'status')->map(fn ($c) => (int) $c)->toArray();
 
             $totalOrders     = array_sum($statusCounts);
             $completedOrders = $statusCounts['completed'] ?? 0;
@@ -71,14 +71,14 @@ class AdminReportController extends Controller
                 ? round($totalRevenue / $completedOrders, 2)
                 : 0.0;
 
-            // ── Inventory ─────────────────────────────────────────────────────
-            $lowStock   = DB::table('materials')
-                ->whereRaw('quantity_in_stock <= reorder_threshold')
-                ->count();
-            $invTotal   = DB::table('materials')->count();
-            $invValue   = (float) DB::table('materials')
-                ->selectRaw('SUM(quantity_in_stock * unit_cost) as val')
-                ->value('val');
+            // ── Inventory: VFRB-owned stock only (client-supplied material is not VFRB's to count or value) ──
+            $inv = DB::table('materials')
+                ->when(\App\Services\ClientMaterialService::ready(), fn ($q) => $q->where('ownership', 'vfrb'))
+                ->selectRaw('COUNT(*) as total, SUM(quantity_in_stock * unit_cost) as val, SUM(CASE WHEN quantity_in_stock <= reorder_threshold THEN 1 ELSE 0 END) as low')
+                ->first();
+            $lowStock = (int) ($inv->low ?? 0);
+            $invTotal = (int) ($inv->total ?? 0);
+            $invValue = (float) ($inv->val ?? 0);
 
             // ── 6-month order trends ──────────────────────────────────────────
             $trends = DB::table('orders')
@@ -107,12 +107,7 @@ class AdminReportController extends Controller
                 ->groupBy('order_type')
                 ->get();
 
-            // ── Pipeline snapshot per stage ───────────────────────────────────
-            $pipelineRaw = DB::table('orders')
-                ->selectRaw('status, COUNT(*) as count, SUM(quantity_ordered) as total_pieces')
-                ->groupBy('status')
-                ->get();
-
+            // ── Pipeline snapshot per stage (from the status query above) ─────
             $pipeline = [];
             foreach ($pipelineRaw as $p) {
                 $pipeline[$p->status] = [
@@ -231,7 +226,7 @@ class AdminReportController extends Controller
 
         // Low-stock materials (no active order join needed — just threshold check)
         DB::table('materials')
-            ->whereRaw('quantity_in_stock <= reorder_threshold')
+            ->whereRaw(\App\Services\ClientMaterialService::lowStockSql())
             ->orderByRaw('(quantity_in_stock / NULLIF(reorder_threshold,0)) ASC')
             ->get()
             ->each(function ($m) use (&$alerts) {

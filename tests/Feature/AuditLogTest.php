@@ -43,7 +43,7 @@ class AuditLogTest extends TestCase
 
     public function test_login_failed_login_and_logout_are_recorded(): void
     {
-        $user = $this->makeUser('staff');
+        $user = $this->makeUser('manager');
 
         $this->postJson('/api/login', ['login' => $user->email, 'password' => 'wrong-pass'])->assertStatus(401);
         $this->postJson('/api/login', ['login' => 'nobody-' . uniqid() . '@example.test', 'password' => 'x'])->assertStatus(401);

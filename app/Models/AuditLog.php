@@ -15,6 +15,7 @@ class AuditLog extends Model
     const UPDATED_AT = null; // schema has created_at only
 
     protected $table = 'audit_logs';
+
     protected $primaryKey = 'audit_id';
 
     protected $fillable = ['user_id', 'action', 'entity', 'entity_id', 'ip'];
@@ -22,9 +23,12 @@ class AuditLog extends Model
     public const ACTIONS = [
         'login', 'logout', 'login_failed',
         'order_status_changed', 'order_total_set',
+        'order_proposal_sent', 'order_proposal_declined', 'order_down_payment_received',
         'invoice_issued', 'payment_receipt_created',
         'inventory_adjusted',
+        'client_material_received', 'client_material_wastage', 'client_material_returned',
         'user_created', 'user_role_changed', 'user_deactivated', 'user_activated',
+        'customer_contact_created',
         'settings_updated',
     ];
 
@@ -41,23 +45,23 @@ class AuditLog extends Model
      */
     public static function record(string $action, ?string $entity = null, ?int $entityId = null, ?int $userId = null): void
     {
-        if (!in_array($action, self::ACTIONS, true)) {
+        if (! in_array($action, self::ACTIONS, true)) {
             throw new LogicException("Unknown audit action: {$action}");
         }
 
         $row = [
-            'user_id'   => $userId ?? Auth::id(),
-            'action'    => $action,
-            'entity'    => $entity,
+            'user_id' => $userId ?? Auth::id(),
+            'action' => $action,
+            'entity' => $entity,
             'entity_id' => $entityId,
-            'ip'        => request()->ip(),
+            'ip' => request()->ip(),
         ];
 
         DB::afterCommit(function () use ($row) {
             try {
                 self::create($row);
             } catch (\Throwable $e) {
-                Log::warning("Audit log write failed ({$row['action']}): " . $e->getMessage());
+                Log::warning("Audit log write failed ({$row['action']}): ".$e->getMessage());
             }
         });
     }

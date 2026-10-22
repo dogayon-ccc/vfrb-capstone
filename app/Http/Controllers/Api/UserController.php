@@ -26,12 +26,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Middleware\RoleMiddleware;
 use App\Models\AuditLog;
 use App\Support\Sql;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Validation\Rules\Password as PasswordRule;
 
 class UserController extends Controller
@@ -43,35 +45,24 @@ class UserController extends Controller
         $perPage = (int) $request->input('per_page', 20);
         $search  = $request->input('search', '');
 
-        // Only show staff, manager and owner accounts
-        $staffRoleIds = DB::table('roles')
-            ->whereIn('name', ['staff', 'manager', 'owner'])
-            ->pluck('id');
-
-        $userIds = DB::table('model_has_roles')
-            ->whereIn('role_id', $staffRoleIds)
-            ->pluck('model_id');
-
+        // Staff, manager and owner accounts with their role in one join (was a role query per user).
         $query = DB::table('users')
-            ->whereIn('user_id', $userIds)
-            ->select('user_id', 'name', 'email', 'contact_number', 'job_function',
-                     'organization_name', 'email_verified_at', 'created_at', 'updated_at');
+            ->join('model_has_roles as mr', 'mr.model_id', '=', 'users.user_id')
+            ->join('roles as r', 'r.id', '=', 'mr.role_id')
+            ->whereIn('r.name', ['staff', 'manager', 'owner'])
+            ->select('users.user_id', 'users.name', 'users.email', 'users.contact_number', 'users.job_function',
+                     'users.organization_name', 'users.email_verified_at', 'users.created_at', 'users.updated_at', 'r.name as role');
 
         if ($search) {
             $query->where(function ($q) use ($search) {
-                $q->where('name', Sql::like(), "%{$search}%")
-                  ->orWhere('email', Sql::like(), "%{$search}%");
+                $q->where('users.name', Sql::like(), "%{$search}%")
+                  ->orWhere('users.email', Sql::like(), "%{$search}%");
             });
         }
 
-        $users = $query->orderBy('name')->paginate($perPage);
+        $users = $query->orderBy('users.name')->paginate($perPage);
 
-        // Inject role into each user
         $users->getCollection()->transform(function ($user) {
-            $user->role = DB::table('model_has_roles')
-                ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
-                ->where('model_has_roles.model_id', $user->user_id)
-                ->value('roles.name') ?? 'staff';
             $user->is_active = !is_null($user->email_verified_at);
             return $user;
         });
@@ -149,22 +140,33 @@ class UserController extends Controller
     }
 
     // ── POST /api/admin/users  AND  POST /api/admin/users/create ─────────────
-    // UserManagement.jsx CreateModal sends: { name, email, password, password_confirmation, role, contact_number }
-    // Register.jsx also uses /api/admin/users/create (same method, same route)
+    // UserManagement.jsx CreateModal sends: { name, email, password, password_confirmation, role, contact_number,
+    // and for customers: username, organization_name, client_type }. Customers cannot self-register; they are created here.
     public function adminCreate(Request $request)
     {
+        $isCustomer = $request->input('role') === 'customer';
+        if ($isCustomer) {
+            $request->merge(['username' => strtolower(trim((string) $request->input('username'))) ?: null]);
+        }
         $request->validate([
             'name'                  => 'required|string|max:100',
             'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
             'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
-            'role' => 'required|in:staff,manager,owner|exists:roles,name', // customers self-register only; owner is the read-only admin role
-            'job_function'          => 'nullable|in:general,production,inventory,sales',
+            'role'                  => 'required|in:customer,manager,owner|exists:roles,name',
             'contact_number'        => 'nullable|string|max:20',
-            'organization_name'     => 'nullable|string|max:100',
+            'organization_name'     => ($isCustomer ? 'required' : 'nullable') . '|string|max:100',
+            'username'              => ['nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
+            'client_type'           => ($isCustomer ? 'required' : 'nullable') . '|in:corporate,school,government,medical,organization',
         ], [
-            'email.unique' => 'An account with this email already exists.',
-            'email.email'  => 'Please enter a real, valid email address.',
+            'email.unique'    => 'An account with this email already exists.',
+            'email.email'     => 'Please enter a real, valid email address.',
+            'username.unique' => 'That username is taken.',
+            'username.regex'  => 'Use 3-30 letters, numbers, dots or underscores.',
         ]);
+
+        if (!$this->canManageRole($request, $request->input('role'))) {
+            return response()->json(['message' => 'Only an Administrator (Manager) can create Administrator or Owner accounts.'], 403);
+        }
 
         $userId = DB::table('users')->insertGetId([
             'name'              => $request->input('name'),
@@ -172,12 +174,11 @@ class UserController extends Controller
             'password'          => Hash::make($request->input('password')),
             'contact_number'    => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
-            // job_function is only meaningful for staff — managers/customers stay 'general'
-            'job_function'      => $request->input('role') === 'staff'
-                ? ($request->input('job_function') ?? 'general')
-                : 'general',
-            // Auto-verify staff/manager/owner accounts (manager creates them directly)
-            'email_verified_at' => in_array($request->input('role'), ['staff', 'manager', 'owner']) ? now() : null,
+            'username'          => $isCustomer ? $request->input('username') : null,
+            'client_type'       => $isCustomer ? $request->input('client_type') : null,
+            'job_function'      => 'general',
+            // Accounts created by an Administrator or the Owner are granted access immediately.
+            'email_verified_at' => now(),
             'created_at'        => now(),
             'updated_at'        => now(),
         ], 'user_id');
@@ -195,10 +196,22 @@ class UserController extends Controller
             ]);
         }
 
+        RoleMiddleware::forgetRole($userId);
         AuditLog::record('user_created', 'users', $userId);
 
         $user       = DB::table('users')->where('user_id', $userId)->first();
         $user->role = $request->input('role');
+        unset($user->password, $user->remember_token);
+
+        // New customers get an emailed link to set their own password; the typed one still works until then.
+        if ($isCustomer) {
+            try {
+                $user->password_link_sent = Password::sendResetLink(['email' => $user->email]) === Password::RESET_LINK_SENT;
+            } catch (\Throwable $e) {
+                report($e);
+                $user->password_link_sent = false;
+            }
+        }
 
         return response()->json($user, 201);
     }
@@ -215,22 +228,23 @@ class UserController extends Controller
         }
         // A customer account is never promoted into staff, manager or owner from here.
         if (!$this->isAdminAccount($id)) {
-            return response()->json(['message' => 'Only staff, manager and owner accounts can be edited here.'], 422);
+            return response()->json(['message' => 'Only Administrator and Owner accounts can be edited here.'], 422);
         }
 
+        $oldRole = $this->roleName($id);
+        if (!$this->canManageRole($request, $oldRole)) {
+            return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
+        }
         $request->validate([
-            'role'         => 'required|in:staff,manager,owner|exists:roles,name',
-            'job_function' => 'nullable|in:general,production,inventory,sales',
+            'role' => 'required|in:manager,owner|exists:roles,name',
         ]);
 
         $newRole = $request->input('role');
-        $oldRole = DB::table('model_has_roles')
-            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
-            ->where('model_has_roles.model_type', 'App\\Models\\User')
-            ->where('model_has_roles.model_id', $id)
-            ->value('roles.name');
+        if (!$this->canManageRole($request, $newRole)) {
+            return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
+        }
         DB::table('users')->where('user_id', $id)->update([
-            'job_function' => $newRole === 'staff' ? ($request->input('job_function') ?? 'general') : 'general',
+            'job_function' => 'general',
             'updated_at'   => now(),
         ]);
 
@@ -238,6 +252,7 @@ class UserController extends Controller
         if ($roleId) {
             DB::table('model_has_roles')->where('model_id', $id)->where('model_type', 'App\\Models\\User')->delete();
             DB::table('model_has_roles')->insert(['role_id' => $roleId, 'model_type' => 'App\\Models\\User', 'model_id' => $id]);
+            RoleMiddleware::forgetRole($id);
             if ($oldRole !== $newRole) {
                 AuditLog::record('user_role_changed', 'users', $id);
             }
@@ -253,7 +268,7 @@ class UserController extends Controller
     // UserManagement.jsx activate/deactivate a user
     // Implementation: null out email_verified_at to "deactivate", set it to now() to "activate"
     // (The frontend just toggles — it checks is_active flag)
-    public function adminToggle(int $id)
+    public function adminToggle(Request $request, int $id)
     {
         $user = DB::table('users')->where('user_id', $id)->first();
         if (!$user) {
@@ -266,7 +281,10 @@ class UserController extends Controller
         }
 
         if (!$this->isAdminAccount($id)) {
-            return response()->json(['message' => 'Only staff, manager and owner accounts can be activated or deactivated.'], 422);
+            return response()->json(['message' => 'Only Administrator and Owner accounts can be activated or deactivated.'], 422);
+        }
+        if (!$this->canManageRole($request, $this->roleName($id))) {
+            return response()->json(['message' => 'Only an Administrator (Manager) can activate or deactivate Administrator or Owner accounts.'], 403);
         }
 
         // Toggle: if email_verified_at is set → clear it (deactivate); if null → set it (activate)
@@ -381,6 +399,21 @@ class UserController extends Controller
             ]);
 
         return response()->json(['message' => 'Password changed successfully.']);
+    }
+
+    private function roleName(int $id): ?string
+    {
+        return DB::table('model_has_roles')
+            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('model_has_roles.model_type', 'App\\Models\\User')
+            ->where('model_has_roles.model_id', $id)
+            ->value('roles.name');
+    }
+
+    // The Owner is read-only (OwnerReadOnly), so the Administrator (Manager) manages every account.
+    private function canManageRole(Request $request, ?string $role): bool
+    {
+        return RoleMiddleware::roleOf($request) === 'manager';
     }
 
     private function isAdminAccount(int $id): bool

@@ -85,7 +85,10 @@ class AIController extends Controller
 
         try {
             // The AI only sees catalog rows VFRB approved for this garment; every reply is re-validated against that list.
-            $catalog = \App\Models\Material::all();
+            // Client-owned stock is never suggested, not even to the subcontract client who owns it.
+            $catalog = \App\Models\Material::query()
+                ->when(\App\Services\ClientMaterialService::ready(), fn ($q) => $q->where('ownership', 'vfrb'))
+                ->get();
             if ($catalog->isEmpty()) {
                 return $this->failRecommendation($order, 'No materials catalog configured yet.', 422);
             }
@@ -334,7 +337,7 @@ class AIController extends Controller
         }
 
         return response()->json([
-            'message'            => 'Materials accepted. VFRB staff have been notified.',
+            'message'            => 'Materials accepted. VFRB Administrators have been notified.',
             'materials_accepted' => true,
             'already_accepted'   => false,
         ]);
@@ -619,7 +622,7 @@ PROMPT;
         $prev      = $now->copy()->subMonthNoOverflow();
         $lastMonth = Order::whereMonth('created_at', $prev->month)->whereYear('created_at', $prev->year)->count();
         $revenue   = \App\Models\SalesTransaction::whereMonth('created_at', $now->month)->whereYear('created_at', $now->year)->sum('amount_paid');
-        $lowStock  = \App\Models\Material::whereRaw('quantity_in_stock <= reorder_threshold')->count();
+        $lowStock  = \App\Models\Material::whereRaw(\App\Services\ClientMaterialService::lowStockSql())->count();
         $pending   = Order::where('status', 'pending')->count();
         $accepted  = Order::where('ai_recommendation_status', 'accepted')->count();
         $trend     = $lastMonth > 0 ? round((($thisMonth - $lastMonth) / $lastMonth) * 100, 1) : 0;
@@ -796,7 +799,8 @@ Materials VFRB staff approved for this garment on earlier orders (good candidate
 
 Pick the materials from this list that this design needs (for example the main fabric, the matching thread, and any
 trim, closure, or lining the design's features call for), and give one short plain-language reason for each,
-based on the garment's use category, fit, and features.
+based on the garment's use category, fit, and features. Write each reason for the customer, not a technician.
+Match the use: scrubs and medical wear need breathable, wash-resistant fabric; school uniforms need durable, easy-care fabric; corporate wear needs a clean drape.
 Choose a main fabric that matches the body colour, or one made in any colour, before a fabric that is only close to it.
 When a zone (collar, cuffs, pocket, a stripe or check colour) has a different colour, add a fabric or thread in that colour if the list has one.
 Prefer materials in stock; suggest an OUT OF STOCK one only when nothing in stock fits, and say in its reason that it is out of stock.

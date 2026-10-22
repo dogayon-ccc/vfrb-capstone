@@ -111,7 +111,7 @@ class SalesTransactionController extends Controller
 
         // The order total is a manager decision; staff record payments against it.
         if ($request->filled('amount_total') && !$request->user()->isManager()) {
-            return response()->json(['message' => 'Only a manager can set the order total.'], 403);
+            return response()->json(['message' => 'Only an Administrator can set the order total.'], 403);
         }
 
         $newAmountPaid = (float) $request->input('amount_paid');

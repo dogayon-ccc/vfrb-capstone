@@ -71,7 +71,7 @@ class Material extends Model
     // ── Scopes ────────────────────────────────────────────────────────────────
     public function scopeLowStock($q)
     {
-        return $q->whereRaw('quantity_in_stock <= reorder_threshold');
+        return $q->whereRaw(\App\Services\ClientMaterialService::lowStockSql());
     }
 
     public function scopeByCategory($q, string $cat)
@@ -82,7 +82,7 @@ class Material extends Model
     // ── Accessors ─────────────────────────────────────────────────────────────
     public function getIsLowStockAttribute(): bool
     {
-        return $this->quantity_in_stock <= $this->reorder_threshold;
+        return !\App\Services\ClientMaterialService::isClientOwned($this) && $this->quantity_in_stock <= $this->reorder_threshold;
     }
 
     public function getImageUrlAttribute(): ?string

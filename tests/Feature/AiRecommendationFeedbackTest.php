@@ -54,7 +54,7 @@ class AiRecommendationFeedbackTest extends TestCase
     public function test_staff_and_managers_can_record_feedback_and_it_persists(): void
     {
         $rec = $this->pastLine(2, null);
-        Sanctum::actingAs($this->makeUser('staff'), ['*']);
+        Sanctum::actingAs($this->makeUser('manager'), ['*']);
         $this->patchJson("/api/admin/material-recommendations/{$rec}/feedback", ['verdict' => 'reject', 'note' => 'Too heavy for this polo.'])
             ->assertOk()->assertJsonPath('data.staff_feedback', 'reject');
         $row = DB::table('material_recommendations')->where('rec_id', $rec)->first();
@@ -73,6 +73,7 @@ class AiRecommendationFeedbackTest extends TestCase
         $rec = $this->pastLine(2, null);
         Sanctum::actingAs(User::findOrFail(5), ['*']);
         $this->patchJson("/api/admin/material-recommendations/{$rec}/feedback", ['verdict' => 'reject'])->assertStatus(403);
+
         Sanctum::actingAs($this->makeUser('owner'), ['*']);
         $this->patchJson("/api/admin/material-recommendations/{$rec}/feedback", ['verdict' => 'reject'])->assertStatus(403);
         $this->assertNull(DB::table('material_recommendations')->where('rec_id', $rec)->value('staff_feedback'));
@@ -81,7 +82,7 @@ class AiRecommendationFeedbackTest extends TestCase
     public function test_feedback_notes_never_carry_quantities_or_prices_and_verdicts_are_validated(): void
     {
         $rec = $this->pastLine(2, null);
-        Sanctum::actingAs($this->makeUser('staff'), ['*']);
+        Sanctum::actingAs($this->makeUser('manager'), ['*']);
         $this->patchJson("/api/admin/material-recommendations/{$rec}/feedback", ['verdict' => 'reject', 'note' => 'Use 3 yards at PHP 200'])->assertStatus(422);
         $this->patchJson("/api/admin/material-recommendations/{$rec}/feedback", ['verdict' => 'maybe'])->assertStatus(422);
         $this->patchJson('/api/admin/material-recommendations/99999999/feedback', ['verdict' => 'accept'])->assertStatus(404);

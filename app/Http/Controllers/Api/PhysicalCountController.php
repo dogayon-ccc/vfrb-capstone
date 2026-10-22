@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
+use App\Services\ClientMaterialService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -58,8 +59,11 @@ class PhysicalCountController extends Controller
 
         $material = DB::table('materials')
             ->where('material_id', $request->input('material_id'))
-            ->select('material_id', 'quantity_in_stock', 'material_name')
             ->first();
+        // Counts reconcile VFRB stock; client-supplied material is balanced per order instead.
+        if (ClientMaterialService::isClientOwned($material)) {
+            return response()->json(['message' => "{$material->material_name} is client-supplied. Check it against the order's Client materials balance, not a stock count."], 422);
+        }
 
         $systemQty  = (float) $material->quantity_in_stock;
         $countedQty = (float) $request->input('counted_qty');
@@ -173,28 +177,40 @@ class PhysicalCountController extends Controller
             ->where('reconciled', 0)
             ->count();
 
-        // Overdue: materials not counted in last 30 days
+        // Weekly count, every Monday: due = VFRB-owned material not counted since this week's Monday.
+        $weekStart = self::countWeekStart();
         $overdueMaterials = DB::table('materials')
-            ->leftJoin('physical_count_logs', function ($join) {
+            ->leftJoin('physical_count_logs', function ($join) use ($weekStart) {
                 $join->on('materials.material_id', '=', 'physical_count_logs.material_id')
-                     ->where('physical_count_logs.count_date', '>=', now()->subDays(30)->toDateString());
+                     ->where('physical_count_logs.count_date', '>=', $weekStart);
             })
             ->whereNull('physical_count_logs.count_id')
+            ->when(ClientMaterialService::ready(), fn ($q) => $q->where('materials.ownership', 'vfrb'))
             ->select('materials.material_id', 'materials.material_name')
+            ->distinct()
             ->get();
 
         return response()->json([
             'flagged_variances'   => $flaggedVariances,
             'unreconciled_counts' => $unreconciledCounts,
             'overdue_materials'   => $overdueMaterials,
+            'count_week_start'    => $weekStart,
+            'count_day'           => 'Monday',
         ]);
     }
 
+    // Monday of the current count week (VFRB counts weekly, every Monday).
+    public static function countWeekStart(): string
+    {
+        return now()->startOfWeek(\Carbon\Carbon::MONDAY)->toDateString();
+    }
+
     // ── GET /api/admin/physical-counts/sheet ─────────────────────────────────────
-    // PhysicalCount.jsx printable count sheet: all materials with system_qty
+    // PhysicalCount.jsx printable count sheet: VFRB-owned materials with system_qty
     public function sheet()
     {
         $countSheet = DB::table('materials')
+            ->when(ClientMaterialService::ready(), fn ($q) => $q->where('materials.ownership', 'vfrb'))
             ->leftJoin('physical_count_logs', function ($join) {
                 $join->on('materials.material_id', '=', 'physical_count_logs.material_id')
                      ->whereRaw('physical_count_logs.count_id = (

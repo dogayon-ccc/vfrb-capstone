@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/OrderController.php
 // VFRB Enterprise — Orders CRUD
 //
@@ -31,19 +32,35 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Support\FileUrl;
-use App\Support\StudioSet;
 use App\Models\AuditLog;
+use App\Models\MaterialRecommendation;
+use App\Models\Order;
 use App\Models\User;
 use App\Notifications\OrderStatusNotification;
+use App\Notifications\PortalMailNotification;
+use App\Services\BillingService;
+use App\Services\MaterialShortageService;
+use App\Support\EmailNotify;
+use App\Support\FileUrl;
+use App\Support\StudioSet;
+use App\Support\UploadDisk;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 
 class OrderController extends Controller
 {
+    // Direct/bulk: 80% down at confirmation; subcontract: paid in full after delivery.
+    private static function paymentTermsFor(string $orderType): string
+    {
+        return $orderType === 'subcontract' ? 'full' : 'down';
+    }
+
     // Mirrors SettingsController::logoDisk() exactly (Task B, Aug 31 2026) —
     // design_ref_file uploads were hardcoded to the local 'public' disk,
     // which Railway wipes on every redeploy (per DEPLOYMENT.md's ephemeral-
@@ -52,7 +69,7 @@ class OrderController extends Controller
     // as the last resort — same three-way priority, not a new mechanism.
     private function designRefDisk(): string
     {
-        return \App\Support\UploadDisk::name();
+        return UploadDisk::name();
     }
 
     // Resolves a stored design_ref_file path into a real, loadable URL on
@@ -63,9 +80,10 @@ class OrderController extends Controller
     // consistent with the existing convention rather than a new one.
     private function resolveDesignRefUrl($rawPath): ?string
     {
-        if (!$rawPath) {
+        if (! $rawPath) {
             return null;
         }
+
         return FileUrl::for($this->designRefDisk(), $rawPath);
     }
 
@@ -75,7 +93,7 @@ class OrderController extends Controller
     // showing them as having no design.
     private function resolveDesignPreviewUrl($order): ?string
     {
-        if (!empty($order->client_design_preview_file)) {
+        if (! empty($order->client_design_preview_file)) {
             return $this->resolveDesignRefUrl($order->client_design_preview_file);
         }
 
@@ -91,8 +109,8 @@ class OrderController extends Controller
     // Supports ?status=active to filter in-production orders
     public function customerIndex(Request $request)
     {
-        $userId  = Auth::id();
-        $status  = $request->input('status', '');
+        $userId = Auth::id();
+        $status = $request->input('status', '');
         $perPage = (int) $request->input('per_page', 20);
 
         $query = DB::table('orders')
@@ -108,16 +126,26 @@ class OrderController extends Controller
         }
 
         $page = $query->paginate($perPage);
-        $page->getCollection()->transform(fn ($o) => self::clientStatus($o));
+        $page->getCollection()->transform(fn ($o) => self::clientMoney(self::clientStatus($o)));
+
         return response()->json($page);
     }
 
-    // Clients see only pending / confirmed / completed / cancelled; production stages stay inside VFRB.
-    private static function clientStatus($o)
+    // Clients see pending / confirmed / in_production / completed / cancelled; stage names stay inside VFRB.
+    public static function clientStatus($o)
     {
-        if (isset($o->status) && !in_array($o->status, ['pending', 'confirmed', 'completed', 'cancelled'], true)) {
-            $o->status = 'confirmed';
+        if (isset($o->status) && ! in_array($o->status, ['pending', 'confirmed', 'completed', 'cancelled'], true)) {
+            $o->status = 'in_production';
         }
+
+        return $o;
+    }
+
+    // Customers never receive money fields; prices are agreed off-platform and the proposal is date-only.
+    private static function clientMoney($o)
+    {
+        unset($o->agreed_total, $o->discount_rate, $o->down_payment_amount);
+
         return $o;
     }
 
@@ -130,11 +158,11 @@ class OrderController extends Controller
             ->where('user_id', Auth::id())
             ->first();
 
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
-        $order = self::clientStatus($order);
+        $order = self::clientMoney(self::clientStatus($order));
 
         // Decode studio_config JSON for the frontend color zones
         if ($order->studio_config) {
@@ -149,17 +177,18 @@ class OrderController extends Controller
         // SettingsController does for logo_url.
         $order->client_design_ref_file = $this->resolveDesignRefUrl($order->client_design_ref_file);
         $order->design_preview_url = $this->resolveDesignPreviewUrl($order);
+        $order->design_3d_snapshot_url = $this->resolveDesignRefUrl($order->client_design_3d_snapshot_file ?? null);
 
         // Attach AI recommendations
         $recommendations = DB::table('material_recommendations')
             ->where('order_id', $id)
             ->orderBy('display_order')
-            ->get(\App\Models\MaterialRecommendation::CUSTOMER_COLUMNS);
+            ->get(MaterialRecommendation::CUSTOMER_COLUMNS);
 
         return response()->json([
-            'order'            => $order,
-            'recommendations'  => $recommendations,
-            'production_stages'=> (object) [], // hidden from clients
+            'order' => $order,
+            'recommendations' => $recommendations,
+            'production_stages' => (object) [], // hidden from clients
         ]);
     }
 
@@ -190,40 +219,42 @@ class OrderController extends Controller
         // it. A blank/omitted deadline is still fine (nullable); a
         // supplied one must be in the future.
         // Date, total, status and down payment are VFRB's to set (via propose / down-payment), never the customer's.
-        $blocked = array_values(array_filter(\App\Models\Order::MANAGER_ONLY_FIELDS, fn ($f) => $request->has($f)));
+        $blocked = array_values(array_filter(Order::MANAGER_ONLY_FIELDS, fn ($f) => $request->has($f)));
         if ($blocked) {
             return response()->json([
-                'message' => 'Only VFRB can set the promised date, total, status or down payment. Remove: ' . implode(', ', $blocked) . '.',
-                'errors'  => array_fill_keys($blocked, ['Only VFRB can set this field.']),
+                'message' => 'Only VFRB can set the promised date, total, status or down payment. Remove: '.implode(', ', $blocked).'.',
+                'errors' => array_fill_keys($blocked, ['Only VFRB can set this field.']),
             ], 422);
         }
 
         $request->validate([
-            'garment_type'     => 'required|string|max:60',
+            'garment_type' => 'required|string|max:60',
             'quantity_ordered' => 'required|integer|min:100',
-            'fabric_type'      => 'nullable|string|max:100',
+            'fabric_type' => 'nullable|string|max:100',
             'delivery_address' => 'nullable|string|max:1000',
-            'color'            => 'nullable|string|max:50',
-            'order_type'       => 'nullable|in:direct,subcontract,bulk', // no rush orders
-            'sizing_type'      => 'nullable|in:standard,custom',
-            'collar_type'      => 'nullable|string|max:60',
-            'sleeve_type'      => 'nullable|string|max:60',
-            'pocket_type'      => 'nullable|string|max:60',
-            // The customer picks the delivery date; it must be at least min_promised_days (1 week) away.
-            'deadline'         => 'required|date|after_or_equal:' . now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
-            'po_reference'     => 'nullable|string|max:100',
+            'color' => 'nullable|string|max:50',
+            'order_type' => 'nullable|in:direct,subcontract,bulk', // no rush orders
+            'sizing_type' => 'nullable|in:standard,custom',
+            'collar_type' => 'nullable|string|max:60',
+            'sleeve_type' => 'nullable|string|max:60',
+            'pocket_type' => 'nullable|string|max:60',
+            // Optional preferred date (deadline is the old name); VFRB confirms or changes it via propose.
+            'preferred_date' => 'nullable|date|after_or_equal:'.now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
+            'deadline' => 'nullable|date|after_or_equal:'.now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
+            'po_reference' => 'nullable|string|max:100',
             'client_design_notes' => 'required|string|min:15',
-            'studio_config'    => 'nullable|string',    // JSON string from canvas
-            'design_ref_file'  => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:5120',
+            'studio_config' => 'nullable|string',    // JSON string from canvas
+            'design_ref_file' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:5120',
             'design_preview_file' => 'nullable|file|mimes:png|max:5120',
-            'sizes'            => 'nullable|string',    // JSON string
-            'measurements'     => 'nullable|string',    // JSON string
-            'custom_qty'       => 'nullable|integer|min:0',
+            'design_3d_snapshot_file' => 'nullable|file|mimes:png|max:5120',
+            'sizes' => 'nullable|string',    // JSON string
+            'measurements' => 'nullable|string',    // JSON string
+            'custom_qty' => 'nullable|integer|min:0',
         ], [
             'quantity_ordered.min' => 'The minimum order is 100 pieces.',
-            'order_type.in'        => 'VFRB does not take rush orders. Choose direct, subcontract or bulk.',
-            'deadline.required'    => 'Choose the date you need the order delivered.',
-            'deadline.after_or_equal' => 'The delivery date must be at least ' . (int) config('vfrb.min_promised_days', 7) . ' days from today.',
+            'order_type.in' => 'VFRB does not take rush orders. Choose direct, subcontract or bulk.',
+            'preferred_date.after_or_equal' => 'The preferred date must be at least '.(int) config('vfrb.min_promised_days', 7).' days from today. VFRB does not take rush orders.',
+            'deadline.after_or_equal' => 'The preferred date must be at least '.(int) config('vfrb.min_promised_days', 7).' days from today. VFRB does not take rush orders.',
         ]);
 
         // Idempotency guard (Sept 22 2026): nothing previously stopped a
@@ -247,10 +278,10 @@ class OrderController extends Controller
         // A uniform set submits one order per piece back to back, so each piece of a set gets its own lock;
         // a retry of the same piece still hits the same key.
         $setPart = json_decode((string) $request->input('studio_config', ''), true)['uniformSet'] ?? null;
-        $setKey  = is_array($setPart) && is_string($setPart['id'] ?? null) && in_array($setPart['role'] ?? null, ['top', 'bottom'], true)
-            ? ':set:' . substr(preg_replace('/[^A-Za-z0-9-]/', '', $setPart['id']), 0, 64) . ':' . $setPart['role'] : '';
-        $lock = Cache::lock('order-submit:' . Auth::id() . $setKey, 10);
-        if (!$lock->get()) {
+        $setKey = is_array($setPart) && is_string($setPart['id'] ?? null) && in_array($setPart['role'] ?? null, ['top', 'bottom'], true)
+            ? ':set:'.substr(preg_replace('/[^A-Za-z0-9-]/', '', $setPart['id']), 0, 64).':'.$setPart['role'] : '';
+        $lock = Cache::lock('order-submit:'.Auth::id().$setKey, 10);
+        if (! $lock->get()) {
             return response()->json([
                 'message' => 'Your previous order submission is still being processed. Please wait a moment before trying again.',
             ], 409);
@@ -263,17 +294,18 @@ class OrderController extends Controller
         $sizesInput = json_decode($request->input('sizes', '{}'), true);
 
         $invalid = null;
-        if (!is_array($sizesInput) || collect($sizesInput)->contains(fn ($q) => !is_numeric($q) || $q < 0 || (int) $q != $q)) {
+        if (! is_array($sizesInput) || collect($sizesInput)->contains(fn ($q) => ! is_numeric($q) || $q < 0 || (int) $q != $q)) {
             $invalid = 'Size breakdown must be a JSON object of whole, non-negative quantities.';
-        } elseif ($request->filled('studio_config') && !is_array(json_decode($request->input('studio_config'), true))) {
+        } elseif ($request->filled('studio_config') && ! is_array(json_decode($request->input('studio_config'), true))) {
             $invalid = 'The saved design could not be read. Re-open it in Design Studio and try again.';
         }
         if ($invalid) {
             $lock->release();
+
             return response()->json(['message' => $invalid], 422);
         }
 
-        if ($sizingType === 'standard' && !empty($sizesInput)) {
+        if ($sizingType === 'standard' && ! empty($sizesInput)) {
             $sizeSum = array_sum(array_map('intval', $sizesInput));
             $qtyOrdered = (int) $request->input('quantity_ordered');
             if ($sizeSum !== $qtyOrdered) {
@@ -282,6 +314,7 @@ class OrderController extends Controller
                 // the 10-second debounce window just to fix a number and
                 // resubmit right away.
                 $lock->release();
+
                 return response()->json([
                     'message' => "Size breakdown ({$sizeSum} pcs) doesn't match the total quantity ordered ({$qtyOrdered} pcs). They must add up exactly.",
                     'size_sum' => $sizeSum,
@@ -304,6 +337,13 @@ class OrderController extends Controller
                 ->store('design-previews', $this->designRefDisk());
         }
 
+        // Optional 3D (approx.) snapshot the customer took in the wizard; skipped until migration 2026_10_22_000001 has run.
+        $snapshotFilePath = null;
+        if ($request->hasFile('design_3d_snapshot_file') && Schema::hasColumn('orders', 'client_design_3d_snapshot_file')) {
+            $snapshotFilePath = $request->file('design_3d_snapshot_file')
+                ->store('design-previews', $this->designRefDisk());
+        }
+
         // Parse studio_config JSON string
         $studioConfig = null;
         if ($request->filled('studio_config')) {
@@ -323,31 +363,32 @@ class OrderController extends Controller
         // transaction makes it all-or-nothing: any exception rolls every
         // insert back and the customer sees the failure instead of a "sent"
         // order nobody in the system knows exists.
-        $orderId = DB::transaction(function () use ($request, $refFilePath, $previewFilePath, $studioConfig, $sizesInput) {
-            $orderId = DB::table('orders')->insertGetId([
-                'user_id'               => Auth::id(),
-                'garment_type'          => $request->input('garment_type'),
-                'collar_type'           => $request->input('collar_type'),
-                'sleeve_type'           => $request->input('sleeve_type'),
-                'pocket_type'           => $request->input('pocket_type'),
-                'color'                 => $request->input('color'),
-                'quantity_ordered'      => (int) $request->input('quantity_ordered'),
-                'order_type'            => 'direct', // customers place direct orders; a manager marks subcontract ones
-                'sizing_type'           => $request->input('sizing_type', 'standard'),
-                'target_delivery_date'  => $request->input('deadline'),
-                'fabric_type'           => $request->input('fabric_type'),
-                'delivery_address'      => $request->input('delivery_address'),
-                'po_reference'          => $request->input('po_reference'),
-                'client_design_notes'   => $request->input('client_design_notes'),
-                'client_design_ref_file'=> $refFilePath,
+        $orderId = DB::transaction(function () use ($request, $refFilePath, $previewFilePath, $snapshotFilePath, $studioConfig, $sizesInput) {
+            $orderId = DB::table('orders')->insertGetId(($snapshotFilePath ? ['client_design_3d_snapshot_file' => $snapshotFilePath] : []) + [
+                'user_id' => Auth::id(),
+                'garment_type' => $request->input('garment_type'),
+                'collar_type' => $request->input('collar_type'),
+                'sleeve_type' => $request->input('sleeve_type'),
+                'pocket_type' => $request->input('pocket_type'),
+                'color' => $request->input('color'),
+                'quantity_ordered' => (int) $request->input('quantity_ordered'),
+                'order_type' => 'direct', // customers place direct orders; a manager marks subcontract ones
+                'payment_terms' => self::paymentTermsFor('direct'),
+                'sizing_type' => $request->input('sizing_type', 'standard'),
+                'target_delivery_date' => $request->input('preferred_date') ?: $request->input('deadline'),
+                'fabric_type' => $request->input('fabric_type'),
+                'delivery_address' => $request->input('delivery_address'),
+                'po_reference' => $request->input('po_reference'),
+                'client_design_notes' => $request->input('client_design_notes'),
+                'client_design_ref_file' => $refFilePath,
                 'client_design_preview_file' => $previewFilePath,
-                'studio_config'         => $studioConfig,
-                'status'                => 'pending',
+                'studio_config' => $studioConfig,
+                'status' => 'pending',
                 'ai_recommendation_status' => 'not_requested',
-                'qc_required'           => 1,
-                'notes'                 => $request->input('special_notes'),
-                'created_at'            => now(),
-                'updated_at'            => now(),
+                'qc_required' => 1,
+                'notes' => $request->input('special_notes'),
+                'created_at' => now(),
+                'updated_at' => now(),
             ], 'order_id');
 
             // Store per-size quantities in measurements table if provided
@@ -357,13 +398,13 @@ class OrderController extends Controller
                 foreach ($sizes as $sizeLabel => $qty) {
                     if ($qty > 0) {
                         DB::table('measurements')->insert([
-                            'order_id'    => $orderId,
-                            'user_id'     => Auth::id(),
-                            'type'        => 'standard',
-                            'size_label'  => strtoupper($sizeLabel),
-                            'qty'         => (int) $qty,
-                            'created_at'  => now(),
-                            'updated_at'  => now(),
+                            'order_id' => $orderId,
+                            'user_id' => Auth::id(),
+                            'type' => 'standard',
+                            'size_label' => strtoupper($sizeLabel),
+                            'qty' => (int) $qty,
+                            'created_at' => now(),
+                            'updated_at' => now(),
                         ]);
                     }
                 }
@@ -371,25 +412,25 @@ class OrderController extends Controller
 
             // Store custom measurements if sizing_type = custom
             $customMeasurements = json_decode($request->input('measurements', '{}'), true);
-            if (is_array($customMeasurements) && !empty($customMeasurements)) {
+            if (is_array($customMeasurements) && ! empty($customMeasurements)) {
                 DB::table('measurements')->insert([
-                    'order_id'      => $orderId,
-                    'user_id'       => Auth::id(),
-                    'type'          => 'custom',
-                    'size_label'    => 'custom',
-                    'chest'         => $customMeasurements['chest']        ?? null,
-                    'waist'         => $customMeasurements['waist']        ?? null,
-                    'hip'           => $customMeasurements['hip']          ?? null,
-                    'sleeve_length' => $customMeasurements['sleeve_length']?? null,
-                    'neck'          => $customMeasurements['neck']         ?? null,
-                    'created_at'    => now(),
-                    'updated_at'    => now(),
+                    'order_id' => $orderId,
+                    'user_id' => Auth::id(),
+                    'type' => 'custom',
+                    'size_label' => 'custom',
+                    'chest' => $customMeasurements['chest'] ?? null,
+                    'waist' => $customMeasurements['waist'] ?? null,
+                    'hip' => $customMeasurements['hip'] ?? null,
+                    'sleeve_length' => $customMeasurements['sleeve_length'] ?? null,
+                    'neck' => $customMeasurements['neck'] ?? null,
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
             }
 
             // Notify managers of new order (in-app now, email after the response)
             $managerIds = $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
-            \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+            EmailNotify::users($managerIds, new PortalMailNotification(
                 "New VFRB order #{$orderId}", ["A customer submitted order #{$orderId}. It is waiting for review and confirmation."],
                 'Review order', "/admin/orders/{$orderId}"));
 
@@ -403,7 +444,7 @@ class OrderController extends Controller
             $order->studio_config = json_decode($order->studio_config, true);
         }
 
-        return response()->json(['order' => $order], 201);
+        return response()->json(['order' => self::clientMoney(self::clientStatus($order))], 201);
     }
 
     // ── GET /api/customer/dashboard ───────────────────────────────────────────
@@ -423,8 +464,8 @@ class OrderController extends Controller
             ->count();
 
         return response()->json([
-            'total_orders'     => $totalOrders,
-            'in_production'    => $inProduction,
+            'total_orders' => $totalOrders,
+            'in_production' => $inProduction,
             'completed_orders' => $completedOrders,
         ]);
     }
@@ -434,7 +475,7 @@ class OrderController extends Controller
     // Supports ?status=qc, ?status=pattern,cutting,sewing, ?per_page=50
     public function adminIndex(Request $request)
     {
-        $status  = $request->input('status', '');
+        $status = $request->input('status', '');
         $perPage = min((int) $request->input('per_page', 20), 100);
 
         $query = DB::table('orders')
@@ -450,7 +491,7 @@ class OrderController extends Controller
 
         if ($status) {
             if ($status === 'production') {
-                $statuses = ['pattern','segregation','cutting','sewing','qc','pressing','packing'];
+                $statuses = ['pattern', 'segregation', 'cutting', 'sewing', 'qc', 'pressing', 'packing'];
             } else {
                 $statuses = array_map('trim', explode(',', $status));
             }
@@ -471,6 +512,7 @@ class OrderController extends Controller
             $o->design_preview_url = $o->client_design_preview_file
                 ? $this->resolveDesignRefUrl($o->client_design_preview_file)
                 : null;
+
             return $o;
         });
 
@@ -486,7 +528,7 @@ class OrderController extends Controller
     public function adminShow(int $id)
     {
         $order = $this->buildOrderDetail($id);
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
@@ -494,9 +536,87 @@ class OrderController extends Controller
             ->where('order_id', $id)->get()->keyBy('stage');
 
         return response()->json([
-            'order'    => $order,
+            'order' => $order,
             'tracking' => $tracking,
         ]);
+    }
+
+    // GET /api/admin/orders/{id}/spec-sheet: price-free design spec sheet built from studio_config.
+    public function adminSpecSheet(int $id)
+    {
+        return $this->specSheet($id, null);
+    }
+
+    // GET /api/customer/orders/{id}/spec-sheet: same sheet, own orders only.
+    public function customerSpecSheet(int $id)
+    {
+        return $this->specSheet($id, Auth::id());
+    }
+
+    private function specSheet(int $id, ?int $userId)
+    {
+        $order = DB::table('orders')
+            ->join('users', 'orders.user_id', '=', 'users.user_id')
+            ->where('orders.order_id', $id)
+            ->when($userId, fn ($q) => $q->where('orders.user_id', $userId))
+            ->first(['orders.order_id', 'orders.status', 'orders.quantity_ordered', 'orders.sizing_type', 'orders.studio_config',
+                'orders.client_design_preview_file', 'users.name as customer_name', 'users.organization_name']);
+        if (! $order) {
+            return response()->json(['message' => 'Order not found.'], 404);
+        }
+        $cfg = json_decode($order->studio_config ?? '', true);
+        if (! is_array($cfg)) {
+            return response()->json(['message' => 'This order has no Design Studio design.'], 422);
+        }
+
+        $layers = [];
+        foreach (['Front' => 'frontOverlays', 'Back' => 'backOverlays'] as $face => $key) {
+            foreach ((array) ($cfg[$key] ?? []) as $o) {
+                if (! is_array($o) || empty($o['__logo']) && empty($o['__text'])) continue;
+                $sx = (float) ($o['scaleX'] ?? 1);
+                $sy = (float) ($o['scaleY'] ?? 1);
+                $layers[] = [
+                    'face'  => $face,
+                    'kind'  => ! empty($o['__text']) ? 'Text' : (! empty($o['__artwork']) ? 'Artwork' : 'Logo'),
+                    'text'  => $o['text'] ?? null,
+                    'font'  => $o['fontFamily'] ?? null,
+                    'fill'  => is_string($o['fill'] ?? null) ? strtoupper($o['fill']) : null,
+                    'x'     => round((float) ($o['left'] ?? 0)),
+                    'y'     => round((float) ($o['top'] ?? 0)),
+                    'w'     => round((float) ($o['width'] ?? 0) * $sx),
+                    'h'     => round((float) ($o['height'] ?? 0) * $sy),
+                    'angle' => round((float) ($o['angle'] ?? 0)),
+                    'img'   => empty($o['__text']) ? $this->pdfImage($o['src'] ?? null) : null,
+                ];
+            }
+        }
+
+        $pdf = Pdf::loadView('pdf.spec-sheet', [
+            'order'    => $order,
+            'cfg'      => $cfg,
+            'zones'    => array_filter((array) ($cfg['colors'] ?? []), fn ($hex) => is_string($hex) && $hex !== ''),
+            'layers'   => $layers,
+            'sizes'    => DB::table('measurements')->where('order_id', $id)->orderBy('measurement_id')->get(['type', 'size_label', 'qty']),
+            'preview'  => $this->pdfImage($order->client_design_preview_file ? $this->resolveDesignRefUrl($order->client_design_preview_file) : ($cfg['previewPng'] ?? null)),
+            'printedAt' => now()->format('F d, Y g:i A'),
+        ])->setPaper('a4', 'portrait');
+
+        return $pdf->download("VFRB-Spec-Sheet-ORD-{$id}.pdf");
+    }
+
+    // dompdf has remote loading off, so remote images are fetched here and embedded; data URLs pass through.
+    private function pdfImage(?string $src): ?string
+    {
+        if (! $src) return null;
+        if (str_starts_with($src, 'data:image/')) return $src;
+        if (! preg_match('#^https?://#i', $src)) return null;
+        try {
+            $res = Http::timeout(8)->get($src);
+            $type = $res->header('Content-Type');
+            return $res->successful() && str_starts_with($type, 'image/') ? "data:{$type};base64,".base64_encode($res->body()) : null;
+        } catch (\Throwable) {
+            return null;
+        }
     }
 
     // ── GET /api/admin/orders/{id}/invoice-pdf ────────────────────────────────
@@ -507,7 +627,7 @@ class OrderController extends Controller
     public function downloadInvoicePdf(int $id)
     {
         $order = $this->buildOrderDetail($id);
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
@@ -515,8 +635,8 @@ class OrderController extends Controller
         // mixed stdClass/array structure buildOrderDetail() returns.
         $orderArray = json_decode(json_encode($order), true);
 
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.invoice', [
-            'order'     => $orderArray,
+        $pdf = Pdf::loadView('pdf.invoice', [
+            'order' => $orderArray,
             'printedAt' => now()->format('F d, Y g:i A'),
         ])->setPaper('a4', 'portrait');
 
@@ -532,12 +652,12 @@ class OrderController extends Controller
             ->join('users', 'orders.user_id', '=', 'users.user_id')
             ->where('orders.order_id', $id)
             ->select('orders.*', 'users.name as customer_name',
-                     'users.organization_name',
-                     'users.email as customer_email',
-                     'users.contact_number as customer_contact')
+                'users.organization_name',
+                'users.email as customer_email',
+                'users.contact_number as customer_contact')
             ->first();
 
-        if (!$order) {
+        if (! $order) {
             return null;
         }
 
@@ -551,14 +671,15 @@ class OrderController extends Controller
         // admin order-detail screen and the printed invoice in one place.
         $order->client_design_ref_file = $this->resolveDesignRefUrl($order->client_design_ref_file);
         $order->design_preview_url = $this->resolveDesignPreviewUrl($order);
+        $order->design_3d_snapshot_url = $this->resolveDesignRefUrl($order->client_design_3d_snapshot_file ?? null);
 
         // Nested `user` object — Invoice.jsx / invoice.blade.php read
         // order.user.{name, organization_name, email, contact_number}.
         $order->user = [
-            'name'              => $order->customer_name,
+            'name' => $order->customer_name,
             'organization_name' => $order->organization_name,
-            'email'             => $order->customer_email,
-            'contact_number'    => $order->customer_contact,
+            'email' => $order->customer_email,
+            'contact_number' => $order->customer_contact,
         ];
 
         // BOM — material_recommendations left-joined to materials so the
@@ -576,10 +697,11 @@ class OrderController extends Controller
             ->get()
             ->map(function ($rec) {
                 $rec->material = [
-                    'material_name'     => $rec->linked_material_name,
-                    'unit'              => $rec->material_unit,
+                    'material_name' => $rec->linked_material_name,
+                    'unit' => $rec->material_unit,
                     'quantity_in_stock' => $rec->material_quantity_in_stock,
                 ];
+
                 return $rec;
             });
 
@@ -601,7 +723,7 @@ class OrderController extends Controller
     }
 
     private const ADMIN_STATUS_TRANSITIONS = [
-        'pending'   => ['confirmed', 'cancelled'],
+        'pending' => ['confirmed', 'cancelled'],
         'confirmed' => ['cancelled'],
     ];
 
@@ -610,13 +732,13 @@ class OrderController extends Controller
     public function adminUpdate(Request $request, int $id)
     {
         $order = DB::table('orders')->where('order_id', $id)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
         // Every field this endpoint changes is a manager decision (review & confirm, cancel with a reason).
-        if ($request->hasAny(['status', 'agreed_total', 'negotiated_delivery_date', 'notes', 'order_type']) && !$request->user()->isManager()) {
-            return response()->json(['message' => 'Only a manager can change the order status, total, delivery date or review notes.'], 403);
+        if ($request->hasAny(['status', 'agreed_total', 'negotiated_delivery_date', 'notes', 'order_type']) && ! $request->user()->isManager()) {
+            return response()->json(['message' => 'Only an Administrator can change the order status, total, delivery date or review notes.'], 403);
         }
 
         $request->validate([
@@ -633,28 +755,31 @@ class OrderController extends Controller
 
         $target = $request->input('status');
         if ($target !== null && $target !== $order->status
-            && !in_array($target, self::ADMIN_STATUS_TRANSITIONS[$order->status] ?? [], true)) {
+            && ! in_array($target, self::ADMIN_STATUS_TRANSITIONS[$order->status] ?? [], true)) {
             return response()->json(['message' => "A {$order->status} order cannot be set to {$target} here. Use the production steps to advance it."], 422);
         }
 
         // The customer sees the cancel reason, so one is required.
-        if ($target === 'cancelled' && $order->status !== 'cancelled' && !$request->filled('notes')) {
+        if ($target === 'cancelled' && $order->status !== 'cancelled' && ! $request->filled('notes')) {
             return response()->json(['message' => 'Give a reason for cancelling; the customer will see it.', 'errors' => ['notes' => ['A cancel reason is required.']]], 422);
         }
         // The payment rule follows order_type, so it is fixed once the down payment is in.
-        if ($request->filled('order_type') && $request->input('order_type') !== $order->order_type && !empty($order->down_payment_received_at)) {
+        if ($request->filled('order_type') && $request->input('order_type') !== $order->order_type && ! empty($order->down_payment_received_at)) {
             return response()->json(['message' => 'The order source cannot change after the down payment is recorded.'], 422);
         }
         if ($target === 'confirmed' && $order->status !== 'confirmed'
-            && ($err = \App\Models\Order::promisedDateError($order->promised_date ?? null, $order->created_at))) {
+            && ($err = Order::promisedDateError($order->promised_date ?? null))) {
             return response()->json(['message' => $err], 422);
         }
 
         // `notes` is the manager's message to the customer (sent with the status change below); orders.notes keeps the customer's own notes.
         $fields = collect($request->only(['status', 'negotiated_delivery_date', 'order_type']))
-            ->filter(fn($v) => !is_null($v))
-            ->reject(fn($v, $k) => $k === 'status' && $v === $order->status)
+            ->filter(fn ($v) => ! is_null($v))
+            ->reject(fn ($v, $k) => $k === 'status' && $v === $order->status)
             ->toArray();
+        if (isset($fields['order_type'])) {
+            $fields['payment_terms'] = self::paymentTermsFor($fields['order_type']);
+        }
 
         // agreed_total is write-once: later changes go through payments.
         if ($request->filled('agreed_total') && $order->agreed_total === null) {
@@ -674,8 +799,8 @@ class OrderController extends Controller
         if (isset($fields['status'])) {
             $statusMessage = $fields['status'] === 'cancelled' && $request->filled('notes')
                 ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
-                : "Your order #{$id} status has been updated to " . ucfirst($fields['status']) . "."
-                    . ($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
+                : "Your order #{$id} status has been updated to ".ucfirst($fields['status']).'.'
+                    .($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
             // Production stages (pattern ... packing) are never sent to the client.
             if (in_array($fields['status'], ['confirmed', 'completed', 'cancelled'], true)) {
                 $this->notifyCustomer($order->user_id, $id, $statusMessage);
@@ -709,7 +834,7 @@ class OrderController extends Controller
                         ));
                     }
                 } catch (\Throwable $e) {
-                    \Log::warning("OrderStatusNotification failed for order #{$id}: " . $e->getMessage());
+                    \Log::warning("OrderStatusNotification failed for order #{$id}: ".$e->getMessage());
                 }
             }
 
@@ -720,7 +845,12 @@ class OrderController extends Controller
 
         Cache::forget('dashboard_stats');
 
-        return response()->json(DB::table('orders')->where('order_id', $id)->first());
+        $response = (array) DB::table('orders')->where('order_id', $id)->first();
+        if (($fields['status'] ?? null) === 'confirmed') {
+            $response['material_warnings'] = app(MaterialShortageService::class)->forOrder($id);
+        }
+
+        return response()->json($response);
     }
 
     // ── GET /api/admin/orders/{id}/suggested-date?lead_days= ──────────────────
@@ -729,14 +859,15 @@ class OrderController extends Controller
     {
         $request->validate(['lead_days' => 'nullable|integer|min:1|max:365']);
         $order = DB::table('orders')->where('order_id', $id)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
         $lead = $request->filled('lead_days') ? (int) $request->input('lead_days') : (int) config('vfrb.lead_days_per_100', 14);
+
         return response()->json([
-            'suggested_promised_date' => \App\Models\Order::suggestedPromisedDate((int) $order->quantity_ordered, $lead)->toDateString(),
-            'lead_days_per_100'       => $lead,
+            'suggested_promised_date' => Order::suggestedPromisedDate((int) $order->quantity_ordered, $lead)->toDateString(),
+            'lead_days_per_100' => $lead,
         ]);
     }
 
@@ -745,14 +876,14 @@ class OrderController extends Controller
     public function propose(Request $request, int $id)
     {
         $order = DB::table('orders')->where('order_id', $id)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
         $request->validate([
             'promised_date' => 'nullable|date|after:today',
-            'lead_days'     => 'nullable|integer|min:1|max:365',
-            'total'         => 'required|numeric|min:0',
+            'lead_days' => 'nullable|integer|min:1|max:365',
+            'total' => 'required|numeric|min:0',
             'proposal_note' => 'required|string|min:10|max:5000',
         ], [
             'proposal_note.required' => 'Add a note for the customer: fabric availability, any cheaper or better alternative, and the reason for the date and total.',
@@ -767,29 +898,29 @@ class OrderController extends Controller
 
         $promised = $request->input('promised_date')
             ?: ($order->target_delivery_date ? substr((string) $order->target_delivery_date, 0, 10) : null)
-            ?: \App\Models\Order::suggestedPromisedDate((int) $order->quantity_ordered, $request->filled('lead_days') ? (int) $request->input('lead_days') : null)->toDateString();
+            ?: Order::suggestedPromisedDate((int) $order->quantity_ordered, $request->filled('lead_days') ? (int) $request->input('lead_days') : null)->toDateString();
 
-        if ($err = \App\Models\Order::promisedDateError($promised, $order->created_at)) {
+        if ($err = Order::promisedDateError($promised)) {
             return response()->json(['message' => $err, 'errors' => ['promised_date' => [$err]]], 422);
         }
 
         DB::table('orders')->where('order_id', $id)->update([
-            'promised_date'   => $promised,
-            'agreed_total'    => $request->input('total'),
-            'proposal_note'   => $request->input('proposal_note'),
+            'promised_date' => $promised,
+            'agreed_total' => $request->input('total'),
+            'proposal_note' => $request->input('proposal_note'),
             'proposal_status' => 'pending',
-            'updated_at'      => now(),
+            'updated_at' => now(),
         ]);
         AuditLog::record('order_proposal_sent', 'orders', $id);
 
-        $total = number_format((float) $request->input('total'), 2);
-        $this->notifyCustomer($order->user_id, $id, "VFRB sent a proposal for order #{$id}: delivery by {$promised}, total ₱{$total}. Please accept or decline.");
-        \App\Support\EmailNotify::users([$order->user_id], new \App\Notifications\PortalMailNotification(
+        $this->notifyCustomer($order->user_id, $id, "VFRB sent a proposal for order #{$id}: delivery by {$promised}. Please accept or decline.");
+        EmailNotify::users([$order->user_id], new PortalMailNotification(
             "Proposal for your VFRB order #{$id}",
-            ["Promised delivery date: {$promised}", "Total: ₱{$total}", "Note from VFRB: {$request->input('proposal_note')}", 'Please accept or decline the proposal in the portal.'],
+            ["Promised delivery date: {$promised}", "Note from VFRB: {$request->input('proposal_note')}", 'Please accept or decline the proposal in the portal.'],
             'Review proposal', "/customer/orders/{$id}"));
 
         Cache::forget('dashboard_stats');
+
         return response()->json(['message' => "Proposal sent for order #{$id}.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
     }
 
@@ -798,15 +929,19 @@ class OrderController extends Controller
     public function recordDownPayment(Request $request, int $id)
     {
         $order = DB::table('orders')->where('order_id', $id)->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
-        $request->validate(['down_payment_amount' => 'required|numeric|min:0.01']);
+        $request->validate([
+            'down_payment_amount' => 'required|numeric|min:0.01',
+            'payment_method' => 'nullable|in:cash,gcash,ewallet,bank_transfer',
+            'reference_no' => 'nullable|string|max:50',
+        ]);
 
         if (in_array($order->status, ['completed', 'cancelled'], true)) {
             return response()->json(['message' => "Order #{$id} is {$order->status}; a down payment can no longer be recorded."], 422);
         }
-        if (!empty($order->down_payment_received_at)) {
+        if (! empty($order->down_payment_received_at)) {
             return response()->json(['message' => "The down payment for order #{$id} was already recorded."], 422);
         }
 
@@ -818,20 +953,29 @@ class OrderController extends Controller
         if ($order->agreed_total === null) {
             return response()->json(['message' => "Set the order total (send a proposal) before recording a payment for order #{$id}."], 422);
         }
-        $total  = round((float) $order->agreed_total, 2);
+        $total = round((float) $order->agreed_total, 2);
         $amount = round((float) $request->input('down_payment_amount'), 2);
-        $min    = round($total * 0.8, 2);
+        $min = round($total * 0.8, 2);
         if ($amount < $min || $amount > $total) {
-            $err = 'Direct orders need at least 80% down: between ₱' . number_format($min, 2) . ' and ₱' . number_format($total, 2) . '.';
+            $err = 'Direct orders need at least 80% down: between ₱'.number_format($min, 2).' and ₱'.number_format($total, 2).'.';
+
             return response()->json(['message' => $err, 'errors' => ['down_payment_amount' => [$err]]], 422);
         }
 
-        DB::table('orders')->where('order_id', $id)->update([
-            'down_payment_amount'      => $request->input('down_payment_amount'),
-            'down_payment_received_at' => now(),
-            'updated_at'               => now(),
-        ]);
-        AuditLog::record('order_down_payment_received', 'orders', $id);
+        DB::transaction(function () use ($request, $id, $amount) {
+            DB::table('orders')->where('order_id', $id)->update([
+                'down_payment_amount' => $request->input('down_payment_amount'),
+                'down_payment_received_at' => now(),
+                'updated_at' => now(),
+            ]);
+            AuditLog::record('order_down_payment_received', 'orders', $id);
+
+            // Receipt only when no payment was logged for this order yet, so a manual entry is never doubled.
+            if (! DB::table('sales_transactions')->where('order_id', $id)->exists()) {
+                app(BillingService::class)->recordPayment($id, $amount, $request->input('payment_method', 'cash'), 'down_payment',
+                    null, 'Down payment', null, (int) $request->user()->user_id, $request->input('reference_no'));
+            }
+        });
         $this->notifyCustomer($order->user_id, $id, "VFRB received your down payment for order #{$id}.");
 
         return response()->json(['message' => "Down payment recorded for order #{$id}.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
@@ -841,29 +985,31 @@ class OrderController extends Controller
     public function customerAcceptProposal(int $id)
     {
         $order = $this->customerProposalOrder($id);
-        if ($order instanceof \Illuminate\Http\JsonResponse) {
+        if ($order instanceof JsonResponse) {
             return $order;
         }
         // Confirmation happens now, so the 7-day rule is checked against today.
-        if ($err = \App\Models\Order::promisedDateError($order->promised_date, $order->created_at)) {
-            return response()->json(['message' => $err . ' Please message VFRB for a new date.'], 422);
+        if ($err = Order::promisedDateError($order->promised_date)) {
+            return response()->json(['message' => $err.' Please message VFRB for a new date.'], 422);
         }
 
         DB::table('orders')->where('order_id', $id)->update([
             'proposal_status' => 'accepted',
-            'status'          => 'confirmed',
-            'updated_at'      => now(),
+            'status' => 'confirmed',
+            'updated_at' => now(),
         ]);
         AuditLog::record('order_status_changed', 'orders', $id);
 
-        $managerIds = $this->notifyManagers($id, "Customer accepted the proposal for order #{$id}. Order confirmed; waiting for the down payment.");
-        \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+        $stockNote = app(MaterialShortageService::class)->summary($id);
+        $managerIds = $this->notifyManagers($id, "Customer accepted the proposal for order #{$id}. Order confirmed; waiting for the down payment.".($stockNote ? " {$stockNote}" : ''));
+        EmailNotify::users($managerIds, new PortalMailNotification(
             "Proposal accepted: order #{$id}", ["The customer accepted the proposal for order #{$id}. Record the down payment before production starts."],
             'Open order', "/admin/orders/{$id}"));
-        \App\Support\EmailNotify::users([$order->user_id], new OrderStatusNotification($id, 'confirmed'));
+        EmailNotify::users([$order->user_id], new OrderStatusNotification($id, 'confirmed'));
 
         Cache::forget('dashboard_stats');
-        return response()->json(['message' => "Order #{$id} confirmed. Production starts once VFRB receives the down payment.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+
+        return response()->json(['message' => "Order #{$id} confirmed. Production starts once VFRB receives the down payment.", 'order' => self::clientMoney(self::clientStatus(DB::table('orders')->where('order_id', $id)->first()))]);
     }
 
     // ── POST /api/customer/orders/{id}/decline { reason } ─────────────────────
@@ -873,7 +1019,7 @@ class OrderController extends Controller
             'reason.required' => 'Tell VFRB why you are declining so they can send a better proposal.',
         ]);
         $order = $this->customerProposalOrder($id);
-        if ($order instanceof \Illuminate\Http\JsonResponse) {
+        if ($order instanceof JsonResponse) {
             return $order;
         }
 
@@ -883,11 +1029,11 @@ class OrderController extends Controller
         // Kept in the order's message thread so the customer and VFRB both see the reason.
         $this->postOrderMessage($id, Auth::id(), "Proposal declined. Reason: {$request->input('reason')}");
         $managerIds = $this->notifyManagers($id, "Customer declined the proposal for order #{$id}. Reason: {$request->input('reason')}");
-        \App\Support\EmailNotify::users($managerIds, new \App\Notifications\PortalMailNotification(
+        EmailNotify::users($managerIds, new PortalMailNotification(
             "Proposal declined: order #{$id}", ["The customer declined the proposal for order #{$id}.", "Reason: {$request->input('reason')}"],
             'Open order', "/admin/orders/{$id}"));
 
-        return response()->json(['message' => 'Proposal declined. VFRB has been told your reason.', 'order' => DB::table('orders')->where('order_id', $id)->first()]);
+        return response()->json(['message' => 'Proposal declined. VFRB has been told your reason.', 'order' => self::clientMoney(self::clientStatus(DB::table('orders')->where('order_id', $id)->first()))]);
     }
 
     // ── POST /api/customer/orders/{id}/message { body } ───────────────────────
@@ -895,6 +1041,7 @@ class OrderController extends Controller
     public function customerProposalMessage(Request $request, int $id)
     {
         $request->merge(['order_id' => $id]);
+
         return app(MessageController::class)->customerStore($request);
     }
 
@@ -902,23 +1049,24 @@ class OrderController extends Controller
     private function customerProposalOrder(int $id)
     {
         $order = DB::table('orders')->where('order_id', $id)->where('user_id', Auth::id())->first();
-        if (!$order) {
+        if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
         if ($order->status !== 'pending' || ($order->proposal_status ?? null) !== 'pending') {
             return response()->json(['message' => "There is no open proposal for order #{$id}."], 422);
         }
+
         return $order;
     }
 
     private function postOrderMessage(int $orderId, int $senderId, string $body): void
     {
         DB::table('order_messages')->insert([
-            'order_id'   => $orderId,
-            'sender_id'  => $senderId,
-            'body'       => $body,
-            'is_read'    => 0,
-            'sent_at'    => now(),
+            'order_id' => $orderId,
+            'sender_id' => $senderId,
+            'body' => $body,
+            'is_read' => 0,
+            'sent_at' => now(),
             'created_at' => now(),
             'updated_at' => now(),
         ]);
@@ -935,16 +1083,17 @@ class OrderController extends Controller
 
         foreach ($managers as $uid) {
             DB::table('notifications')->insert([
-                'user_id'    => $uid,
-                'order_id'   => $orderId,
-                'message'    => $message,
-                'type'       => 'order',
-                'is_read'    => 0,
-                'date_sent'  => $now,
+                'user_id' => $uid,
+                'order_id' => $orderId,
+                'message' => $message,
+                'type' => 'order',
+                'is_read' => 0,
+                'date_sent' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
         }
+
         return $managers->all();
     }
 
@@ -952,12 +1101,12 @@ class OrderController extends Controller
     {
         $now = now();
         DB::table('notifications')->insert([
-            'user_id'    => $userId,
-            'order_id'   => $orderId,
-            'message'    => $message,
-            'type'       => 'order',
-            'is_read'    => 0,
-            'date_sent'  => $now,
+            'user_id' => $userId,
+            'order_id' => $orderId,
+            'message' => $message,
+            'type' => 'order',
+            'is_read' => 0,
+            'date_sent' => $now,
             'created_at' => $now,
             'updated_at' => $now,
         ]);

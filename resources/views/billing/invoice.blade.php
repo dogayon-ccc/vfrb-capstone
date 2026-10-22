@@ -1,6 +1,6 @@
 {{-- Invoice for one order. Every amount is a recorded value: total = invoices.total_amount (frozen
      orders.agreed_total), paid = recorded payments. Unit price is that total divided by the pieces ordered;
-     no line pricing is computed here. --}}
+     no line pricing is computed here. $amounts = false (customer copy) leaves every amount out. --}}
 @extends('billing.layout')
 @php
   $peso = fn ($v) => '₱' . number_format((float) $v, 2);
@@ -14,6 +14,7 @@
   $balance = max(0, round($invoice->total_amount - $paid - $dpPaid, 2));
   $customer = $order->organization_name ?: $order->customer_name;
   $date = fn ($v) => $v ? \Carbon\Carbon::parse($v)->format('M d, Y') : '—';
+  $amounts = $amounts ?? true;
 @endphp
 
 @section('title', $labels['invoice_title'] . ' ' . $invoice->invoice_number)
@@ -60,6 +61,7 @@
     </tbody>
   </table>
 
+  @if($amounts)
   <table class="totals">
     <tr><td>Unit price</td><td class="num">{{ $unit !== null ? $peso($unit) : '—' }}</td></tr>
     <tr><td>Total ({{ number_format($qty) }} pcs)</td><td class="num">{{ $peso($invoice->total_amount) }}</td></tr>
@@ -67,27 +69,28 @@
     <tr><td>Other payments received</td><td class="num">− {{ $peso($paid) }}</td></tr>
     <tr class="grand"><td>Balance due</td><td class="num">{{ $peso($balance) }}</td></tr>
   </table>
+  @endif
 
   <div class="sec">Payment Dates</div>
   <table class="lines">
-    <thead><tr><th>Payment</th><th>Date</th><th class="hide-sm">Method</th><th class="num">Amount</th></tr></thead>
+    <thead><tr><th>Payment</th><th>Date</th><th class="hide-sm">Method</th>@if($amounts)<th class="num">Amount</th>@endif</tr></thead>
     <tbody>
       @if($dpDate)
-        <tr><td>Down payment</td><td>{{ $dpDate->format('M d, Y') }}</td><td class="hide-sm">—</td><td class="num">{{ $peso($dpPaid) }}</td></tr>
+        <tr><td>Down payment</td><td>{{ $dpDate->format('M d, Y') }}</td><td class="hide-sm">—</td>@if($amounts)<td class="num">{{ $peso($dpPaid) }}</td>@endif</tr>
       @endif
       @if($earlier > 0)
-        <tr><td>Recorded before receipts</td><td>—</td><td class="hide-sm">—</td><td class="num">{{ $peso($earlier) }}</td></tr>
+        <tr><td>Recorded before receipts</td><td>—</td><td class="hide-sm">—</td>@if($amounts)<td class="num">{{ $peso($earlier) }}</td>@endif</tr>
       @endif
       @foreach($receipts as $r)
         <tr>
           <td>{{ $r->receipt_number }}</td>
           <td>{{ $r->paid_at->format('M d, Y') }}</td>
           <td class="hide-sm">{{ ucwords(str_replace('_', ' ', $r->payment_method)) }}</td>
-          <td class="num">{{ $peso($r->amount) }}</td>
+          @if($amounts)<td class="num">{{ $peso($r->amount) }}</td>@endif
         </tr>
       @endforeach
       @if(!$dpDate && $earlier <= 0 && $receipts->isEmpty())
-        <tr><td colspan="4" style="color:#6b7280;">No payments recorded yet.</td></tr>
+        <tr><td colspan="{{ $amounts ? 4 : 3 }}" style="color:#6b7280;">No payments recorded yet.</td></tr>
       @endif
     </tbody>
   </table>

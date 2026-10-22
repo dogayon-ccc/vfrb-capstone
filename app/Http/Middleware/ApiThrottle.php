@@ -50,9 +50,12 @@ class ApiThrottle
         // Remaining attempts
         $remaining = max(0, $maxAttempts - $this->limiter->attempts($rateKey));
 
-        return $response->withHeaders([
+        // headers->add works on every response type; withHeaders() is missing on StreamedResponse (CSV downloads).
+        $response->headers->add([
             'X-RateLimit-Limit'     => $maxAttempts,
             'X-RateLimit-Remaining' => $remaining,
         ]);
+
+        return $response;
     }
 }

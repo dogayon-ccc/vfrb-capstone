@@ -2,7 +2,7 @@
 // app/Http/Controllers/Api/AuditLogController.php
 // Audit Log (Oct 16 2026): reads the insert-only audit_logs table — login, logout,
 // failed login and key writes (see AuditLog::ACTIONS). Read-only: no store/update/delete
-// endpoint exists. Manager and owner only (route group + OwnerReadOnly::AREAS).
+// endpoint exists. Manager and owner only (route group).
 // The operational "who did what" view stays in ActivityLogController.
 
 namespace App\Http\Controllers\Api;
