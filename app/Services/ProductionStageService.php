@@ -1,4 +1,5 @@
 <?php
+
 // app/Services/ProductionStageService.php
 // VFRB Enterprise — Shared Production Stage-Advance Engine
 //
@@ -65,14 +66,14 @@ class ProductionStageService
     // OutputLogController in a couple of read-only spots; both must be
     // kept in sync if the sequence ever changes. Locked per master prompt.
     const STAGE_MAP = [
-        'confirmed'   => 'pattern',
-        'pattern'     => 'segregation',
+        'confirmed' => 'pattern',
+        'pattern' => 'segregation',
         'segregation' => 'cutting',
-        'cutting'     => 'sewing',
-        'sewing'      => 'qc',
-        'qc'          => 'pressing',
-        'pressing'    => 'packing',
-        'packing'     => 'for_delivery', // automatic once packed_total == ordered; admin then marks delivered (completed)
+        'cutting' => 'sewing',
+        'sewing' => 'qc',
+        'qc' => 'pressing',
+        'pressing' => 'packing',
+        'packing' => 'for_delivery', // automatic once packed_total == ordered; admin then marks delivered (completed)
     ];
 
     const QC_PASS_THRESHOLD = 0.80;
@@ -87,28 +88,27 @@ class ProductionStageService
      * auto-delivery creation (Packing), and
      * notifications all as one atomic unit.
      *
-     * @param int   $orderId
-     * @param string $stage      one of the 7 production stages; caller has
-     *                           already validated this against the enum
-     * @param array $qty         ['qty_xs'=>int, 'qty_s'=>int, ... 'qty_custom'=>int]
-     * @param array $meta        ['staff_id'=>int, 'notes'=>?string,
-     *                            'log_date'=>string] — defects go through reportDefect()
-     * @param array $materialActuals  [{'material_id'=>int, 'qty_used'=>float}, ...]
-     *              — staff-entered ACTUAL quantities used, one entry per
-     *              accepted+linked material_recommendations row on this
-     *              order. Only meaningful when this call is the one that
-     *              completes the Pattern stage (there is no formula/BOM in
-     *              this system — Gemini recommends material TYPES only, per
-     *              the locked customer-facing rule, which as of Aug 28 2026
-     *              also applies internally: nothing computes a quantity
-     *              anywhere in this codebase anymore). If Pattern completes
-     *              on this call and the order has accepted+linked
-     *              recommendations but this array doesn't cover all of them,
-     *              the STAGE ADVANCE (and the deduction) is held — same
-     *              gating pattern as the QC 80/20 check — while the output
-     *              log itself still commits, since the physical count staff
-     *              just reported is real regardless of whether the
-     *              inventory paperwork is finished yet.
+     * @param  string  $stage  one of the 7 production stages; caller has
+     *                         already validated this against the enum
+     * @param  array  $qty  ['qty_xs'=>int, 'qty_s'=>int, ... 'qty_custom'=>int]
+     * @param  array  $meta  ['staff_id'=>int, 'notes'=>?string,
+     *                       'log_date'=>string] — defects go through reportDefect()
+     * @param  array  $materialActuals  [{'material_id'=>int, 'qty_used'=>float}, ...]
+     *                                  — staff-entered ACTUAL quantities used, one entry per
+     *                                  accepted+linked material_recommendations row on this
+     *                                  order. Only meaningful when this call is the one that
+     *                                  completes the Pattern stage (there is no formula/BOM in
+     *                                  this system — Gemini recommends material TYPES only, per
+     *                                  the locked customer-facing rule, which as of Aug 28 2026
+     *                                  also applies internally: nothing computes a quantity
+     *                                  anywhere in this codebase anymore). If Pattern completes
+     *                                  on this call and the order has accepted+linked
+     *                                  recommendations but this array doesn't cover all of them,
+     *                                  the STAGE ADVANCE (and the deduction) is held — same
+     *                                  gating pattern as the QC 80/20 check — while the output
+     *                                  log itself still commits, since the physical count staff
+     *                                  just reported is real regardless of whether the
+     *                                  inventory paperwork is finished yet.
      * @return array result — see keys below. 'error'=>true means the caller
      *               should translate 'status'/'message' into an HTTP response
      *               without committing anything (the transaction rolled back
@@ -117,13 +117,13 @@ class ProductionStageService
      */
     public function logOutput(int $orderId, string $stage, array $qty, array $meta, array $materialActuals = []): array
     {
-        $qtyXs     = (int) ($qty['qty_xs']     ?? 0);
-        $qtyS      = (int) ($qty['qty_s']      ?? 0);
-        $qtyM      = (int) ($qty['qty_m']      ?? 0);
-        $qtyL      = (int) ($qty['qty_l']      ?? 0);
-        $qtyXl     = (int) ($qty['qty_xl']     ?? 0);
-        $qtyXxl    = (int) ($qty['qty_xxl']    ?? 0);
-        $qtyXxxl   = (int) ($qty['qty_xxxl']   ?? 0);
+        $qtyXs = (int) ($qty['qty_xs'] ?? 0);
+        $qtyS = (int) ($qty['qty_s'] ?? 0);
+        $qtyM = (int) ($qty['qty_m'] ?? 0);
+        $qtyL = (int) ($qty['qty_l'] ?? 0);
+        $qtyXl = (int) ($qty['qty_xl'] ?? 0);
+        $qtyXxl = (int) ($qty['qty_xxl'] ?? 0);
+        $qtyXxxl = (int) ($qty['qty_xxxl'] ?? 0);
         $qtyCustom = (int) ($qty['qty_custom'] ?? 0);
         $thisBatch = $qtyXs + $qtyS + $qtyM + $qtyL + $qtyXl + $qtyXxl + $qtyXxxl + $qtyCustom;
 
@@ -133,9 +133,9 @@ class ProductionStageService
             return ['error' => true, 'status' => 422, 'message' => 'At least 1 piece must be logged.', 'current_stage' => null];
         }
 
-        $staffId  = $meta['staff_id'] ?? Auth::id();
-        $logDate  = $meta['log_date'] ?? now()->toDateString();
-        $notes    = $meta['notes'] ?? null;
+        $staffId = $meta['staff_id'] ?? Auth::id();
+        $logDate = $meta['log_date'] ?? now()->toDateString();
+        $notes = $meta['notes'] ?? null;
 
         // Normalize to material_id => qty_used for O(1) lookup inside the
         // transaction. Sentinel -1 (not a raw missing key) so an explicit
@@ -150,7 +150,7 @@ class ProductionStageService
         }
 
         return DB::transaction(function () use (
-            $orderId, $stage, $staffId, $logDate, $notes, $meta, $actualsByMaterialId,
+            $orderId, $stage, $staffId, $logDate, $notes, $actualsByMaterialId,
             $qtyXs, $qtyS, $qtyM, $qtyL, $qtyXl, $qtyXxl, $qtyXxxl, $qtyCustom, $thisBatch
         ) {
             // ── Lock the order row first — this is the pattern proven
@@ -158,14 +158,14 @@ class ProductionStageService
             // requests for the SAME order so the second request blocks
             // until the first commits, then reads the true post-update state.
             $order = DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->first();
-            if (!$order) {
+            if (! $order) {
                 return ['error' => true, 'status' => 404, 'message' => 'Order not found.', 'current_stage' => null];
             }
             if ($order->status !== $stage) {
                 return [
-                    'error'         => true,
-                    'status'        => 422,
-                    'message'       => "Order is at stage '{$order->status}', not '{$stage}'.",
+                    'error' => true,
+                    'status' => 422,
+                    'message' => "Order is at stage '{$order->status}', not '{$stage}'.",
                     'current_stage' => $order->status,
                 ];
             }
@@ -177,68 +177,72 @@ class ProductionStageService
                 ->lockForUpdate()
                 ->first();
             $qtyTarget = $existing && $existing->qty_target > 0 ? (int) $existing->qty_target : (int) $order->quantity_ordered;
-            $done      = (int) ($existing->qty_completed ?? 0);
-            $label     = self::stageLabel($stage);
+            $done = (int) ($existing->qty_completed ?? 0);
+            $label = self::stageLabel($stage);
 
             // Duplicate submit on a finished stage: log nothing, only retry the held advance below.
             $alreadyComplete = $qtyTarget > 0 && $done >= $qtyTarget;
-            if ($thisBatch <= 0 && !$alreadyComplete) {
+            if ($thisBatch <= 0 && ! $alreadyComplete) {
                 return ['error' => true, 'status' => 422, 'message' => 'At least 1 piece must be logged.', 'current_stage' => $order->status];
             }
-            if (!$alreadyComplete && $qtyTarget > 0 && $done + $thisBatch > $qtyTarget) {
+            if (! $alreadyComplete && $qtyTarget > 0 && $done + $thisBatch > $qtyTarget) {
                 $left = $qtyTarget - $done;
+
                 return [
-                    'error'         => true,
-                    'status'        => 422,
-                    'message'       => "{$label} is at {$done}/{$qtyTarget}; only {$left} more piece" . ($left === 1 ? '' : 's') . " can be logged.",
+                    'error' => true,
+                    'status' => 422,
+                    'message' => "{$label} is at {$done}/{$qtyTarget}; only {$left} more piece".($left === 1 ? '' : 's').' can be logged.',
                     'current_stage' => $order->status,
                 ];
             }
 
             // Client-supplied materials must be on hand before any cutting is logged.
-            if ($stage === 'cutting' && !$alreadyComplete) {
+            if ($stage === 'cutting' && ! $alreadyComplete) {
+                if ($hold = self::colorHold($orderId)) {
+                    return ['error' => true, 'status' => 422, 'message' => $hold, 'current_stage' => $order->status, 'color_hold' => true];
+                }
                 $clientSvc = new ClientMaterialService;
                 if ($short = $clientSvc->shortages($orderId)) {
                     return [
-                        'error'                  => true,
-                        'status'                 => 422,
-                        'message'                => $clientSvc->shortageMessage($orderId, $short),
-                        'current_stage'          => $order->status,
+                        'error' => true,
+                        'status' => 422,
+                        'message' => $clientSvc->shortageMessage($orderId, $short),
+                        'current_stage' => $order->status,
                         'client_materials_short' => $short,
                     ];
                 }
             }
 
-            if (!$alreadyComplete && ($limit = $this->sizeLimitError($orderId, $stage, [
+            if (! $alreadyComplete && ($limit = $this->sizeLimitError($orderId, $stage, [
                 'xs' => $qtyXs, 's' => $qtyS, 'm' => $qtyM, 'l' => $qtyL,
                 'xl' => $qtyXl, 'xxl' => $qtyXxl, 'xxxl' => $qtyXxxl, 'custom' => $qtyCustom,
             ]))) {
                 return ['error' => true, 'status' => 422, 'current_stage' => $order->status] + $limit;
             }
 
-            $logId     = null;
+            $logId = null;
             $loggedRow = null;
             $newCompleted = $done;
-            if (!$alreadyComplete) {
+            if (! $alreadyComplete) {
                 // ── 1. Write to daily_output_logs (per-size audit trail) ─────────
                 // total_output is GENERATED ALWAYS — never insert it.
                 $logId = DB::table('daily_output_logs')->insertGetId([
-                    'order_id'         => $orderId,
-                    'stage'            => $stage,
-                    'logged_by'        => $staffId,
-                    'log_date'         => $logDate,
-                    'qty_xs'           => $qtyXs,
-                    'qty_s'            => $qtyS,
-                    'qty_m'            => $qtyM,
-                    'qty_l'            => $qtyL,
-                    'qty_xl'           => $qtyXl,
-                    'qty_xxl'          => $qtyXxl,
-                    'qty_xxxl'         => $qtyXxxl,
-                    'qty_custom'       => $qtyCustom,
-                    'defect_count'     => 0,
-                    'notes'            => $notes,
-                    'created_at'       => now(),
-                    'updated_at'       => now(),
+                    'order_id' => $orderId,
+                    'stage' => $stage,
+                    'logged_by' => $staffId,
+                    'log_date' => $logDate,
+                    'qty_xs' => $qtyXs,
+                    'qty_s' => $qtyS,
+                    'qty_m' => $qtyM,
+                    'qty_l' => $qtyL,
+                    'qty_xl' => $qtyXl,
+                    'qty_xxl' => $qtyXxl,
+                    'qty_xxxl' => $qtyXxxl,
+                    'qty_custom' => $qtyCustom,
+                    'defect_count' => 0,
+                    'notes' => $notes,
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ], 'log_id');
 
                 $loggedRow = DB::table('daily_output_logs')->where('log_id', $logId)->first(['log_id', 'total_output']);
@@ -250,20 +254,20 @@ class ProductionStageService
                         ->where('tracking_id', $existing->tracking_id)
                         ->update([
                             'qty_completed' => $newCompleted,
-                            'updated_by'    => $staffId,
-                            'notes'         => $notes ?? $existing->notes,
-                            'updated_at'    => now(),
+                            'updated_by' => $staffId,
+                            'notes' => $notes ?? $existing->notes,
+                            'updated_at' => now(),
                         ]);
                 } else {
                     DB::table('order_production_tracking')->insert([
-                        'order_id'      => $orderId,
-                        'stage'         => $stage,
-                        'qty_target'    => $qtyTarget,
+                        'order_id' => $orderId,
+                        'stage' => $stage,
+                        'qty_target' => $qtyTarget,
                         'qty_completed' => $thisBatch,
-                        'updated_by'    => $staffId,
-                        'notes'         => $notes,
-                        'created_at'    => now(),
-                        'updated_at'    => now(),
+                        'updated_by' => $staffId,
+                        'notes' => $notes,
+                        'created_at' => now(),
+                        'updated_at' => now(),
                     ]);
                     $newCompleted = $thisBatch;
                 }
@@ -275,13 +279,13 @@ class ProductionStageService
             }
 
             $pct = $qtyTarget > 0 ? min(100, round($newCompleted / $qtyTarget * 100)) : 0;
-            $advanced            = false;
-            $qcBlocked           = false;
-            $materialsBlocked    = false;
-            $materialsNeeding    = [];
-            $newStage            = $stage;
-            $deductionLog        = [];
-            $lowStockAlerts      = [];
+            $advanced = false;
+            $qcBlocked = false;
+            $materialsBlocked = false;
+            $materialsNeeding = [];
+            $newStage = $stage;
+            $deductionLog = [];
+            $lowStockAlerts = [];
             $message = $alreadyComplete
                 ? "{$label} is already complete ({$newCompleted}/{$qtyTarget}); nothing new was logged."
                 : "{$newCompleted}/{$qtyTarget} pieces logged for {$label}.";
@@ -289,13 +293,13 @@ class ProductionStageService
             // ── 3. Auto-advance check ──────────────────────────────────────────
             $earlierOpen = $newCompleted >= $qtyTarget ? $this->incompleteStages($orderId, $stage) : [];
             if ($earlierOpen) {
-                $message = "{$label} is complete, but earlier stages are not: " . implode(', ', $earlierOpen) . ". The order stays at {$label}.";
+                $message = "{$label} is complete, but earlier stages are not: ".implode(', ', $earlierOpen).". The order stays at {$label}.";
             }
-            if ($newCompleted >= $qtyTarget && !$earlierOpen) {
+            if ($newCompleted >= $qtyTarget && ! $earlierOpen) {
                 if ($stage === 'qc') {
                     $qcBlocked = self::qcBlocked($order);
                     if ($qcBlocked) {
-                        $message = "QC complete but checklist not passed (80% rule). Fix failing items before advancing to Pressing.";
+                        $message = 'QC complete but checklist not passed (80% rule). Fix failing items before advancing to Pressing.';
                     }
                 }
 
@@ -305,16 +309,16 @@ class ProductionStageService
                 // recommends material TYPES only. If any accepted+linked
                 // material lacks a quantity, hold the advance (same shape as
                 // the QC gate) rather than record a wrong/missing quantity.
-                if (!$qcBlocked && $stage === 'pattern') {
+                if (! $qcBlocked && $stage === 'pattern') {
                     $materialsNeeding = $this->checkMaterialActualsGate($orderId, $actualsByMaterialId);
-                    if (!empty($materialsNeeding)) {
+                    if (! empty($materialsNeeding)) {
                         $materialsBlocked = true;
                         $names = implode(', ', array_column($materialsNeeding, 'material_name'));
                         $message = "Pattern quantity complete, but material consumption must be entered before advancing to Segregation. Missing: {$names}.";
                     }
                 }
 
-                if (!$qcBlocked && !$materialsBlocked) {
+                if (! $qcBlocked && ! $materialsBlocked) {
                     $nextStage = self::STAGE_MAP[$stage] ?? null;
                     if ($nextStage) {
                         $this->moveStage($orderId, $stage, $nextStage);
@@ -328,8 +332,8 @@ class ProductionStageService
                         // Cutting completes: the fabric is cut, so the
                         // consumption recorded at Pattern leaves stock now.
                         if ($stage === 'cutting') {
-                            $result         = $this->issueMaterialsToProduction($orderId, $staffId);
-                            $deductionLog   = $result['log'];
+                            $result = $this->issueMaterialsToProduction($orderId, $staffId);
+                            $deductionLog = $result['log'];
                             $lowStockAlerts = $result['low_stock'];
                         }
 
@@ -339,11 +343,11 @@ class ProductionStageService
                             $this->archiveCompletedDesign($orderId, $order);
                         }
 
-                        $advanced  = true;
-                        $newStage  = $nextStage;
+                        $advanced = true;
+                        $newStage = $nextStage;
                         $stageLabel = self::stageLabel($nextStage);
                         $message = "🎉 All {$qtyTarget} pieces completed — Order #{$orderId} advanced to {$stageLabel}!"
-                            . (count($deductionLog) > 0 ? " " . count($deductionLog) . " materials issued to production." : "");
+                            .(count($deductionLog) > 0 ? ' '.count($deductionLog).' materials issued to production.' : '');
 
                         $this->notifyStageAdvance($orderId, $order->user_id, $stage, $nextStage, count($deductionLog));
                     }
@@ -351,21 +355,21 @@ class ProductionStageService
             }
 
             return [
-                'error'                    => false,
-                'already_complete'         => $alreadyComplete,
-                'log_id'                   => $logId,
-                'total_output'             => $alreadyComplete ? 0 : ($loggedRow->total_output ?? $thisBatch),
-                'completed'                => (int) $newCompleted,
-                'total'                    => (int) $qtyTarget,
-                'pct'                      => $pct,
-                'advanced'                 => $advanced,
-                'new_stage'                => $newStage,
-                'qc_blocked'               => $qcBlocked,
-                'materials_blocked'        => $materialsBlocked,
+                'error' => false,
+                'already_complete' => $alreadyComplete,
+                'log_id' => $logId,
+                'total_output' => $alreadyComplete ? 0 : ($loggedRow->total_output ?? $thisBatch),
+                'completed' => (int) $newCompleted,
+                'total' => (int) $qtyTarget,
+                'pct' => $pct,
+                'advanced' => $advanced,
+                'new_stage' => $newStage,
+                'qc_blocked' => $qcBlocked,
+                'materials_blocked' => $materialsBlocked,
                 'materials_needing_actual' => $materialsNeeding,
-                'message'                  => $message,
-                'deduction_log'            => $deductionLog,
-                'low_stock'                => $lowStockAlerts,
+                'message' => $message,
+                'deduction_log' => $deductionLog,
+                'low_stock' => $lowStockAlerts,
                 'size_breakdown' => [
                     'xs' => $qtyXs, 's' => $qtyS, 'm' => $qtyM, 'l' => $qtyL,
                     'xl' => $qtyXl, 'xxl' => $qtyXxl, 'xxxl' => $qtyXxxl, 'custom' => $qtyCustom,
@@ -398,7 +402,7 @@ class ProductionStageService
     // of quantity_ordered). Null when the order has no size breakdown at all (older orders): only the total is enforced.
     public static function orderedBySize(int $orderId): ?array
     {
-        $map       = array_fill_keys(self::SIZE_COLS, 0);
+        $map = array_fill_keys(self::SIZE_COLS, 0);
         $hasCustom = false;
         foreach (DB::table('measurements')->where('order_id', $orderId)->get(['type', 'size_label', 'qty']) as $m) {
             if ($m->type === 'custom') {
@@ -408,22 +412,28 @@ class ProductionStageService
             }
         }
         if ($hasCustom) {
-            $ordered        = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered');
+            $ordered = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered');
             $map['custom'] += max(0, $ordered - array_sum($map));
         }
+
         return array_sum($map) > 0 ? $map : null;
     }
 
     // Logged pieces as [stage => [size col => n]] for every production stage.
     public static function completedBySize(int $orderId): array
     {
-        $out  = array_fill_keys(self::productionStages(), array_fill_keys(self::SIZE_COLS, 0));
+        $out = array_fill_keys(self::productionStages(), array_fill_keys(self::SIZE_COLS, 0));
         $sums = array_map(fn ($c) => DB::raw("COALESCE(SUM(qty_{$c}), 0) as {$c}"), self::SIZE_COLS);
         $rows = DB::table('daily_output_logs')->where('order_id', $orderId)->groupBy('stage')->select('stage', ...$sums)->get();
         foreach ($rows as $r) {
-            if (!isset($out[$r->stage])) continue;
-            foreach (self::SIZE_COLS as $c) $out[$r->stage][$c] = (int) $r->{$c};
+            if (! isset($out[$r->stage])) {
+                continue;
+            }
+            foreach (self::SIZE_COLS as $c) {
+                $out[$r->stage][$c] = (int) $r->{$c};
+            }
         }
+
         return $out;
     }
 
@@ -432,33 +442,43 @@ class ProductionStageService
     public function sizeLimitError(int $orderId, string $stage, array $batch): ?array
     {
         $ordered = self::orderedBySize($orderId);
-        $done    = self::completedBySize($orderId);
-        $stages  = self::productionStages();
-        $prev    = $stages[array_search($stage, $stages, true) - 1] ?? null;
-        $label   = self::stageLabel($stage);
+        $done = self::completedBySize($orderId);
+        $stages = self::productionStages();
+        $prev = $stages[array_search($stage, $stages, true) - 1] ?? null;
+        $label = self::stageLabel($stage);
 
         foreach ($batch as $col => $n) {
-            if ($n <= 0) continue;
+            if ($n <= 0) {
+                continue;
+            }
             $size = strtoupper($col);
             if ($ordered !== null && $ordered[$col] <= 0) {
                 return ['message' => "Size {$size} is not in this order.", 'size' => $size, 'remaining' => 0];
             }
             $caps = [];
-            if ($ordered !== null) $caps[] = $ordered[$col];
-            if ($prev) $caps[] = $done[$prev][$col];
-            if (!$caps) continue;
+            if ($ordered !== null) {
+                $caps[] = $ordered[$col];
+            }
+            if ($prev) {
+                $caps[] = $done[$prev][$col];
+            }
+            if (! $caps) {
+                continue;
+            }
             $left = max(0, min($caps) - $done[$stage][$col]);
             if ($n > $left) {
                 $why = $prev && ($ordered === null || $done[$prev][$col] < $ordered[$col])
-                    ? self::stageLabel($prev) . " has finished {$done[$prev][$col]}"
+                    ? self::stageLabel($prev)." has finished {$done[$prev][$col]}"
                     : "the order has {$ordered[$col]}";
+
                 return [
-                    'message'   => "Size {$size}: only {$left} more can be logged at {$label} ({$why}; {$label} has {$done[$stage][$col]}).",
-                    'size'      => $size,
+                    'message' => "Size {$size}: only {$left} more can be logged at {$label} ({$why}; {$label} has {$done[$stage][$col]}).",
+                    'size' => $size,
                     'remaining' => $left,
                 ];
             }
         }
+
         return null;
     }
 
@@ -466,51 +486,53 @@ class ProductionStageService
     public function productionSummary(int $orderId): ?array
     {
         $order = DB::table('orders')->where('order_id', $orderId)->first(['order_id', 'status', 'quantity_ordered']);
-        if (!$order) return null;
+        if (! $order) {
+            return null;
+        }
 
         $ordered = self::orderedBySize($orderId);
-        $done    = self::completedBySize($orderId);
-        $total   = (int) $order->quantity_ordered;
-        $sizes   = array_filter(self::SIZE_COLS, fn ($c) => $ordered ? $ordered[$c] > 0 : array_sum(array_column($done, $c)) > 0);
+        $done = self::completedBySize($orderId);
+        $total = (int) $order->quantity_ordered;
+        $sizes = array_filter(self::SIZE_COLS, fn ($c) => $ordered ? $ordered[$c] > 0 : array_sum(array_column($done, $c)) > 0);
 
         $stages = [];
-        $prev   = null;
+        $prev = null;
         foreach (self::productionStages() as $s) {
             $completed = array_sum($done[$s]);
-            $bySize    = [];
+            $bySize = [];
             foreach ($sizes as $c) {
                 $bySize[strtoupper($c)] = [
-                    'completed'     => $done[$s][$c],
+                    'completed' => $done[$s][$c],
                     'total_ordered' => $ordered[$c] ?? null,
-                    'in_progress'   => $prev ? max(0, $done[$prev][$c] - $done[$s][$c]) : 0,
+                    'in_progress' => $prev ? max(0, $done[$prev][$c] - $done[$s][$c]) : 0,
                 ];
             }
             $stages[] = [
-                'stage'         => $s,
-                'label'         => self::stageLabel($s),
-                'completed'     => $completed,
+                'stage' => $s,
+                'label' => self::stageLabel($s),
+                'completed' => $completed,
                 'total_ordered' => $total,
-                'in_progress'   => $prev ? max(0, array_sum($done[$prev]) - $completed) : 0,
-                'sizes'         => $bySize,
+                'in_progress' => $prev ? max(0, array_sum($done[$prev]) - $completed) : 0,
+                'sizes' => $bySize,
             ];
             $prev = $s;
         }
 
-        $packed    = array_sum($done['packing']);
+        $packed = array_sum($done['packing']);
         $delivered = (int) DB::table('delivery_tracking')->where('order_id', $orderId)->value('delivered_qty');
-        $defects   = DB::table('daily_output_logs')->where('order_id', $orderId)->where('defect_count', '>', 0)
+        $defects = DB::table('daily_output_logs')->where('order_id', $orderId)->where('defect_count', '>', 0)
             ->groupBy('defect_size')->select('defect_size', DB::raw('SUM(defect_count) as qty'))->pluck('qty', 'defect_size');
 
         return [
-            'order_id'           => (int) $order->order_id,
-            'status'             => $order->status,
-            'total_ordered'      => $total,
-            'ordered_by_size'    => $ordered ? array_change_key_case(array_filter($ordered), CASE_UPPER) : null,
-            'stages'             => $stages,
-            'packed_total'       => $packed,
-            'delivered_total'    => $delivered,
+            'order_id' => (int) $order->order_id,
+            'status' => $order->status,
+            'total_ordered' => $total,
+            'ordered_by_size' => $ordered ? array_change_key_case(array_filter($ordered), CASE_UPPER) : null,
+            'stages' => $stages,
+            'packed_total' => $packed,
+            'delivered_total' => $delivered,
             'ready_for_delivery' => max(0, $packed - $delivered),
-            'defects_by_size'    => $defects->map(fn ($q) => (int) $q),
+            'defects_by_size' => $defects->map(fn ($q) => (int) $q),
         ];
     }
 
@@ -518,11 +540,11 @@ class ProductionStageService
     // Stored as a zero-output sewing row in daily_output_logs (defect_count, defect_size, defect_notes = reason).
     public function reportDefect(int $orderId, int $staffId, string $size, int $qty, string $reason): array
     {
-        $col  = self::sizeCol($size);
+        $col = self::sizeCol($size);
         $size = strtoupper($col);
 
         return DB::transaction(function () use ($orderId, $staffId, $col, $size, $qty, $reason) {
-            if (!DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->exists()) {
+            if (! DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->exists()) {
                 return ['error' => true, 'status' => 404, 'message' => 'Order not found.'];
             }
             $mine = DB::table('daily_output_logs')->where('order_id', $orderId)->where('stage', 'sewing')->where('logged_by', $staffId);
@@ -532,20 +554,20 @@ class ProductionStageService
             }
             $left = max(0, $sewn - (int) (clone $mine)->where('defect_size', $size)->sum('defect_count'));
             if ($qty > $left) {
-                return ['error' => true, 'status' => 422, 'message' => "You can report at most {$left} more size {$size} defect" . ($left === 1 ? '' : 's') . " ({$sewn} sewn by you).", 'remaining' => $left];
+                return ['error' => true, 'status' => 422, 'message' => "You can report at most {$left} more size {$size} defect".($left === 1 ? '' : 's')." ({$sewn} sewn by you).", 'remaining' => $left];
             }
 
             $logId = DB::table('daily_output_logs')->insertGetId([
-                'order_id'     => $orderId,
-                'stage'        => 'sewing',
-                'logged_by'    => $staffId,
-                'log_date'     => now()->toDateString(),
+                'order_id' => $orderId,
+                'stage' => 'sewing',
+                'logged_by' => $staffId,
+                'log_date' => now()->toDateString(),
                 'qty_xs' => 0, 'qty_s' => 0, 'qty_m' => 0, 'qty_l' => 0, 'qty_xl' => 0, 'qty_xxl' => 0, 'qty_xxxl' => 0, 'qty_custom' => 0,
                 'defect_count' => $qty,
-                'defect_size'  => $size,
+                'defect_size' => $size,
                 'defect_notes' => $reason,
-                'created_at'   => now(),
-                'updated_at'   => now(),
+                'created_at' => now(),
+                'updated_at' => now(),
             ], 'log_id');
 
             return ['error' => false, 'log_id' => $logId, 'size' => $size, 'qty' => $qty, 'remaining' => $left - $qty];
@@ -556,19 +578,24 @@ class ProductionStageService
     public function incompleteStages(int $orderId, string $stage, bool $inclusive = false): array
     {
         $stages = array_slice(self::STAGE_MAP, 1, null, true); // pattern … packing
-        $upTo   = array_search($stage, array_keys($stages), true);
-        if ($upTo === false) return [];
-        $check  = array_slice(array_keys($stages), 0, $upTo + ($inclusive ? 1 : 0));
+        $upTo = array_search($stage, array_keys($stages), true);
+        if ($upTo === false) {
+            return [];
+        }
+        $check = array_slice(array_keys($stages), 0, $upTo + ($inclusive ? 1 : 0));
 
         $ordered = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered');
-        $rows    = DB::table('order_production_tracking')->where('order_id', $orderId)->whereIn('stage', $check)->get()->keyBy('stage');
+        $rows = DB::table('order_production_tracking')->where('order_id', $orderId)->whereIn('stage', $check)->get()->keyBy('stage');
 
         $open = [];
         foreach ($check as $s) {
             $target = ($rows[$s]->qty_target ?? 0) > 0 ? (int) $rows[$s]->qty_target : $ordered;
-            $done   = (int) ($rows[$s]->qty_completed ?? 0);
-            if ($done < $target) $open[] = self::stageLabel($s) . " {$done}/{$target}";
+            $done = (int) ($rows[$s]->qty_completed ?? 0);
+            if ($done < $target) {
+                $open[] = self::stageLabel($s)." {$done}/{$target}";
+            }
         }
+
         return $open;
     }
 
@@ -601,19 +628,29 @@ class ProductionStageService
                 $missing[] = ['material_id' => $rec->material_id, 'material_name' => $rec->material_name];
             }
         }
+
         return $missing;
     }
 
     // ── QC Gate ───────────────────────────────────────────────────────────────
+    // A received PO for this order whose colour did not match holds cutting until a manager confirms the colour.
+    public static function colorHold(int $orderId): ?string
+    {
+        $po = DB::table('purchase_orders')->where('order_id', $orderId)->where('color_mismatch', 1)->where('color_confirmed', 0)->value('po_number');
+
+        return $po ? "Cutting is on hold: the fabric colour on PO {$po} did not match. A manager must confirm the colour first." : null;
+    }
+
     // Shared by logOutput() and ProductionController's manager override. Blocked unless QC is not required for the
     // order or its latest checklist passed (QCChecklistController sets passed: 80% of the sample AND every required check).
     public static function qcBlocked(object $order): bool
     {
-        if (!$order->qc_required) {
+        if (! $order->qc_required) {
             return false;
         }
         $latest = DB::table('qc_checklists')->where('order_id', $order->order_id)->orderByDesc('checked_at')->orderByDesc('check_id')->first();
-        return !($latest && $latest->passed);
+
+        return ! ($latest && $latest->passed);
     }
 
     // A passing checklist submitted after every QC piece was already logged releases the held advance to Pressing,
@@ -622,12 +659,12 @@ class ProductionStageService
     {
         return DB::transaction(function () use ($orderId) {
             $order = DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->first();
-            if (!$order || $order->status !== 'qc') {
+            if (! $order || $order->status !== 'qc') {
                 return ['advanced' => false, 'new_stage' => $order->status ?? null, 'message' => null];
             }
             $open = $this->incompleteStages($orderId, 'qc', true);
             if ($open) {
-                return ['advanced' => false, 'new_stage' => 'qc', 'message' => 'QC passed. The order moves to Pressing once these are logged: ' . implode(', ', $open) . '.'];
+                return ['advanced' => false, 'new_stage' => 'qc', 'message' => 'QC passed. The order moves to Pressing once these are logged: '.implode(', ', $open).'.'];
             }
             if (self::qcBlocked($order)) {
                 return ['advanced' => false, 'new_stage' => 'qc', 'message' => null];
@@ -635,8 +672,26 @@ class ProductionStageService
             $next = self::STAGE_MAP['qc'];
             $this->moveStage($orderId, 'qc', $next);
             $this->notifyStageAdvance($orderId, $order->user_id, 'qc', $next);
-            return ['advanced' => true, 'new_stage' => $next, 'message' => "QC passed. Order #{$orderId} advanced to " . self::stageLabel($next) . '.'];
+
+            return ['advanced' => true, 'new_stage' => $next, 'message' => "QC passed. Order #{$orderId} advanced to ".self::stageLabel($next).'.'];
         });
+    }
+
+    // Down payment received: a confirmed order starts at Pattern by itself; the customer only hears "in production".
+    public function startProduction(int $orderId): void
+    {
+        $order = DB::table('orders')->where('order_id', $orderId)->first(['user_id', 'status', 'order_type', 'down_payment_received_at']);
+        if (! $order || $order->status !== 'confirmed' || ($order->order_type !== 'subcontract' && empty($order->down_payment_received_at))) {
+            return;
+        }
+        $this->moveStage($orderId, 'confirmed', 'pattern');
+        $this->notifyStageAdvance($orderId, (int) $order->user_id, 'confirmed', 'pattern');
+        DB::table('notifications')->insert([
+            'user_id' => $order->user_id, 'order_id' => $orderId, 'type' => 'production', 'title' => "Order #{$orderId} in production",
+            'message' => "VFRB has started producing order #{$orderId}.", 'is_read' => 0,
+            'date_sent' => now(), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        Cache::forget('dashboard_stats');
     }
 
     // The one place an order's stage changes; leaving QC stamps qc_passed_at.
@@ -665,7 +720,9 @@ class ProductionStageService
 
         foreach ($recs as $rec) {
             $qty = $actualsByMaterialId[$rec->material_id] ?? -1;
-            if ($qty < 0) continue; // gate already blocked a missing value; never guess one
+            if ($qty < 0) {
+                continue;
+            } // gate already blocked a missing value; never guess one
             DB::table('material_recommendations')
                 ->where('rec_id', $rec->rec_id)
                 ->update(['actual_qty_issued' => $qty, 'updated_at' => now()]);
@@ -688,11 +745,12 @@ class ProductionStageService
             ->whereNull('issued_at')
             ->get();
 
-        $log      = [];
+        $log = [];
         $lowStock = [];
 
         if ($recs->isEmpty()) {
             Log::info("Order #{$orderId}: nothing left to issue at Cutting (no recorded consumption, or already issued)");
+
             return ['log' => [], 'low_stock' => []];
         }
 
@@ -700,7 +758,7 @@ class ProductionStageService
         // e.g. OTG fabric) are issued from that order's client ledger, never from VFRB stock.
         // Before the ledger migration runs, the old rule applies: subcontract fabric is client-owned, unlogged.
         $clientSvc = new ClientMaterialService;
-        $ledger    = ClientMaterialService::ready();
+        $ledger = ClientMaterialService::ready();
         $orderType = $ledger ? null : DB::table('orders')->where('order_id', $orderId)->value('order_type');
 
         foreach ($recs as $rec) {
@@ -709,7 +767,9 @@ class ProductionStageService
                 ->lockForUpdate()
                 ->first();
 
-            if (!$material) continue;
+            if (! $material) {
+                continue;
+            }
 
             // Consumption staff entered at Pattern — never a computed estimate.
             $qty = (float) $rec->actual_qty_issued;
@@ -722,13 +782,13 @@ class ProductionStageService
             }
 
             $before = (float) $material->quantity_in_stock;
-            $after  = max(0, $before - $qty); // clamped — a typo'd qty_used can't push stock negative
+            $after = max(0, $before - $qty); // clamped — a typo'd qty_used can't push stock negative
 
             // Only touch stock + write a stock_out log if something was
             // actually used. A confirmed-zero usage still gets recorded on
             // the recommendation itself (below) so the audit trail shows it
             // was reviewed, not just skipped.
-            if ($qty > 0 && !$isClientSupplied) {
+            if ($qty > 0 && ! $isClientSupplied) {
                 DB::table('materials')
                     ->where('material_id', $material->material_id)
                     ->update(['quantity_in_stock' => $after, 'updated_at' => now()]);
@@ -736,12 +796,12 @@ class ProductionStageService
                 DB::table('inventory_logs')->insert([
                     'material_id' => $material->material_id,
                     'recorded_by' => $actorId,
-                    'type'        => 'stock_out',
-                    'change_qty'  => -$qty,
-                    'reason'      => "Issued to production — Order #{$orderId} (Cutting stage, consumption recorded at Pattern)",
-                    'log_date'    => now(),
-                    'created_at'  => now(),
-                    'updated_at'  => now(),
+                    'type' => 'stock_out',
+                    'change_qty' => -$qty,
+                    'reason' => "Issued to production — Order #{$orderId} (Cutting stage, consumption recorded at Pattern)",
+                    'log_date' => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
             }
 
@@ -749,8 +809,8 @@ class ProductionStageService
                 ->where('rec_id', $rec->rec_id)
                 ->update([
                     'actual_qty_issued' => $qty,
-                    'issued_at'         => now(),
-                    'updated_at'        => now(),
+                    'issued_at' => now(),
+                    'updated_at' => now(),
                 ]);
 
             // Client-supplied material went to the client ledger, not VFRB stock, so it has no
@@ -760,20 +820,22 @@ class ProductionStageService
             }
 
             $item = [
-                'material_id'   => $material->material_id,
+                'material_id' => $material->material_id,
                 'material_name' => $material->material_name,
-                'unit'          => $material->unit,
-                'deducted'      => round($qty, 4),
-                'before'        => round($before, 4),
-                'after'         => round($after, 4),
-                'low_stock'     => $qty > 0 && $after <= (float) $material->reorder_threshold,
-                'over_issued'   => $qty > $before, // qty_used exceeded stock on hand — likely a typo, needs a look
+                'unit' => $material->unit,
+                'deducted' => round($qty, 4),
+                'before' => round($before, 4),
+                'after' => round($after, 4),
+                'low_stock' => $qty > 0 && $after <= (float) $material->reorder_threshold,
+                'over_issued' => $qty > $before, // qty_used exceeded stock on hand — likely a typo, needs a look
             ];
             $log[] = $item;
-            if ($item['low_stock'] || $item['over_issued']) $lowStock[] = $item;
+            if ($item['low_stock'] || $item['over_issued']) {
+                $lowStock[] = $item;
+            }
         }
 
-        Log::info("Deduction complete — Order #{$orderId} — " . count($log) . " materials deducted");
+        Log::info("Deduction complete — Order #{$orderId} — ".count($log).' materials deducted');
         Cache::forget('materials_list');
         Cache::forget('admin_reports_index');
         Cache::forget('dashboard_stats');
@@ -787,37 +849,40 @@ class ProductionStageService
     {
         $order = DB::table('orders')->where('order_id', $orderId)->first();
 
-        if (!DB::table('delivery_tracking')->where('order_id', $orderId)->exists()) {
+        if (! DB::table('delivery_tracking')->where('order_id', $orderId)->exists()) {
             // The order's own address wins; the account address is only a fallback.
             $address = trim((string) ($order->delivery_address ?? '')) ?: DB::table('users')->where('user_id', $order->user_id)->value('address');
+            $pickup = ($order->delivery_method ?? null) === 'pickup';
             $eta = ! empty($order->promised_date) && $order->promised_date >= now()->toDateString()
                 ? $order->promised_date
                 : now()->addDays(3)->toDateString();
 
             DB::table('delivery_tracking')->insert([
-                'order_id'                => $orderId,
-                'delivery_method'         => 'vfrb_deliver',
-                'delivery_status'         => 'preparing',
-                'delivery_address'        => $address ?? 'Address pending',
+                'order_id' => $orderId,
+                'delivery_method' => $pickup ? 'pickup' : 'vfrb_deliver',
+                'delivery_status' => 'preparing',
+                'delivery_address' => $pickup ? null : ($address ?? 'Address pending'),
                 'estimated_delivery_date' => $eta,
-                'updated_by'              => $actorId,
-                'notes'                   => 'Auto-created when packing started.',
-                'created_at'              => now(),
-                'updated_at'              => now(),
+                'updated_by' => $actorId,
+                'notes' => 'Auto-created when packing started.',
+                'created_at' => now(),
+                'updated_at' => now(),
             ]);
         }
-        if (!$notify) return;
+        if (! $notify) {
+            return;
+        }
 
         DB::table('notifications')->insert([
-            'user_id'   => $order->user_id,
-            'order_id'  => $orderId,
-            'type'      => 'success',
-            'title'     => "Order #{$orderId} Ready for Delivery",
-            'message'   => "🎉 Order #{$orderId} is fully packed and ready for delivery.",
-            'is_read'   => 0,
+            'user_id' => $order->user_id,
+            'order_id' => $orderId,
+            'type' => 'success',
+            'title' => ($order->delivery_method ?? null) === 'pickup' ? "Order #{$orderId} Ready for Pickup" : "Order #{$orderId} Ready for Delivery",
+            'message' => ($order->delivery_method ?? null) === 'pickup' ? "🎉 Order #{$orderId} is fully packed and ready for pickup at VFRB." : "🎉 Order #{$orderId} is fully packed and ready for delivery.",
+            'is_read' => 0,
             'date_sent' => now(),
-            'created_at'=> now(),
-            'updated_at'=> now(),
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
     }
 
@@ -828,7 +893,9 @@ class ProductionStageService
     // so InspoGallery.jsx can list + reload it for this customer's future orders.
     private function archiveCompletedDesign(int $orderId, object $order): void
     {
-        if (empty($order->studio_config)) return; // upload-only orders have no builder config to archive
+        if (empty($order->studio_config)) {
+            return;
+        } // upload-only orders have no builder config to archive
 
         $configJson = (string) $order->studio_config;
 
@@ -843,30 +910,31 @@ class ProductionStageService
             ->first();
 
         if ($duplicate) {
-            if (!$order->design_id) {
+            if (! $order->design_id) {
                 DB::table('orders')->where('order_id', $orderId)->update(['design_id' => $duplicate->design_id]);
             }
+
             return;
         }
 
         $designId = DB::table('designs')->insertGetId([
-            'design_name'           => "{$order->garment_type} — Order #{$orderId}",
-            'garment_type'          => $order->garment_type,
-            'category'              => null,
-            'collar_type'           => $order->collar_type,
-            'sleeve_type'           => $order->sleeve_type,
-            'pocket_type'           => $order->pocket_type,
-            'color'                 => $order->color,
-            'photo_path'            => $order->client_design_preview_file,
+            'design_name' => "{$order->garment_type} — Order #{$orderId}",
+            'garment_type' => $order->garment_type,
+            'category' => null,
+            'collar_type' => $order->collar_type,
+            'sleeve_type' => $order->sleeve_type,
+            'pocket_type' => $order->pocket_type,
+            'color' => $order->color,
+            'photo_path' => $order->client_design_preview_file,
             'custom_builder_config' => $configJson,
-            'source_order_id'       => $orderId,
-            'parent_design_id'      => $order->design_id,
-            'is_active'             => 1,
-            'created_at'            => now(),
-            'updated_at'            => now(),
+            'source_order_id' => $orderId,
+            'parent_design_id' => $order->design_id,
+            'is_active' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'design_id');
 
-        if (!$order->design_id) {
+        if (! $order->design_id) {
             DB::table('orders')->where('order_id', $orderId)->update(['design_id' => $designId]);
         }
     }
@@ -878,9 +946,9 @@ class ProductionStageService
     private function notifyStageAdvance(int $orderId, int $customerId, string $fromStage, string $toStage, int $materialsDeductedCount = 0): void
     {
         $fromLabel = self::stageLabel($fromStage);
-        $toLabel   = self::stageLabel($toStage);
-        $now       = now();
-        $suffix    = $materialsDeductedCount > 0 ? " · {$materialsDeductedCount} materials issued to production." : "";
+        $toLabel = self::stageLabel($toStage);
+        $now = now();
+        $suffix = $materialsDeductedCount > 0 ? " · {$materialsDeductedCount} materials issued to production." : '';
 
         // Managers only: the client does not see production stages.
         $managers = DB::table('model_has_roles')
@@ -890,12 +958,12 @@ class ProductionStageService
 
         foreach ($managers as $managerId) {
             DB::table('notifications')->insert([
-                'user_id'    => $managerId,
-                'order_id'   => $orderId,
-                'message'    => "Order #{$orderId} advanced: {$fromLabel} → {$toLabel}.{$suffix}",
-                'type'       => 'production',
-                'is_read'    => 0,
-                'date_sent'  => $now,
+                'user_id' => $managerId,
+                'order_id' => $orderId,
+                'message' => "Order #{$orderId} advanced: {$fromLabel} → {$toLabel}.{$suffix}",
+                'type' => 'production',
+                'is_read' => 0,
+                'date_sent' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);

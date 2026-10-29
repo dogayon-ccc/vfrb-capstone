@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/SalesTransactionController.php
 // VFRB Enterprise — Sales Transactions (payment recording)
 //
@@ -22,7 +23,9 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\BillingService;
 use App\Support\Sql;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -35,7 +38,7 @@ class SalesTransactionController extends Controller
     public function index(Request $request)
     {
         $perPage = (int) $request->input('per_page', 20);
-        $search  = $request->input('search', '');
+        $search = $request->input('search', '');
 
         $query = $this->withActor()
             ->addSelect('orders.status as order_status', 'orders.color')
@@ -44,8 +47,8 @@ class SalesTransactionController extends Controller
         if ($search) {
             $query->where(function ($q) use ($search) {
                 $q->where('users.name', Sql::like(), "%{$search}%")
-                  ->orWhere('users.organization_name', Sql::like(), "%{$search}%")
-                  ->orWhere('sales_transactions.or_number', Sql::like(), "%{$search}%");
+                    ->orWhere('users.organization_name', Sql::like(), "%{$search}%")
+                    ->orWhere('sales_transactions.or_number', Sql::like(), "%{$search}%");
             });
         }
 
@@ -57,7 +60,7 @@ class SalesTransactionController extends Controller
     {
         $txn = $this->withActor()->where('sales_transactions.transaction_id', $id)->first();
 
-        if (!$txn) {
+        if (! $txn) {
             return response()->json(['message' => 'Transaction not found.'], 404);
         }
 
@@ -69,13 +72,13 @@ class SalesTransactionController extends Controller
     {
         $txn = $this->withActor()->where('sales_transactions.transaction_id', $id)->first();
 
-        if (!$txn) {
+        if (! $txn) {
             return response()->json(['message' => 'Transaction not found.'], 404);
         }
 
-        $pdf = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.receipt', [
-            'txn'       => (array) $txn,
-            'labels'    => app(\App\Services\BillingService::class)->labels(),
+        $pdf = Pdf::loadView('pdf.receipt', [
+            'txn' => (array) $txn,
+            'labels' => app(BillingService::class)->labels(),
             'printedAt' => now()->format('F d, Y g:i A'),
         ])->setPaper('a4', 'portrait');
 
@@ -96,28 +99,28 @@ class SalesTransactionController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'order_id'       => 'required|integer|exists:orders,order_id',
-            'amount_paid'    => 'required|numeric|min:0.01',
+            'order_id' => 'required|integer|exists:orders,order_id',
+            'amount_paid' => 'required|numeric|min:0.01',
             'payment_method' => 'required|in:cash,gcash,ewallet,bank_transfer,not_yet_paid',
-            'payment_terms'  => 'nullable|in:full_payment,down_payment,net_30',
-            'or_number'      => 'nullable|string|max:50',
-            'notes'          => 'nullable|string|max:1000',
+            'payment_terms' => 'nullable|in:full_payment,down_payment,net_30',
+            'or_number' => 'nullable|string|max:50',
+            'notes' => 'nullable|string|max:1000',
             // Required only for an order's first payment — enforced below,
             // not here, because "required" depends on whether a
             // sales_transactions row already exists for this order.
-            'amount_total'   => 'nullable|numeric|min:0.01',
-            'reference_no'   => 'nullable|string|max:50',
+            'amount_total' => 'nullable|numeric|min:0.01',
+            'reference_no' => 'nullable|string|max:50',
         ]);
 
         // The order total is a manager decision; staff record payments against it.
-        if ($request->filled('amount_total') && !$request->user()->isManager()) {
+        if ($request->filled('amount_total') && ! $request->user()->isManager()) {
             return response()->json(['message' => 'Only an Administrator can set the order total.'], 403);
         }
 
         $newAmountPaid = (float) $request->input('amount_paid');
 
         // Locked transaction (race-safe on amount_paid); also writes the payment's RCT receipt.
-        $result = app(\App\Services\BillingService::class)->recordPayment(
+        $result = app(BillingService::class)->recordPayment(
             (int) $request->input('order_id'),
             $newAmountPaid,
             $request->input('payment_method'),
@@ -132,21 +135,24 @@ class SalesTransactionController extends Controller
         if (isset($result['error'])) {
             return response()->json($result['error'], 422);
         }
-        $order      = $result['order'];
-        $txn        = $result['txn'];
+        $order = $result['order'];
+        $txn = $result['txn'];
         $balanceDue = $result['balanceDue'];
+        if ($balanceDue <= 0) {
+            app(DeliveryController::class)->deliverIfPaid((int) $order->order_id);
+        }
 
         // Notify customer of payment recorded
         $now = now();
         DB::table('notifications')->insert([
-            'user_id'    => $order->user_id,
-            'order_id'   => $order->order_id,
-            'message'    => "Payment of ₱" . number_format($newAmountPaid, 2) . " received for Order #{$order->order_id}."
-                . ($balanceDue > 0 ? " Balance due: ₱" . number_format($balanceDue, 2) . "." : " Account settled."),
-            'type'       => 'payment',
-            'title'      => 'Payment Received',
-            'is_read'    => 0,
-            'date_sent'  => $now,
+            'user_id' => $order->user_id,
+            'order_id' => $order->order_id,
+            'message' => 'Payment of ₱'.number_format($newAmountPaid, 2)." received for Order #{$order->order_id}."
+                .($balanceDue > 0 ? ' Balance due: ₱'.number_format($balanceDue, 2).'.' : ' Account settled.'),
+            'type' => 'payment',
+            'title' => 'Payment Received',
+            'is_read' => 0,
+            'date_sent' => $now,
             'created_at' => $now,
             'updated_at' => $now,
         ]);
@@ -164,7 +170,7 @@ class SalesTransactionController extends Controller
     {
         return DB::table('sales_transactions')
             ->join('orders', 'sales_transactions.order_id', '=', 'orders.order_id')
-            ->join('users',  'orders.user_id', '=', 'users.user_id')
+            ->join('users', 'orders.user_id', '=', 'users.user_id')
             ->leftJoin('users as staff', 'sales_transactions.processed_by', '=', 'staff.user_id')
             ->select(
                 'sales_transactions.*',

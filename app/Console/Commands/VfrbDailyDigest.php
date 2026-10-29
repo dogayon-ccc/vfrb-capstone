@@ -29,6 +29,7 @@ namespace App\Console\Commands;
 
 use App\Http\Controllers\Api\PhysicalCountController;
 use App\Services\ClientMaterialService;
+use App\Support\OrderStatusLabel;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\DB;
@@ -37,7 +38,7 @@ class VfrbDailyDigest extends Command
 {
     protected $signature = 'vfrb:daily-digest';
 
-    protected $description = 'Low-stock digest, auto-suggested RFQs, deadline reminders, client supply alerts and the weekly count reminder';
+    protected $description = 'Low-stock digest, auto-suggested RFQs, deadline reminders, overdue flags, client supply alerts and the weekly count reminder';
 
     public function handle(): int
     {
@@ -45,7 +46,9 @@ class VfrbDailyDigest extends Command
             'low_stock_digest' => $this->lowStockDigest(),
             'rfqs_auto_created' => $this->autoSuggestRfqs(),
             'deadline_reminders' => $this->deadlineReminders(),
+            'overdue_flags' => $this->overdueAlerts(),
             'client_supply_orders' => $this->clientSupplyAlert(),
+            'client_returns_due' => $this->clientReturnAlert(),
             'weekly_count_due' => $this->weeklyCountReminder(),
         ];
 
@@ -58,7 +61,7 @@ class VfrbDailyDigest extends Command
     private function lowStockDigest(): int
     {
         $lowStock = DB::table('materials')
-            ->whereRaw(\App\Services\ClientMaterialService::lowStockSql())
+            ->whereRaw(ClientMaterialService::lowStockSql())
             ->orderByRaw('(quantity_in_stock / NULLIF(reorder_threshold,0)) ASC')
             ->get();
 
@@ -116,7 +119,7 @@ class VfrbDailyDigest extends Command
     private function autoSuggestRfqs(): int
     {
         $lowStock = DB::table('materials')
-            ->whereRaw(\App\Services\ClientMaterialService::lowStockSql())
+            ->whereRaw(ClientMaterialService::lowStockSql())
             ->get();
 
         if ($lowStock->isEmpty()) {
@@ -151,8 +154,11 @@ class VfrbDailyDigest extends Command
                 continue;
             }
 
-            // Threshold gap only; stock exactly at threshold has no gap, so no RFQ.
-            $qty = round($material->reorder_threshold - $material->quantity_in_stock, 2);
+            // Threshold gap minus what open POs will still bring in; nothing left to buy means no RFQ.
+            $incoming = (float) DB::table('purchase_order_items')->join('purchase_orders', 'purchase_orders.po_id', '=', 'purchase_order_items.po_id')
+                ->where('purchase_order_items.material_id', $material->material_id)->whereIn('purchase_orders.status', ['draft', 'sent'])
+                ->sum('purchase_order_items.qty');
+            $qty = round($material->reorder_threshold - $material->quantity_in_stock - $incoming, 2);
             if ($qty <= 0) {
                 continue;
             }
@@ -179,14 +185,14 @@ class VfrbDailyDigest extends Command
     {
         $activeStages = [
             'pending', 'confirmed', 'pattern', 'segregation',
-            'cutting', 'sewing', 'qc', 'pressing', 'packing',
+            'cutting', 'sewing', 'qc', 'pressing', 'packing', 'for_delivery',
         ];
 
+        // The agreed date wins; the customer's preferred date is only a fallback.
         $nearDeadline = DB::table('orders')
+            ->selectRaw('orders.*, COALESCE(promised_date, target_delivery_date) as due_on')
             ->whereIn('status', $activeStages)
-            ->whereNotNull('target_delivery_date')
-            ->where('target_delivery_date', '<=', now()->addDays(7)->toDateString())
-            ->where('target_delivery_date', '>=', now()->toDateString())
+            ->whereRaw('COALESCE(promised_date, target_delivery_date) BETWEEN ? AND ?', [now()->toDateString(), now()->addDays(7)->toDateString()])
             ->get();
 
         if ($nearDeadline->isEmpty()) {
@@ -212,7 +218,7 @@ class VfrbDailyDigest extends Command
             }
 
             $daysLeft = (int) now()->startOfDay()
-                ->diffInDays(Carbon::parse($order->target_delivery_date), false);
+                ->diffInDays(Carbon::parse($order->due_on), false);
             $daysLeft = max(0, $daysLeft);
             $label = $daysLeft === 0 ? 'today' : "in {$daysLeft} day".($daysLeft === 1 ? '' : 's');
 
@@ -222,7 +228,7 @@ class VfrbDailyDigest extends Command
             $rows[] = [
                 'user_id' => $order->user_id,
                 'order_id' => $order->order_id,
-                'message' => "Your order #{$order->order_id} ({$order->garment_type}) is due {$label}. Current stage: ".ucfirst($order->status).'.',
+                'message' => "Your order #{$order->order_id} ({$order->garment_type}) is due {$label}. Status: ".OrderStatusLabel::for($order->status).'.',
                 'type' => 'deadline_reminder',
                 'title' => 'Delivery Deadline Approaching',
                 'is_read' => 0,
@@ -253,6 +259,45 @@ class VfrbDailyDigest extends Command
         return $notified;
     }
 
+    // ── 3b. Overdue: managers are flagged once per late order and once per unpaid invoice past its due date ──
+    private function overdueAlerts(): int
+    {
+        $today = now()->toDateString();
+        $managers = DB::table('model_has_roles')->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+            ->where('roles.name', 'manager')->pluck('model_has_roles.model_id');
+        $flagged = 0;
+
+        $lateOrders = DB::table('orders')->whereNotIn('status', ['completed', 'cancelled'])
+            ->whereRaw('COALESCE(promised_date, target_delivery_date) < ?', [$today])->get(['order_id', 'status', 'garment_type']);
+        foreach ($lateOrders as $o) {
+            $flagged += $this->flagOnce($managers, 'order_overdue', (int) $o->order_id, "Order #{$o->order_id} is overdue",
+                "Order #{$o->order_id} ({$o->garment_type}) passed its agreed date and is still at ".str_replace('_', ' ', $o->status).'.');
+        }
+
+        $lateInvoices = DB::table('invoices')->where('status', 'issued')->whereNotNull('due_date')->where('due_date', '<', $today)
+            ->get(['order_id', 'invoice_number', 'due_date']);
+        foreach ($lateInvoices as $i) {
+            $flagged += $this->flagOnce($managers, 'invoice_overdue', (int) $i->order_id, "{$i->invoice_number} is overdue",
+                "{$i->invoice_number} for order #{$i->order_id} was due ".Carbon::parse($i->due_date)->toDateString().' and is still unpaid.');
+        }
+
+        return $flagged;
+    }
+
+    private function flagOnce($managers, string $type, int $orderId, string $title, string $message): int
+    {
+        if ($managers->isEmpty() || DB::table('notifications')->where('type', $type)->where('order_id', $orderId)->exists()) {
+            return 0;
+        }
+        $now = now();
+        DB::table('notifications')->insert($managers->map(fn ($uid) => [
+            'user_id' => $uid, 'order_id' => $orderId, 'type' => $type, 'title' => $title, 'message' => $message,
+            'is_read' => 0, 'date_sent' => $now, 'created_at' => $now, 'updated_at' => $now,
+        ])->all());
+
+        return 1;
+    }
+
     // ── 4. Client supply — orders waiting on client-supplied materials ──────
     // Active orders before or at Cutting that are short (consumption known) or have received nothing yet.
     private function clientSupplyAlert(): int
@@ -266,13 +311,29 @@ class VfrbDailyDigest extends Command
 
         $parts = $waiting->take(4)->map(function ($o) {
             $who = $o['organization_name'] ?: $o['customer_name'];
-            $what = $o['short'] ? ClientMaterialService::describe($o['short'], 'short') . ' short' : 'nothing delivered yet';
+            $what = $o['short'] ? ClientMaterialService::describe($o['short'], 'short').' short' : 'nothing delivered yet';
+
             return "#{$o['order_id']} {$who}: {$what}";
         })->implode('; ');
-        $extra = $waiting->count() > 4 ? ' and ' . ($waiting->count() - 4) . ' more' : '';
+        $extra = $waiting->count() > 4 ? ' and '.($waiting->count() - 4).' more' : '';
         $message = "Client materials needed for {$waiting->count()} order(s): {$parts}{$extra}. Contact the client so production isn't delayed.";
 
         return $this->notifyStaffOnce('client_supply', 'Client Materials Missing', $message) ? $waiting->count() : 0;
+    }
+
+    // ── 4b. Client returns: cancelled orders still holding the client's material ──
+    private function clientReturnAlert(): int
+    {
+        $held = collect((new ClientMaterialService)->openOrders())->where('status', 'cancelled');
+        if ($held->isEmpty()) {
+            return 0;
+        }
+        $parts = $held->take(4)->map(fn ($o) => "#{$o['order_id']} ".($o['organization_name'] ?: $o['customer_name']).': '
+            .ClientMaterialService::describe(array_filter($o['lines'], fn ($l) => $l['on_hand'] > 0), 'on_hand'))->implode('; ');
+        $extra = $held->count() > 4 ? ' and '.($held->count() - 4).' more' : '';
+        $message = "Cancelled order(s) still hold client materials: {$parts}{$extra}. Return them to the client and record the return.";
+
+        return $this->notifyStaffOnce('client_return', 'Client Materials to Return', $message) ? $held->count() : 0;
     }
 
     // ── 5. Weekly count — VFRB counts its own stock every Monday ────────────

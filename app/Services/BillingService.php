@@ -61,7 +61,7 @@ class BillingService
         return DB::transaction(function () use ($orderId, $amount, $method, $terms, $orNumber, $notes, $amountTotalInput, $userId, $referenceNo) {
             $order = DB::table('orders')
                 ->where('order_id', $orderId)
-                ->select('order_id', 'user_id', 'agreed_total')
+                ->select('order_id', 'user_id', 'agreed_total', 'order_type')
                 ->lockForUpdate()
                 ->first();
 
@@ -142,6 +142,14 @@ class BillingService
                     'notes' => $notes,
                 ]);
                 AuditLog::record('payment_receipt_created', 'payment_receipts', (int) $receipt->receipt_id, $userId);
+
+                // A direct order's first real payment is its down payment, wherever recorded; subcontract orders pay at delivery.
+                $unlocked = $order->order_type !== 'subcontract' && DB::table('orders')->where('order_id', $order->order_id)->whereNull('down_payment_received_at')
+                    ->update(['down_payment_amount' => $amount, 'down_payment_received_at' => now(), 'updated_at' => now()]);
+                if ($unlocked) {
+                    AuditLog::record('order_down_payment_received', 'orders', (int) $order->order_id, $userId);
+                    (new ProductionStageService)->startProduction((int) $order->order_id);
+                }
             }
 
             if ($invoice && $invoice->status === 'issued' && $balanceDue <= 0) {
@@ -219,6 +227,9 @@ class BillingService
     }
 
     /** Issues the invoice when an order is delivered, using the customer's default billing profile. Null if skipped. */
+    // Matches the net_30 credit term, so an unpaid auto-issued invoice is flagged by the daily digest.
+    public const AUTO_INVOICE_DUE_DAYS = 30;
+
     public function autoIssueOnDelivery(int $orderId, int $userId): ?Invoice
     {
         if (Invoice::where('order_id', $orderId)->live()->exists()) {
@@ -229,7 +240,7 @@ class BillingService
             ->where('is_default', true)
             ->value('billing_id');
 
-        return $this->issue($orderId, $userId, $profileId, null, 'Issued automatically on delivery.')['invoice'] ?? null;
+        return $this->issue($orderId, $userId, $profileId, now()->addDays(self::AUTO_INVOICE_DUE_DAYS)->toDateString(), 'Issued automatically on delivery.')['invoice'] ?? null;
     }
 
     /**

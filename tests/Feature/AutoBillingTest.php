@@ -61,13 +61,13 @@ class AutoBillingTest extends TestCase
         $this->assertSame(40000.0, (float) DB::table('sales_transactions')->where('order_id', $id)->value('amount_paid'));
     }
 
-    public function test_down_payment_without_a_method_defaults_to_cash(): void
+    public function test_down_payment_without_a_method_defaults_to_bank_transfer(): void
     {
         $id = $this->order('confirmed');
 
         $this->postJson("/api/admin/orders/{$id}/down-payment", ['down_payment_amount' => 40000])->assertOk();
 
-        $this->assertSame('cash', DB::table('payment_receipts')->where('order_id', $id)->value('payment_method'));
+        $this->assertSame('bank_transfer', DB::table('payment_receipts')->where('order_id', $id)->value('payment_method'));
     }
 
     public function test_down_payment_already_logged_as_a_transaction_is_not_receipted_twice(): void
@@ -76,7 +76,8 @@ class AutoBillingTest extends TestCase
         $this->postJson('/api/admin/transactions', ['order_id' => $id, 'amount_paid' => 40000, 'payment_method' => 'cash', 'payment_terms' => 'down_payment'])
             ->assertSuccessful();
 
-        $this->postJson("/api/admin/orders/{$id}/down-payment", ['down_payment_amount' => 40000])->assertOk();
+        // The Sales entry already counts as the down payment, so the separate step refuses a second one.
+        $this->postJson("/api/admin/orders/{$id}/down-payment", ['down_payment_amount' => 40000])->assertStatus(422);
 
         $this->assertSame(1, DB::table('payment_receipts')->where('order_id', $id)->count());
         $this->assertSame(40000.0, (float) DB::table('sales_transactions')->where('order_id', $id)->value('amount_paid'));
@@ -93,6 +94,7 @@ class AutoBillingTest extends TestCase
 
         $invoice = DB::table('invoices')->where('order_id', $id)->first();
         $this->assertSame(['issued', 50000.0], [$invoice->status, (float) $invoice->total_amount]);
+        $this->assertSame(now()->addDays(30)->toDateString(), substr((string) $invoice->due_date, 0, 10));
         $this->assertSame((int) $invoice->invoice_id, (int) DB::table('payment_receipts')->where('order_id', $id)->value('invoice_id'));
         $this->assertTrue(DB::table('notifications')->where('order_id', $id)->where('user_id', 5)
             ->where('message', 'like', "{$invoice->invoice_number}%")->exists());

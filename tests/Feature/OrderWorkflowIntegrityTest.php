@@ -174,6 +174,99 @@ class OrderWorkflowIntegrityTest extends TestCase
         $this->patchJson("/api/admin/delivery/{$t}/delivered")->assertOk();
     }
 
+    public function test_a_first_payment_from_sales_unlocks_production(): void
+    {
+        $this->actAs(1);
+        $paid = $this->order('confirmed', ['agreed_total' => 50000, 'down_payment_received_at' => null]);
+
+        $this->postJson('/api/admin/transactions', ['order_id' => $paid, 'amount_paid' => 20000, 'payment_method' => 'bank_transfer', 'payment_terms' => 'down_payment'])->assertSuccessful();
+
+        $this->assertEquals(20000, (float) DB::table('orders')->where('order_id', $paid)->value('down_payment_amount'));
+        $this->assertNotNull(DB::table('orders')->where('order_id', $paid)->value('down_payment_received_at'));
+        $this->assertSame('pattern', DB::table('orders')->where('order_id', $paid)->value('status'));
+        $this->assertTrue(DB::table('notifications')->where('order_id', $paid)->where('user_id', 5)->where('title', "Order #{$paid} in production")->exists());
+    }
+
+    public function test_subcontract_starts_production_on_confirm_and_its_payment_is_not_a_down_payment(): void
+    {
+        $this->actAs(1);
+        $sub = $this->order('pending', ['order_type' => 'subcontract', 'agreed_total' => 50000, 'down_payment_received_at' => null]);
+        $direct = $this->order('pending', ['agreed_total' => 50000, 'down_payment_received_at' => null]);
+
+        foreach ([$sub, $direct] as $id) {
+            $this->patchJson("/api/admin/orders/{$id}", ['status' => 'confirmed'])->assertOk();
+        }
+        $this->assertSame(['pattern', 'confirmed'], [DB::table('orders')->where('order_id', $sub)->value('status'), DB::table('orders')->where('order_id', $direct)->value('status')]);
+
+        $this->postJson('/api/admin/transactions', ['order_id' => $sub, 'amount_paid' => 50000, 'payment_method' => 'bank_transfer', 'payment_terms' => 'full_payment'])->assertSuccessful();
+        $this->assertNull(DB::table('orders')->where('order_id', $sub)->value('down_payment_received_at'));
+    }
+
+    public function test_a_pickup_order_gets_a_pickup_delivery_with_no_address(): void
+    {
+        $this->actAs(1);
+        $id = $this->order('packing', ['delivery_method' => 'pickup', 'delivery_address' => null]);
+        $this->complete($id, array_slice(self::STAGES, 0, 6));
+        $this->log($id, 'packing', 100)->assertSuccessful();
+
+        $row = DB::table('delivery_tracking')->where('order_id', $id)->first();
+        $this->assertSame(['pickup', null], [$row->delivery_method, $row->delivery_address]);
+    }
+
+    public function test_a_return_reopens_the_order_flags_managers_and_allows_redelivery(): void
+    {
+        $this->actAs(1);
+        $id = $this->order('packing');
+        $this->complete($id, self::STAGES);
+        $t = $this->delivery($id, '12 Rizal St, Muntinlupa');
+        $this->patchJson("/api/admin/delivery/{$t}/delivered")->assertOk();
+
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'returned'])->assertStatus(422);
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'returned', 'notes' => 'Wrong collar colour'])->assertOk();
+
+        $this->assertSame('for_delivery', DB::table('orders')->where('order_id', $id)->value('status'));
+        $this->assertSame(0, (int) DB::table('delivery_tracking')->where('tracking_id', $t)->value('delivered_qty'));
+        $this->assertTrue(DB::table('notifications')->where('order_id', $id)->where('title', "Order #{$id} returned")->exists());
+
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'in_transit'])->assertOk();
+        $this->patchJson("/api/admin/delivery/{$t}/delivered")->assertOk();
+        $this->assertSame('completed', DB::table('orders')->where('order_id', $id)->value('status'));
+    }
+
+    public function test_in_transit_waits_for_production_and_a_finished_order_ships(): void
+    {
+        $this->actAs(1);
+        $id = $this->order('sewing');
+        $t = $this->delivery($id, '12 Rizal St, Muntinlupa');
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'in_transit'])->assertStatus(422);
+
+        $this->complete($id, self::STAGES);
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'in_transit'])->assertOk();
+        $this->assertSame('in_transit', DB::table('delivery_tracking')->where('tracking_id', $t)->value('delivery_status'));
+        $this->assertSame('sewing', DB::table('orders')->where('order_id', $id)->value('status'));
+    }
+
+    public function test_full_payment_delivers_an_order_in_transit_but_not_one_still_preparing(): void
+    {
+        $this->actAs(1);
+        $shipping = $this->order('packing', ['agreed_total' => 50000]);
+        $this->complete($shipping, self::STAGES);
+        $t = $this->delivery($shipping, '12 Rizal St, Muntinlupa');
+        $this->patchJson("/api/admin/delivery/{$t}/status", ['delivery_status' => 'in_transit'])->assertOk();
+
+        $waiting = $this->order('packing', ['agreed_total' => 50000]);
+        $this->complete($waiting, self::STAGES);
+        $w = $this->delivery($waiting, '12 Rizal St, Muntinlupa');
+
+        foreach ([$shipping, $waiting] as $id) {
+            $this->postJson('/api/admin/transactions', ['order_id' => $id, 'amount_paid' => 50000, 'payment_method' => 'bank_transfer', 'payment_terms' => 'full_payment'])
+                ->assertSuccessful();
+        }
+
+        $this->assertSame(['delivered', 'completed'], [DB::table('delivery_tracking')->where('tracking_id', $t)->value('delivery_status'), DB::table('orders')->where('order_id', $shipping)->value('status')]);
+        $this->assertSame(['preparing', 'packing'], [DB::table('delivery_tracking')->where('tracking_id', $w)->value('delivery_status'), DB::table('orders')->where('order_id', $waiting)->value('status')]);
+    }
+
     // (4) ─────────────────────────────────────────────────────────────────────
 
     public function test_invoice_waits_for_delivery_and_down_payments_only_get_a_receipt(): void
@@ -201,10 +294,10 @@ class OrderWorkflowIntegrityTest extends TestCase
     public function test_confirming_one_piece_of_a_uniform_set_confirms_both(): void
     {
         $this->actAs(1);
-        $setId = 'set-' . uniqid();
-        $top    = $this->order('pending', ['studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
-        $bottom = $this->order('pending', ['studio_config' => $this->setConfig($setId, 'Pants'), 'garment_type' => 'Pants']);
-        $other  = $this->order('pending', ['studio_config' => $this->setConfig('set-other', 'Polo Shirt')]);
+        $setId = 'set-'.uniqid();
+        $top = $this->order('pending', ['down_payment_received_at' => null, 'studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
+        $bottom = $this->order('pending', ['down_payment_received_at' => null, 'studio_config' => $this->setConfig($setId, 'Pants'), 'garment_type' => 'Pants']);
+        $other = $this->order('pending', ['down_payment_received_at' => null, 'studio_config' => $this->setConfig('set-other', 'Polo Shirt')]);
 
         $this->patchJson("/api/admin/orders/{$top}/confirm")->assertOk()->assertJson(['set_confirmed_ids' => [$bottom]]);
 
@@ -215,9 +308,9 @@ class OrderWorkflowIntegrityTest extends TestCase
     public function test_confirming_from_order_detail_also_confirms_the_set(): void
     {
         $this->actAs(1);
-        $setId = 'set-' . uniqid();
-        $top    = $this->order('pending', ['studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
-        $bottom = $this->order('pending', ['studio_config' => $this->setConfig($setId, 'Pants'), 'garment_type' => 'Pants']);
+        $setId = 'set-'.uniqid();
+        $top = $this->order('pending', ['down_payment_received_at' => null, 'studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
+        $bottom = $this->order('pending', ['down_payment_received_at' => null, 'studio_config' => $this->setConfig($setId, 'Pants'), 'garment_type' => 'Pants']);
 
         $this->patchJson("/api/admin/orders/{$bottom}", ['status' => 'confirmed'])->assertOk();
         $this->assertSame('confirmed', DB::table('orders')->where('order_id', $top)->value('status'));
@@ -226,8 +319,8 @@ class OrderWorkflowIntegrityTest extends TestCase
     public function test_a_uniform_set_is_delivered_together_or_not_at_all(): void
     {
         $this->actAs(1);
-        $setId = 'set-' . uniqid();
-        $top    = $this->order('completed', ['studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
+        $setId = 'set-'.uniqid();
+        $top = $this->order('completed', ['studio_config' => $this->setConfig($setId, 'Polo Shirt')]);
         $bottom = $this->order('packing', ['studio_config' => $this->setConfig($setId, 'Pants'), 'garment_type' => 'Pants']);
         $this->complete($top, self::STAGES);
         $tTop = $this->delivery($top, '12 Rizal St, Muntinlupa');

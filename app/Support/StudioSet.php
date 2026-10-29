@@ -47,6 +47,7 @@ final class StudioSet
 
             DB::table('orders')->where('order_id', $id)->update(['status' => 'confirmed', 'updated_at' => now()]);
             AuditLog::record('order_status_changed', 'orders', $id);
+            (new \App\Services\ProductionStageService)->startProduction($id);
             DB::table('notifications')->insert([
                 'user_id'    => $userId,
                 'order_id'   => $id,

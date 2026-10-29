@@ -30,7 +30,7 @@ class Order extends Model
         'qc_required', 'qc_passed_at',
         // Proposal flow (2026_10_17_000002)
         'promised_date', 'proposal_note', 'proposal_status', 'fabric_type',
-        'delivery_address', 'down_payment_received_at',
+        'delivery_address', 'delivery_method', 'down_payment_received_at',
     ];
 
     // Fields only a manager may set; a customer request carrying any of them is rejected.

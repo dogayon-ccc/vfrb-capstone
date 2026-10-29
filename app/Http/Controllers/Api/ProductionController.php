@@ -183,6 +183,9 @@ class ProductionController extends Controller
 
         // Override never skips client supply either: Cutting needs the client's materials on hand.
         if (in_array('cutting', [$order->status, $nextStage], true)) {
+            if ($hold = ProductionStageService::colorHold((int) $orderId)) {
+                return response()->json(['message' => $hold, 'color_hold' => true], 422);
+            }
             $clientSvc = new ClientMaterialService;
             if ($short = $clientSvc->shortages((int) $orderId)) {
                 return response()->json([
@@ -331,6 +334,7 @@ class ProductionController extends Controller
         EmailNotify::users([$order->user_id], new OrderStatusNotification((int) $orderId, 'confirmed'));
 
         $setConfirmed = StudioSet::confirmPendingSiblings((int) $orderId);
+        (new ProductionStageService)->startProduction((int) $orderId);
         Cache::forget('dashboard_stats');
 
         return response()->json([

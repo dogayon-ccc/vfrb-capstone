@@ -129,12 +129,11 @@ class DeliveryController extends Controller
     }
 
     // ── PATCH /api/admin/deliveries/{id}/status ───────────────────────────────
-    // Ready-for-delivery is automatic (order status for_delivery once fully packed); the only manual moves left
-    // are delivered (optionally partial: delivered_qty, capped at packed_total) and returned.
+    // Prepared -> In transit -> Delivered (optionally partial: delivered_qty, capped at packed_total), or Returned.
     public function updateStatus(Request $request, int $id)
     {
         $request->validate([
-            'delivery_status' => 'required|in:delivered,returned',
+            'delivery_status' => 'required|in:preparing,in_transit,delivered,returned',
             'delivered_qty' => 'nullable|integer|min:1',
             'courier_name' => 'nullable|string|max:100',
             'tracking_number' => 'nullable|string|max:100',
@@ -151,6 +150,13 @@ class DeliveryController extends Controller
         $newStatus = $request->input('delivery_status');
         if ($request->filled('delivery_address')) {
             $row->delivery_address = trim($request->input('delivery_address'));
+        }
+
+        if (in_array($newStatus, ['preparing', 'in_transit'], true)) {
+            return $this->moveUndelivered($request, $row, $newStatus);
+        }
+        if ($newStatus === 'returned') {
+            return $this->recordReturn($request, $row);
         }
 
         if ($newStatus === 'delivered') {
@@ -330,6 +336,82 @@ class DeliveryController extends Controller
         return $this->updateStatus($request, $id);
     }
 
+    // In transit needs the same readiness as Delivered, so nothing ships before production and the address are done.
+    private function moveUndelivered(Request $request, object $row, string $newStatus)
+    {
+        if ($row->delivery_status === 'delivered') {
+            return response()->json(['message' => "Order #{$row->order_id} is already delivered."], 422);
+        }
+        if ($newStatus === 'in_transit' && ($blocker = $this->deliveryBlocker($row))) {
+            return response()->json(['message' => $blocker], 422);
+        }
+
+        $update = ['delivery_status' => $newStatus, 'updated_by' => Auth::id(), 'updated_at' => now()]
+            + array_filter($request->only('courier_name', 'tracking_number', 'notes'));
+        if ($request->filled('delivery_address')) {
+            $update['delivery_address'] = $row->delivery_address;
+        }
+        DB::table('delivery_tracking')->where('tracking_id', $row->tracking_id)->update($update);
+
+        if ($newStatus === 'in_transit') {
+            $customerId = (int) DB::table('orders')->where('order_id', $row->order_id)->value('user_id');
+            $this->notifyCustomer($customerId, (int) $row->order_id, "Order #{$row->order_id} is on its way.");
+        }
+        Cache::forget('dashboard_stats');
+
+        return response()->json(['message' => 'Delivery status updated.', 'delivery_status' => $newStatus]);
+    }
+
+    // A return reopens the order as packed-awaiting-delivery so it can be checked and delivered again; managers are flagged.
+    private function recordReturn(Request $request, object $row)
+    {
+        if ($row->delivery_status !== 'delivered' && (int) $row->delivered_qty < 1) {
+            return response()->json(['message' => "Nothing on order #{$row->order_id} has been delivered yet."], 422);
+        }
+        $reason = trim((string) $request->input('notes'));
+        if ($reason === '') {
+            return response()->json(['message' => 'Add the reason for the return.', 'errors' => ['notes' => ['Add the reason for the return.']]], 422);
+        }
+
+        $orderId = (int) $row->order_id;
+        DB::transaction(function () use ($row, $reason, $orderId) {
+            DB::table('delivery_tracking')->where('tracking_id', $row->tracking_id)->update([
+                'delivery_status' => 'returned', 'delivered_qty' => 0, 'actual_delivery_date' => null,
+                'notes' => "Returned: {$reason}", 'updated_by' => Auth::id(), 'updated_at' => now(),
+            ]);
+            if (DB::table('orders')->where('order_id', $orderId)->where('status', 'completed')->update(['status' => 'for_delivery', 'updated_at' => now()])) {
+                AuditLog::record('order_status_changed', 'orders', $orderId);
+            }
+
+            $now = now();
+            $managers = DB::table('model_has_roles')->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
+                ->where('roles.name', 'manager')->pluck('model_has_roles.model_id');
+            foreach ($managers as $uid) {
+                DB::table('notifications')->insert([
+                    'user_id' => $uid, 'order_id' => $orderId, 'type' => 'warning', 'title' => "Order #{$orderId} returned",
+                    'message' => "Order #{$orderId} was returned: {$reason}. It is reopened as awaiting delivery; check the goods and deliver again.",
+                    'is_read' => 0, 'date_sent' => $now, 'created_at' => $now, 'updated_at' => $now,
+                ]);
+            }
+            $customerId = (int) DB::table('orders')->where('order_id', $orderId)->value('user_id');
+            $this->notifyCustomer($customerId, $orderId, "VFRB recorded the return of order #{$orderId} and will contact you about the next delivery.");
+        });
+        Cache::forget('dashboard_stats');
+
+        return response()->json(['message' => "Return recorded. Order #{$orderId} is reopened and managers were notified.", 'delivery_status' => 'returned']);
+    }
+
+    // Full payment completes a handover already under way: in transit, or a pickup waiting at VFRB. Blocked deliveries stay as they are.
+    public function deliverIfPaid(int $orderId): void
+    {
+        $row = DB::table('delivery_tracking')->where('order_id', $orderId)->first();
+        if (! $row || ! ($row->delivery_status === 'in_transit' || ($row->delivery_method === 'pickup' && $row->delivery_status === 'preparing'))) {
+            return;
+        }
+        $remaining = (int) DB::table('orders')->where('order_id', $orderId)->value('quantity_ordered') - (int) $row->delivered_qty;
+        $this->updateStatus(new Request(['delivery_status' => 'delivered', 'delivered_qty' => max(1, $remaining)]), (int) $row->tracking_id);
+    }
+
     // ── GET /api/customer/deliveries/{orderId} ────────────────────────────────
     // Customer view of their own delivery
     public function customerShow(int $orderId)
@@ -343,12 +425,14 @@ class DeliveryController extends Controller
             return response()->json(['message' => 'Order not found.'], 404);
         }
 
+        // Customer-safe fields only: staff notes, staff ids and the order's money fields stay inside VFRB.
         $delivery = DB::table('delivery_tracking')
             ->where('order_id', $orderId)
-            ->first();
+            ->first(['tracking_id', 'order_id', 'delivery_method', 'delivery_status', 'courier_name', 'tracking_number',
+                'delivery_address', 'estimated_delivery_date', 'actual_delivery_date', 'delivered_qty']);
 
         return response()->json([
-            'order' => $order,
+            'order' => OrderController::clientStatus((object) ['order_id' => $order->order_id, 'status' => $order->status]),
             'delivery' => $delivery,
         ]);
     }

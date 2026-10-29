@@ -3,10 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Notifications\PortalMailNotification;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -83,6 +85,17 @@ class OrderLifecycleTest extends TestCase
         $rows = DB::table('measurements')->where('order_id', $id)->get();
         $this->assertSame(['M' => 60, 'S' => 40], $rows->pluck('qty', 'size_label')->map(fn ($q) => (int) $q)->sortKeys()->all());
         $this->assertSame([5], $rows->pluck('user_id')->map(fn ($u) => (int) $u)->unique()->values()->all());
+    }
+
+    public function test_customer_can_choose_pickup_and_the_address_is_not_kept(): void
+    {
+        Storage::fake('public');
+        $this->actAs(5);
+        $id = $this->post('/api/customer/orders', $this->payload(['delivery_method' => 'pickup', 'delivery_address' => '12 Rizal St']), ['Accept' => 'application/json'])
+            ->assertStatus(201)->json('order.order_id');
+        $this->assertSame(['pickup', null], [DB::table('orders')->where('order_id', $id)->value('delivery_method'), DB::table('orders')->where('order_id', $id)->value('delivery_address')]);
+
+        $this->post('/api/customer/orders', $this->payload(['delivery_method' => 'drone']), ['Accept' => 'application/json'])->assertStatus(422);
     }
 
     public function test_another_customer_cannot_read_the_submitted_order(): void
@@ -229,6 +242,20 @@ class OrderLifecycleTest extends TestCase
         $this->postJson("/api/customer/orders/{$id}/accept")->assertOk();
         $row = DB::table('orders')->where('order_id', $id)->first();
         $this->assertSame(['confirmed', 'accepted'], [$row->status, $row->proposal_status]);
+    }
+
+    public function test_proposal_email_links_to_the_customer_order_page(): void
+    {
+        Storage::fake('public');
+        Notification::fake();
+        $this->withoutDefer();
+        $this->actAs(5);
+        $id = $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
+        $this->actAs(1);
+        $this->postJson("/api/admin/orders/{$id}/propose", ['total' => 25000, 'proposal_note' => 'Fabric is in stock.'])->assertOk();
+
+        Notification::assertSentTo(User::find(5), PortalMailNotification::class,
+            fn ($n, $channels, $user) => parse_url($n->toMail($user)->actionUrl, PHP_URL_PATH) === "/orders/{$id}");
     }
 
     public function test_customer_declines_a_proposal_with_a_reason(): void

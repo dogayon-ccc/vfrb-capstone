@@ -1,4 +1,5 @@
 <?php
+
 // physical_count_logs: count_id, material_id, counted_by, system_qty, physical_qty,
 // variance + variance_pct (GENERATED, never insert), reason, count_date (date),
 // reconciled, reconciled_by, reconciled_at, reconciliation_note, stock_adjusted.
@@ -8,6 +9,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Services\ClientMaterialService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -18,13 +20,13 @@ class PhysicalCountController extends Controller
     // ── GET /api/admin/physical-counts ───────────────────────────────────────
     public function index(Request $request)
     {
-        $perPage      = (int) $request->input('per_page', 20);
-        $materialId   = $request->input('material_id');
+        $perPage = (int) $request->input('per_page', 20);
+        $materialId = $request->input('material_id');
         $unreconciled = $request->boolean('unreconciled', false);
 
         $query = DB::table('physical_count_logs')
             ->join('materials', 'physical_count_logs.material_id', '=', 'materials.material_id')
-            ->join('users',     'physical_count_logs.counted_by',   '=', 'users.user_id')
+            ->join('users', 'physical_count_logs.counted_by', '=', 'users.user_id')
             ->select(
                 'physical_count_logs.*',  // GENERATED variance + variance_pct safe to SELECT
                 'materials.material_name',
@@ -51,10 +53,10 @@ class PhysicalCountController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'material_id'  => 'required|integer|exists:materials,material_id',
-            'counted_qty'  => 'required|numeric|min:0',
-            'notes'        => 'nullable|string|max:1000',
-            'counted_at'   => 'nullable|date',
+            'material_id' => 'required|integer|exists:materials,material_id',
+            'counted_qty' => 'required|numeric|min:0',
+            'notes' => 'nullable|string|max:1000',
+            'counted_at' => 'nullable|date',
         ]);
 
         $material = DB::table('materials')
@@ -65,19 +67,19 @@ class PhysicalCountController extends Controller
             return response()->json(['message' => "{$material->material_name} is client-supplied. Check it against the order's Client materials balance, not a stock count."], 422);
         }
 
-        $systemQty  = (float) $material->quantity_in_stock;
+        $systemQty = (float) $material->quantity_in_stock;
         $countedQty = (float) $request->input('counted_qty');
 
         $id = DB::table('physical_count_logs')->insertGetId([
             'material_id' => $material->material_id,
-            'counted_by'  => Auth::id(),
-            'system_qty'  => $systemQty,
-            'physical_qty'=> $countedQty,
-            'reconciled'  => 0,
-            'reason'      => $request->input('notes'),
-            'count_date'  => $request->input('counted_at', now()->toDateString()),
-            'created_at'  => now(),
-            'updated_at'  => now(),
+            'counted_by' => Auth::id(),
+            'system_qty' => $systemQty,
+            'physical_qty' => $countedQty,
+            'reconciled' => 0,
+            'reason' => $request->input('notes'),
+            'count_date' => $request->input('counted_at', now()->toDateString()),
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'count_id');
 
         $log = DB::table('physical_count_logs')
@@ -89,8 +91,8 @@ class PhysicalCountController extends Controller
         if ($absVariancePct > 5) {
             $this->notifyManagers(
                 "Physical count variance alert: {$material->material_name} — "
-                . "System: {$systemQty}, Counted: {$countedQty} "
-                . "(" . round((float)($log->variance ?? 0), 2) . " difference)."
+                ."System: {$systemQty}, Counted: {$countedQty} "
+                .'('.round((float) ($log->variance ?? 0), 2).' difference).'
             );
         }
 
@@ -105,7 +107,7 @@ class PhysicalCountController extends Controller
     public function reconcile(Request $request, int $id)
     {
         $log = DB::table('physical_count_logs')->where('count_id', $id)->first();
-        if (!$log) {
+        if (! $log) {
             return response()->json(['message' => 'Physical count record not found.'], 404);
         }
 
@@ -117,40 +119,39 @@ class PhysicalCountController extends Controller
             'notes' => 'nullable|string|max:500',
         ]);
 
-        // Update actual stock in materials to the counted value
-        DB::table('materials')
-            ->where('material_id', $log->material_id)
-            ->update([
-                'quantity_in_stock' => $log->physical_qty,
-                'updated_at'        => now(),
-            ]);
-
-        // Log the adjustment in inventory_logs
+        // Apply the count difference, not the counted value, so stock moved since the count is kept.
         $delta = $log->physical_qty - $log->system_qty;
-        if ($delta != 0) {
-            DB::table('inventory_logs')->insert([
-                'material_id' => $log->material_id,
-                'recorded_by' => Auth::id(),
-                'type'        => 'adjustment',
-                'change_qty'  => $delta,
-                'reason'      => 'Physical count reconciliation — Count ID #' . $id,
-                'log_date'    => now(),
-                'created_at'  => now(),
-                'updated_at'  => now(),
+        $applied = DB::transaction(function () use ($id, $log, $delta, $request) {
+            if (DB::table('physical_count_logs')->where('count_id', $id)->lockForUpdate()->value('reconciled')) {
+                return false;
+            }
+            if ($delta != 0) {
+                DB::table('materials')->where('material_id', $log->material_id)->increment('quantity_in_stock', $delta, ['updated_at' => now()]);
+                DB::table('inventory_logs')->insert([
+                    'material_id' => $log->material_id,
+                    'recorded_by' => Auth::id(),
+                    'type' => 'adjustment',
+                    'change_qty' => $delta,
+                    'reason' => 'Physical count reconciliation — Count ID #'.$id,
+                    'log_date' => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
+            DB::table('physical_count_logs')->where('count_id', $id)->update([
+                'reconciled' => 1,
+                'reconciled_by' => Auth::id(),
+                'reconciled_at' => now(),
+                'reconciliation_note' => $request->input('notes'),
+                'stock_adjusted' => 1,
+                'updated_at' => now(),
             ]);
-        }
 
-        // Mark count as reconciled — use reconciliation_note column (confirmed from vfrb_db.sql)
-        DB::table('physical_count_logs')
-            ->where('count_id', $id)
-            ->update([
-                'reconciled'           => 1,
-                'reconciled_by'        => Auth::id(),
-                'reconciled_at'        => now(),
-                'reconciliation_note'  => $request->input('notes'),  // reconciliation_note column
-                'stock_adjusted'       => 1,                          // mark stock was adjusted
-                'updated_at'           => now(),
-            ]);
+            return true;
+        });
+        if (! $applied) {
+            return response()->json(['message' => 'Already reconciled.'], 409);
+        }
         AuditLog::record('inventory_adjusted', 'materials', (int) $log->material_id);
 
         Cache::forget('materials_list');
@@ -158,8 +159,8 @@ class PhysicalCountController extends Controller
         Cache::forget('mrp_alerts');
 
         return response()->json([
-            'message'     => 'Physical count reconciled. Stock updated.',
-            'new_qty'     => $log->physical_qty,
+            'message' => 'Physical count reconciled. Stock updated.',
+            'new_qty' => (float) DB::table('materials')->where('material_id', $log->material_id)->value('quantity_in_stock'),
             'material_id' => $log->material_id,
         ]);
     }
@@ -168,7 +169,7 @@ class PhysicalCountController extends Controller
     // PhysicalCount.jsx stats strip: flagged_variances, unreconciled_counts, overdue_materials
     public function summary()
     {
-        $flaggedVariances   = DB::table('physical_count_logs')
+        $flaggedVariances = DB::table('physical_count_logs')
             ->whereRaw('ABS(variance_pct) > 5')
             ->where('reconciled', 0)
             ->count();
@@ -182,7 +183,7 @@ class PhysicalCountController extends Controller
         $overdueMaterials = DB::table('materials')
             ->leftJoin('physical_count_logs', function ($join) use ($weekStart) {
                 $join->on('materials.material_id', '=', 'physical_count_logs.material_id')
-                     ->where('physical_count_logs.count_date', '>=', $weekStart);
+                    ->where('physical_count_logs.count_date', '>=', $weekStart);
             })
             ->whereNull('physical_count_logs.count_id')
             ->when(ClientMaterialService::ready(), fn ($q) => $q->where('materials.ownership', 'vfrb'))
@@ -191,18 +192,18 @@ class PhysicalCountController extends Controller
             ->get();
 
         return response()->json([
-            'flagged_variances'   => $flaggedVariances,
+            'flagged_variances' => $flaggedVariances,
             'unreconciled_counts' => $unreconciledCounts,
-            'overdue_materials'   => $overdueMaterials,
-            'count_week_start'    => $weekStart,
-            'count_day'           => 'Monday',
+            'overdue_materials' => $overdueMaterials,
+            'count_week_start' => $weekStart,
+            'count_day' => 'Monday',
         ]);
     }
 
     // Monday of the current count week (VFRB counts weekly, every Monday).
     public static function countWeekStart(): string
     {
-        return now()->startOfWeek(\Carbon\Carbon::MONDAY)->toDateString();
+        return now()->startOfWeek(Carbon::MONDAY)->toDateString();
     }
 
     // ── GET /api/admin/physical-counts/sheet ─────────────────────────────────────
@@ -213,7 +214,7 @@ class PhysicalCountController extends Controller
             ->when(ClientMaterialService::ready(), fn ($q) => $q->where('materials.ownership', 'vfrb'))
             ->leftJoin('physical_count_logs', function ($join) {
                 $join->on('materials.material_id', '=', 'physical_count_logs.material_id')
-                     ->whereRaw('physical_count_logs.count_id = (
+                    ->whereRaw('physical_count_logs.count_id = (
                          SELECT MAX(count_id) FROM physical_count_logs pcl2
                          WHERE pcl2.material_id = materials.material_id
                      )');
@@ -234,14 +235,14 @@ class PhysicalCountController extends Controller
             ->get();
 
         return response()->json([
-            'count_sheet'   => $countSheet,
+            'count_sheet' => $countSheet,
             // FIX (Aug 31 2026): these two were never in the response at
             // all — PhysicalCount.jsx's print sheet has always been
             // reading r.data.generated_at/generated_by, and both came
             // back undefined because nothing on this side ever sent
             // them. Not a rename like system_qty below, a genuine gap.
-            'generated_at'  => now()->format('n/j/y, g:i A'),
-            'generated_by'  => auth()->user()->name ?? 'Unknown',
+            'generated_at' => now()->format('n/j/y, g:i A'),
+            'generated_by' => auth()->user()->name ?? 'Unknown',
         ]);
     }
 
@@ -257,12 +258,12 @@ class PhysicalCountController extends Controller
 
         foreach ($managers as $uid) {
             DB::table('notifications')->insert([
-                'user_id'    => $uid,
-                'order_id'   => null,
-                'message'    => $message,
-                'type'       => 'physical_count',
-                'is_read'    => 0,
-                'date_sent'  => $now,
+                'user_id' => $uid,
+                'order_id' => null,
+                'message' => $message,
+                'type' => 'physical_count',
+                'is_read' => 0,
+                'date_sent' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);

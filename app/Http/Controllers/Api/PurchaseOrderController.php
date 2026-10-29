@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/PurchaseOrderController.php
 // VFRB Enterprise — Purchase Orders + RFQ Flow
 //
@@ -54,12 +55,12 @@ class PurchaseOrderController extends Controller
     // ── GET /api/admin/purchase-orders ───────────────────────────────────────
     public function index(Request $request)
     {
-        $status  = $request->input('status', '');
+        $status = $request->input('status', '');
         $perPage = (int) $request->input('per_page', 20);
 
         $query = DB::table('purchase_orders')
             ->join('suppliers', 'purchase_orders.supplier_id', '=', 'suppliers.supplier_id')
-            ->join('users',     'purchase_orders.created_by',  '=', 'users.user_id')
+            ->join('users', 'purchase_orders.created_by', '=', 'users.user_id')
             ->select(
                 'purchase_orders.*',
                 'suppliers.supplier_name',
@@ -77,6 +78,7 @@ class PurchaseOrderController extends Controller
         $itemsByPo = $this->itemsForPoIds($pos->pluck('po_id')->all());
         $pos->getCollection()->transform(function ($po) use ($itemsByPo) {
             $po->items = $itemsByPo[$po->po_id] ?? [];
+
             return $po;
         });
 
@@ -87,7 +89,9 @@ class PurchaseOrderController extends Controller
     // grouped by po_id — avoids an N+1 when attaching items to a list.
     private function itemsForPoIds(array $poIds): array
     {
-        if (!$poIds) return [];
+        if (! $poIds) {
+            return [];
+        }
 
         return DB::table('purchase_order_items')
             ->join('materials', 'purchase_order_items.material_id', '=', 'materials.material_id')
@@ -95,7 +99,7 @@ class PurchaseOrderController extends Controller
             ->select('purchase_order_items.*', 'materials.material_name', 'materials.unit')
             ->get()
             ->groupBy('po_id')
-            ->map(fn($rows) => $rows->values())
+            ->map(fn ($rows) => $rows->values())
             ->all();
     }
 
@@ -104,14 +108,14 @@ class PurchaseOrderController extends Controller
     {
         $po = DB::table('purchase_orders')
             ->join('suppliers', 'purchase_orders.supplier_id', '=', 'suppliers.supplier_id')
-            ->join('users',     'purchase_orders.created_by',  '=', 'users.user_id')
+            ->join('users', 'purchase_orders.created_by', '=', 'users.user_id')
             ->where('purchase_orders.po_id', $id)
             ->select('purchase_orders.*', 'suppliers.supplier_name',
-                     'suppliers.contact_person', 'suppliers.phone', 'suppliers.email',
-                     'users.name as created_by_name')
+                'suppliers.contact_person', 'suppliers.phone', 'suppliers.email',
+                'users.name as created_by_name')
             ->first();
 
-        if (!$po) {
+        if (! $po) {
             return response()->json(['message' => 'Purchase order not found.'], 404);
         }
 
@@ -124,47 +128,47 @@ class PurchaseOrderController extends Controller
     public function store(Request $request)
     {
         $request->validate([
-            'supplier_id'             => 'required|integer|exists:suppliers,supplier_id',
-            'items'                   => 'required|array|min:1',
-            'items.*.material_id'     => 'required|integer|exists:materials,material_id',
-            'items.*.qty'             => 'required|numeric|min:0.01',
-            'items.*.unit_cost'       => 'required|numeric|min:0',
-            'expected_delivery_date'  => 'nullable|date',
-            'order_id'                => 'nullable|integer|exists:orders,order_id',
-            'order_color_hex'         => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/', // real hex, not just 7 chars
-            'notes'                   => 'nullable|string|max:1000',
+            'supplier_id' => 'required|integer|exists:suppliers,supplier_id',
+            'items' => 'required|array|min:1',
+            'items.*.material_id' => 'required|integer|exists:materials,material_id',
+            'items.*.qty' => 'required|numeric|min:0.01',
+            'items.*.unit_cost' => 'required|numeric|min:0',
+            'expected_delivery_date' => 'nullable|date',
+            'order_id' => 'nullable|integer|exists:orders,order_id',
+            'order_color_hex' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/', // real hex, not just 7 chars
+            'notes' => 'nullable|string|max:1000',
         ]);
 
         $total = collect($request->input('items'))
-            ->sum(fn($i) => $i['qty'] * $i['unit_cost']);
+            ->sum(fn ($i) => $i['qty'] * $i['unit_cost']);
 
-        $poNumber = 'PO-' . now()->format('Ymd') . '-' . strtoupper(substr(uniqid(), -5));
+        $poNumber = 'PO-'.now()->format('Ymd').'-'.strtoupper(substr(uniqid(), -5));
 
         $id = DB::table('purchase_orders')->insertGetId([
-            'po_number'               => $poNumber,
-            'supplier_id'             => $request->input('supplier_id'),
-            'created_by'              => Auth::id(),
-            'order_id'                => $request->input('order_id'),
-            'status'                  => 'draft',
-            'total_amount'            => $total,
-            'expected_delivery_date'  => $request->input('expected_delivery_date'),
-            'order_color_hex'         => $request->input('order_color_hex'),
-            'color_mismatch'          => 0,
-            'color_confirmed'         => 0,
-            'notes'                   => $request->input('notes'),
-            'created_at'              => now(),
-            'updated_at'              => now(),
+            'po_number' => $poNumber,
+            'supplier_id' => $request->input('supplier_id'),
+            'created_by' => Auth::id(),
+            'order_id' => $request->input('order_id'),
+            'status' => 'draft',
+            'total_amount' => $total,
+            'expected_delivery_date' => $request->input('expected_delivery_date'),
+            'order_color_hex' => $request->input('order_color_hex'),
+            'color_mismatch' => 0,
+            'color_confirmed' => 0,
+            'notes' => $request->input('notes'),
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'po_id');
 
         $now = now();
         DB::table('purchase_order_items')->insert(
-            collect($request->input('items'))->map(fn($i) => [
-                'po_id'       => $id,
+            collect($request->input('items'))->map(fn ($i) => [
+                'po_id' => $id,
                 'material_id' => $i['material_id'],
-                'qty'         => $i['qty'],
-                'unit_cost'   => $i['unit_cost'],
-                'created_at'  => $now,
-                'updated_at'  => $now,
+                'qty' => $i['qty'],
+                'unit_cost' => $i['unit_cost'],
+                'created_at' => $now,
+                'updated_at' => $now,
             ])->all()
         );
 
@@ -181,36 +185,36 @@ class PurchaseOrderController extends Controller
     public function receive(Request $request, int $id)
     {
         $po = DB::table('purchase_orders')->where('po_id', $id)->first();
-        if (!$po) {
+        if (! $po) {
             return response()->json(['message' => 'Purchase order not found.'], 404);
         }
 
-        if (!in_array($po->status, ['draft', 'sent'])) {
+        if (! in_array($po->status, ['draft', 'sent'])) {
             return response()->json(['message' => "Cannot receive a PO with status '{$po->status}'."], 422);
         }
 
         $request->validate([
             'received_color_hex' => 'nullable|regex:/^#[0-9A-Fa-f]{6}$/',
-            'notes'              => 'nullable|string|max:500',
+            'notes' => 'nullable|string|max:500',
         ]);
 
         $receivedHex = $request->input('received_color_hex');
-        $mismatch    = 0;
+        $mismatch = 0;
 
         // Compute ΔE if both hex values are present
         if ($receivedHex && $po->order_color_hex) {
-            $deltaE   = $this->computeDeltaE($po->order_color_hex, $receivedHex);
+            $deltaE = $this->computeDeltaE($po->order_color_hex, $receivedHex);
             $mismatch = $deltaE > 5 ? 1 : 0;
         }
 
         $update = [
-            'status'             => 'received',
-            'actual_delivery_date'=> now()->toDateString(),
+            'status' => 'received',
+            'actual_delivery_date' => now()->toDateString(),
             'received_color_hex' => $receivedHex,
-            'color_mismatch'     => $mismatch,
-            'color_confirmed'    => $mismatch ? 0 : 1, // auto-confirm if no mismatch
-            'notes'              => $request->input('notes', $po->notes),
-            'updated_at'         => now(),
+            'color_mismatch' => $mismatch,
+            'color_confirmed' => $mismatch ? 0 : 1, // auto-confirm if no mismatch
+            'notes' => $request->input('notes', $po->notes),
+            'updated_at' => now(),
         ];
 
         // FIX: status update + N stock increments + N inventory_logs inserts
@@ -222,6 +226,13 @@ class PurchaseOrderController extends Controller
         // or nothing, matching the pattern already used in OutputLogController.
         DB::beginTransaction();
         try {
+            // Re-checked under a row lock so a double submit cannot credit the stock twice.
+            $locked = DB::table('purchase_orders')->where('po_id', $id)->lockForUpdate()->value('status');
+            if (! in_array($locked, ['draft', 'sent'], true)) {
+                DB::rollBack();
+
+                return response()->json(['message' => "Cannot receive a PO with status '{$locked}'."], 422);
+            }
             DB::table('purchase_orders')->where('po_id', $id)->update($update);
 
             // Update stock for each item in the PO
@@ -234,18 +245,19 @@ class PurchaseOrderController extends Controller
                 DB::table('inventory_logs')->insert([
                     'material_id' => $item->material_id,
                     'recorded_by' => Auth::id(),
-                    'type'        => 'stock_in',
-                    'change_qty'  => $item->qty,
-                    'reason'      => "Goods receipt — PO {$po->po_number}",
-                    'log_date'    => now(),
-                    'created_at'  => now(),
-                    'updated_at'  => now(),
+                    'type' => 'stock_in',
+                    'change_qty' => $item->qty,
+                    'reason' => "Goods receipt — PO {$po->po_number}",
+                    'log_date' => now(),
+                    'created_at' => now(),
+                    'updated_at' => now(),
                 ]);
             }
 
             DB::commit();
         } catch (\Throwable $e) {
             DB::rollBack();
+
             return response()->json(['message' => 'Failed to record goods receipt. Please try again.'], 500);
         }
 
@@ -254,7 +266,7 @@ class PurchaseOrderController extends Controller
             $this->notifyManagers(
                 null,
                 "Color mismatch on PO {$po->po_number}. Received: {$receivedHex}, "
-                . "Ordered: {$po->order_color_hex}. Cutting is held pending confirmation."
+                ."Ordered: {$po->order_color_hex}. Cutting is held pending confirmation."
             );
         }
 
@@ -263,11 +275,11 @@ class PurchaseOrderController extends Controller
         Cache::forget('mrp_alerts');
 
         return response()->json([
-            'message'        => $mismatch
+            'message' => $mismatch
                 ? 'Goods received with COLOR MISMATCH. Cutting is held pending Administrator confirmation.'
                 : 'Goods received successfully. Stock updated.',
             'color_mismatch' => (bool) $mismatch,
-            'po_status'      => 'received',
+            'po_status' => 'received',
         ]);
     }
 
@@ -276,7 +288,7 @@ class PurchaseOrderController extends Controller
     public function confirmColor(Request $request, int $id)
     {
         $po = DB::table('purchase_orders')->where('po_id', $id)->first();
-        if (!$po) {
+        if (! $po) {
             return response()->json(['message' => 'Purchase order not found.'], 404);
         }
 
@@ -288,8 +300,8 @@ class PurchaseOrderController extends Controller
             ->where('po_id', $id)
             ->update([
                 'color_confirmed' => 1,
-                'color_notes'     => $request->input('color_notes'),
-                'updated_at'      => now(),
+                'color_notes' => $request->input('color_notes'),
+                'updated_at' => now(),
             ]);
 
         Cache::forget('dashboard_stats');
@@ -306,11 +318,11 @@ class PurchaseOrderController extends Controller
     public function rfqIndex(Request $request)
     {
         $perPage = (int) $request->input('per_page', 20);
-        $status  = $request->input('status', '');
+        $status = $request->input('status', '');
 
         $query = DB::table('rfq_requests')
             ->join('materials', 'rfq_requests.material_id', '=', 'materials.material_id')
-            ->join('users',     'rfq_requests.created_by',  '=', 'users.user_id')
+            ->join('users', 'rfq_requests.created_by', '=', 'users.user_id')
             ->select(
                 'rfq_requests.*',
                 'materials.material_name', 'materials.unit', 'materials.unit_cost',
@@ -330,6 +342,7 @@ class PurchaseOrderController extends Controller
                 ->where('rfq_responses.rfq_id', $rfq->rfq_id)
                 ->select('rfq_responses.*', 'suppliers.supplier_name', 'suppliers.contact_person')
                 ->get();
+
             return $rfq;
         });
 
@@ -341,19 +354,19 @@ class PurchaseOrderController extends Controller
     public function rfqStore(Request $request)
     {
         $request->validate([
-            'material_id'    => 'required|integer|exists:materials,material_id',
-            'qty_needed'     => 'required|numeric|min:0.01',
+            'material_id' => 'required|integer|exists:materials,material_id',
+            'qty_needed' => 'required|numeric|min:0.01',
             'needed_by_date' => 'nullable|date',
         ]);
 
         $id = DB::table('rfq_requests')->insertGetId([
-            'material_id'    => $request->input('material_id'),
-            'qty_needed'     => $request->input('qty_needed'),
+            'material_id' => $request->input('material_id'),
+            'qty_needed' => $request->input('qty_needed'),
             'needed_by_date' => $request->input('needed_by_date'),
-            'status'         => 'open',
-            'created_by'     => Auth::id(),
-            'created_at'     => now(),
-            'updated_at'     => now(),
+            'status' => 'open',
+            'created_by' => Auth::id(),
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'rfq_id');
 
         $rfq = DB::table('rfq_requests')
@@ -370,7 +383,7 @@ class PurchaseOrderController extends Controller
     public function rfqRespond(Request $request, int $id)
     {
         $rfq = DB::table('rfq_requests')->where('rfq_id', $id)->first();
-        if (!$rfq) {
+        if (! $rfq) {
             return response()->json(['message' => 'RFQ not found.'], 404);
         }
         if ($rfq->status !== 'open') {
@@ -378,23 +391,23 @@ class PurchaseOrderController extends Controller
         }
 
         $request->validate([
-            'supplier_id'    => 'required|integer|exists:suppliers,supplier_id',
-            'unit_price'     => 'required|numeric|min:0.01', // was min:0 — a supplier quote is never free
-            'qty_available'  => 'required|numeric|min:0.01',
+            'supplier_id' => 'required|integer|exists:suppliers,supplier_id',
+            'unit_price' => 'required|numeric|min:0.01', // was min:0 — a supplier quote is never free
+            'qty_available' => 'required|numeric|min:0.01',
             'lead_time_days' => 'required|integer|min:1',
-            'notes'          => 'nullable|string|max:1000',
+            'notes' => 'nullable|string|max:1000',
         ]);
 
         $respId = DB::table('rfq_responses')->insertGetId([
-            'rfq_id'         => $id,
-            'supplier_id'    => $request->input('supplier_id'),
-            'unit_price'     => $request->input('unit_price'),
-            'qty_available'  => $request->input('qty_available'),
+            'rfq_id' => $id,
+            'supplier_id' => $request->input('supplier_id'),
+            'unit_price' => $request->input('unit_price'),
+            'qty_available' => $request->input('qty_available'),
             'lead_time_days' => $request->input('lead_time_days'),
-            'notes'          => $request->input('notes'),
-            'responded_at'   => now(),
-            'created_at'     => now(),
-            'updated_at'     => now(),
+            'notes' => $request->input('notes'),
+            'responded_at' => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'response_id');
 
         return response()->json(
@@ -412,14 +425,14 @@ class PurchaseOrderController extends Controller
     public function rfqConvertToPO(Request $request, int $id)
     {
         $rfq = DB::table('rfq_requests')->where('rfq_id', $id)->first();
-        if (!$rfq) {
+        if (! $rfq) {
             return response()->json(['message' => 'RFQ not found.'], 404);
         }
 
         $request->validate([
-            'response_id'            => 'required|integer|exists:rfq_responses,response_id',
+            'response_id' => 'required|integer|exists:rfq_responses,response_id',
             'expected_delivery_date' => 'nullable|date',
-            'notes'                  => 'nullable|string|max:500',
+            'notes' => 'nullable|string|max:500',
         ]);
 
         $response = DB::table('rfq_responses')
@@ -427,34 +440,34 @@ class PurchaseOrderController extends Controller
             ->where('rfq_id', $id)
             ->first();
 
-        if (!$response) {
+        if (! $response) {
             return response()->json(['message' => 'Response does not belong to this RFQ.'], 422);
         }
 
-        $total    = $rfq->qty_needed * $response->unit_price;
-        $poNumber = 'PO-' . now()->format('Ymd') . '-' . strtoupper(substr(uniqid(), -5));
+        $total = $rfq->qty_needed * $response->unit_price;
+        $poNumber = 'PO-'.now()->format('Ymd').'-'.strtoupper(substr(uniqid(), -5));
 
         $poId = DB::table('purchase_orders')->insertGetId([
-            'po_number'              => $poNumber,
-            'supplier_id'            => $response->supplier_id,
-            'created_by'             => Auth::id(),
-            'status'                 => 'sent',
-            'total_amount'           => $total,
+            'po_number' => $poNumber,
+            'supplier_id' => $response->supplier_id,
+            'created_by' => Auth::id(),
+            'status' => 'sent',
+            'total_amount' => $total,
             'expected_delivery_date' => $request->input('expected_delivery_date'),
-            'notes'                  => $request->input('notes'),
-            'color_mismatch'         => 0,
-            'color_confirmed'        => 0,
-            'created_at'             => now(),
-            'updated_at'             => now(),
+            'notes' => $request->input('notes'),
+            'color_mismatch' => 0,
+            'color_confirmed' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'po_id');
 
         DB::table('purchase_order_items')->insert([
-            'po_id'       => $poId,
+            'po_id' => $poId,
             'material_id' => $rfq->material_id,
-            'qty'         => $rfq->qty_needed,
-            'unit_cost'   => $response->unit_price,
-            'created_at'  => now(),
-            'updated_at'  => now(),
+            'qty' => $rfq->qty_needed,
+            'unit_cost' => $response->unit_price,
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
 
         // Close the RFQ
@@ -465,8 +478,8 @@ class PurchaseOrderController extends Controller
         Cache::forget('dashboard_stats');
 
         return response()->json([
-            'message'   => "RFQ #{$id} converted to PO {$poNumber}.",
-            'po_id'     => $poId,
+            'message' => "RFQ #{$id} converted to PO {$poNumber}.",
+            'po_id' => $poId,
             'po_number' => $poNumber,
         ], 201);
     }
@@ -478,7 +491,7 @@ class PurchaseOrderController extends Controller
             ->where('rfq_id', $id)
             ->update(['status' => 'closed', 'updated_at' => now()]);
 
-        if (!$updated) {
+        if (! $updated) {
             return response()->json(['message' => 'RFQ not found.'], 404);
         }
 
@@ -506,30 +519,30 @@ class PurchaseOrderController extends Controller
     public function suppliersStore(Request $request)
     {
         $request->validate([
-            'supplier_name'   => 'required|string|max:150',
-            'contact_person'  => 'nullable|string|max:100',
-            'email'           => 'nullable|email|max:150',
-            'phone'           => 'nullable|string|max:30',
-            'address'         => 'nullable|string',
-            'supplier_type'   => 'required|in:subcontract,direct',
-            'lead_time_days'  => 'nullable|integer|min:1',
+            'supplier_name' => 'required|string|max:150',
+            'contact_person' => 'nullable|string|max:100',
+            'email' => 'nullable|email|max:150',
+            'phone' => 'nullable|string|max:30',
+            'address' => 'nullable|string',
+            'supplier_type' => 'required|in:subcontract,direct',
+            'lead_time_days' => 'nullable|integer|min:1',
             'materials_supplied' => 'nullable|string',
             'payment_terms_with_supplier' => 'nullable|in:cash,net_30,net_60,not_specified',
         ]);
 
         $id = DB::table('suppliers')->insertGetId([
-            'supplier_name'               => $request->input('supplier_name'),
-            'contact_person'              => $request->input('contact_person'),
-            'email'                       => $request->input('email'),
-            'phone'                       => $request->input('phone'),
-            'address'                     => $request->input('address'),
-            'supplier_type'               => $request->input('supplier_type'),
-            'materials_supplied'          => $request->input('materials_supplied'),
+            'supplier_name' => $request->input('supplier_name'),
+            'contact_person' => $request->input('contact_person'),
+            'email' => $request->input('email'),
+            'phone' => $request->input('phone'),
+            'address' => $request->input('address'),
+            'supplier_type' => $request->input('supplier_type'),
+            'materials_supplied' => $request->input('materials_supplied'),
             'payment_terms_with_supplier' => $request->input('payment_terms_with_supplier', 'not_specified'),
-            'lead_time_days'              => $request->input('lead_time_days'),
-            'is_active'                   => 1,
-            'created_at'                  => now(),
-            'updated_at'                  => now(),
+            'lead_time_days' => $request->input('lead_time_days'),
+            'is_active' => 1,
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'supplier_id');
 
         return response()->json(
@@ -542,23 +555,23 @@ class PurchaseOrderController extends Controller
     public function suppliersUpdate(Request $request, int $id)
     {
         $exists = DB::table('suppliers')->where('supplier_id', $id)->exists();
-        if (!$exists) {
+        if (! $exists) {
             return response()->json(['message' => 'Supplier not found.'], 404);
         }
 
         $request->validate([
-            'supplier_name'  => 'sometimes|string|max:150',
+            'supplier_name' => 'sometimes|string|max:150',
             'contact_person' => 'nullable|string|max:100',
-            'email'          => 'nullable|email|max:150',
-            'phone'          => 'nullable|string|max:30',
-            'is_active'      => 'sometimes|boolean',
+            'email' => 'nullable|email|max:150',
+            'phone' => 'nullable|string|max:30',
+            'is_active' => 'sometimes|boolean',
         ]);
 
         $fields = collect($request->only([
             'supplier_name', 'contact_person', 'email', 'phone', 'address',
             'supplier_type', 'materials_supplied', 'payment_terms_with_supplier',
             'lead_time_days', 'is_active', 'notes',
-        ]))->filter(fn($v) => !is_null($v))->toArray();
+        ]))->filter(fn ($v) => ! is_null($v))->toArray();
 
         $fields['updated_at'] = now();
         DB::table('suppliers')->where('supplier_id', $id)->update($fields);
@@ -599,12 +612,12 @@ class PurchaseOrderController extends Controller
 
         foreach ($managers as $uid) {
             DB::table('notifications')->insert([
-                'user_id'    => $uid,
-                'order_id'   => $orderId,
-                'message'    => $message,
-                'type'       => 'purchase_order',
-                'is_read'    => 0,
-                'date_sent'  => $now,
+                'user_id' => $uid,
+                'order_id' => $orderId,
+                'message' => $message,
+                'type' => 'purchase_order',
+                'is_read' => 0,
+                'date_sent' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);

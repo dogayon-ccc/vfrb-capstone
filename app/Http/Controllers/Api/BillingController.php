@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/BillingController.php
 // Invoices (INV-YYYY-NNNN) and payment receipts (RCT-YYYY-NNNN).
 //   manager:        issue / mark-paid / void an order's invoice
@@ -6,12 +7,14 @@
 //   customer:       read billing + open documents for their own orders only
 // Documents render as an A4 PDF (?format=pdf, default) or a phone-friendly HTML page (?format=html)
 // from the same Blade view. Titles follow BillingService::labels().
+
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Invoice;
 use App\Models\PaymentReceipt;
 use App\Services\BillingService;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
@@ -24,9 +27,10 @@ class BillingController extends Controller
     // ── GET /api/admin/orders/{id}/billing ───────────────────────────────────
     public function adminOrderBilling(int $id)
     {
-        if (!DB::table('orders')->where('order_id', $id)->exists()) {
+        if (! DB::table('orders')->where('order_id', $id)->exists()) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
+
         return response()->json($this->billingSummary($id, true));
     }
 
@@ -35,8 +39,8 @@ class BillingController extends Controller
     {
         $data = $request->validate([
             'billing_profile_id' => 'nullable|integer',
-            'due_date'           => 'nullable|date|after_or_equal:today',
-            'notes'              => 'nullable|string|max:1000',
+            'due_date' => 'nullable|date|after_or_equal:today',
+            'notes' => 'nullable|string|max:1000',
         ]);
 
         $result = $this->billing->issue($id, Auth::id(), $data['billing_profile_id'] ?? null, $data['due_date'] ?? null, $data['notes'] ?? null);
@@ -56,16 +60,17 @@ class BillingController extends Controller
     {
         $data = $request->validate([
             'payment_method' => 'required|in:cash,gcash,ewallet,bank_transfer',
-            'reference_no'   => 'nullable|string|max:50',
-            'notes'          => 'nullable|string|max:1000',
+            'reference_no' => 'nullable|string|max:50',
+            'notes' => 'nullable|string|max:1000',
         ]);
 
         $invoice = Invoice::findOrFail($id);
-        $result  = $this->billing->markPaid($invoice, Auth::id(), $data['payment_method'], $data['reference_no'] ?? null, $data['notes'] ?? null);
+        $result = $this->billing->markPaid($invoice, Auth::id(), $data['payment_method'], $data['reference_no'] ?? null, $data['notes'] ?? null);
         if (isset($result['error'])) {
             return response()->json(['message' => $result['error'][0]], $result['error'][1]);
         }
 
+        app(DeliveryController::class)->deliverIfPaid((int) $invoice->order_id);
         if ($result['receipt']) {
             $this->notifyCustomer($invoice->order_id, 'Payment Received', "Payment received for Order #{$invoice->order_id}. Account settled.");
         }
@@ -81,6 +86,7 @@ class BillingController extends Controller
         if (isset($result['error'])) {
             return response()->json(['message' => $result['error'][0]], $result['error'][1]);
         }
+
         return response()->json(['invoice' => $result['invoice'], 'billing' => $this->billingSummary($result['invoice']->order_id, true)]);
     }
 
@@ -99,15 +105,16 @@ class BillingController extends Controller
     // GET /api/customer/orders/{id}/billing — status, numbers and dates only; customers never receive amounts.
     public function customerOrderBilling(int $id)
     {
-        if (!$this->ownsOrder($id)) {
+        if (! $this->ownsOrder($id)) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
         $invoice = Invoice::where('order_id', $id)->live()->first();
+
         return response()->json([
-            'invoice'  => $invoice?->only(['invoice_id', 'invoice_number', 'status', 'issued_at', 'due_date', 'paid_at', 'billed_to_name']),
+            'invoice' => $invoice?->only(['invoice_id', 'invoice_number', 'status', 'issued_at', 'due_date', 'paid_at', 'billed_to_name']),
             'receipts' => PaymentReceipt::where('order_id', $id)->orderBy('paid_at')
                 ->get(['receipt_id', 'receipt_number', 'payment_method', 'reference_no', 'paid_at']),
-            'labels'   => collect($this->billing->labels())->only(['invoice_title', 'receipt_title'])->all(),
+            'labels' => collect($this->billing->labels())->only(['invoice_title', 'receipt_title'])->all(),
         ]);
     }
 
@@ -115,9 +122,10 @@ class BillingController extends Controller
     public function customerInvoiceDocument(Request $request, int $id)
     {
         $invoice = Invoice::live()->find($id);
-        if (!$invoice || !$this->ownsOrder($invoice->order_id)) {
+        if (! $invoice || ! $this->ownsOrder($invoice->order_id)) {
             return response()->json(['message' => 'Invoice not found.'], 404);
         }
+
         return $this->invoiceDocument($request, $invoice, false);
     }
 
@@ -125,9 +133,10 @@ class BillingController extends Controller
     public function customerReceiptDocument(Request $request, int $id)
     {
         $receipt = PaymentReceipt::find($id);
-        if (!$receipt || !$this->ownsOrder($receipt->order_id)) {
+        if (! $receipt || ! $this->ownsOrder($receipt->order_id)) {
             return response()->json(['message' => 'Receipt not found.'], 404);
         }
+
         return $this->receiptDocument($request, $receipt, false);
     }
 
@@ -140,30 +149,31 @@ class BillingController extends Controller
     /** What Order Detail needs: the live invoice, its receipts, and totals from recorded values only. */
     private function billingSummary(int $orderId, bool $admin): array
     {
-        $order   = DB::table('orders')->where('order_id', $orderId)->select('agreed_total', 'status')->first();
+        $order = DB::table('orders')->where('order_id', $orderId)->select('agreed_total', 'status')->first();
         $invoice = Invoice::where('order_id', $orderId)->live()->first();
-        $total   = $invoice?->total_amount ?? ($order->agreed_total !== null ? (float) $order->agreed_total : null);
-        $paid    = $this->billing->paidToDate($orderId);
+        $total = $invoice?->total_amount ?? ($order->agreed_total !== null ? (float) $order->agreed_total : null);
+        $paid = $this->billing->paidToDate($orderId);
 
         $out = [
-            'invoice'      => $invoice?->only(['invoice_id', 'invoice_number', 'status', 'total_amount', 'issued_at', 'due_date', 'paid_at', 'billed_to_name']),
-            'receipts'     => PaymentReceipt::where('order_id', $orderId)->orderBy('paid_at')
+            'invoice' => $invoice?->only(['invoice_id', 'invoice_number', 'status', 'total_amount', 'issued_at', 'due_date', 'paid_at', 'billed_to_name']),
+            'receipts' => PaymentReceipt::where('order_id', $orderId)->orderBy('paid_at')
                 ->get(['receipt_id', 'receipt_number', 'amount', 'payment_method', 'reference_no', 'balance_after', 'paid_at']),
-            'total'        => $total,
+            'total' => $total,
             'paid_to_date' => $paid,
-            'balance'      => $total !== null ? max(0, round($total - $paid, 2)) : null,
-            'labels'       => collect($this->billing->labels())->only(['invoice_title', 'receipt_title', 'receipt_note'])->all(),
+            'balance' => $total !== null ? max(0, round($total - $paid, 2)) : null,
+            'labels' => collect($this->billing->labels())->only(['invoice_title', 'receipt_title', 'receipt_note'])->all(),
         ];
 
         if ($admin) {
-            $out['awaiting_delivery'] = !$invoice && !$this->billing->reachedDelivery($orderId);
-            $out['can_issue']  = !$invoice && !$out['awaiting_delivery'] && $order->status !== 'cancelled' && $order->agreed_total !== null;
+            $out['awaiting_delivery'] = ! $invoice && ! $this->billing->reachedDelivery($orderId);
+            $out['can_issue'] = ! $invoice && ! $out['awaiting_delivery'] && $order->status !== 'cancelled' && $order->agreed_total !== null;
             $out['void_count'] = Invoice::where('order_id', $orderId)->where('status', 'void')->count();
             $out['billing_profiles'] = DB::table('billing_profiles')
                 ->where('user_id', DB::table('orders')->where('order_id', $orderId)->value('user_id'))
                 ->orderByDesc('is_default')
                 ->get(['billing_id', 'billing_name', 'billing_address', 'is_default']);
         }
+
         return $out;
     }
 
@@ -172,9 +182,9 @@ class BillingController extends Controller
         $order = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
             ->where('orders.order_id', $invoice->order_id)
             ->select('orders.order_id', 'orders.garment_type', 'orders.quantity_ordered', 'orders.po_reference',
-                     'orders.fabric_type', 'orders.delivery_address', 'orders.promised_date',
-                     'orders.down_payment_amount', 'orders.down_payment_received_at',
-                     'users.name as customer_name', 'users.organization_name')
+                'orders.fabric_type', 'orders.delivery_address', 'orders.promised_date',
+                'orders.down_payment_amount', 'orders.down_payment_received_at',
+                'users.name as customer_name', 'users.organization_name')
             ->first();
 
         // Per-size quantities as the customer submitted them (measurements.size_label, qty).
@@ -186,51 +196,51 @@ class BillingController extends Controller
             ->map(fn ($rows) => (int) $rows->sum('qty'));
 
         return $this->render($request, 'billing.invoice', "{$invoice->invoice_number}", [
-            'invoice'  => $invoice,
-            'order'    => $order,
-            'sizes'    => $sizes,
+            'invoice' => $invoice,
+            'order' => $order,
+            'sizes' => $sizes,
             'receipts' => PaymentReceipt::where('order_id', $invoice->order_id)->orderBy('paid_at')->get(),
-            'paid'     => $this->billing->paidToDate($invoice->order_id),
-            'balance'  => $this->billing->balance($invoice->order_id, $invoice->total_amount),
-            'amounts'  => $amounts,
+            'paid' => $this->billing->paidToDate($invoice->order_id),
+            'balance' => $this->billing->balance($invoice->order_id, $invoice->total_amount),
+            'amounts' => $amounts,
         ]);
     }
 
     private function receiptDocument(Request $request, PaymentReceipt $receipt, bool $amounts = true)
     {
         $invoice = $receipt->invoice_id ? Invoice::find($receipt->invoice_id) : null;
-        $order   = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
+        $order = DB::table('orders')->join('users', 'orders.user_id', '=', 'users.user_id')
             ->where('orders.order_id', $receipt->order_id)
             ->select('orders.order_id', 'orders.garment_type', 'orders.quantity_ordered', 'users.name', 'users.organization_name')
             ->first();
 
         return $this->render($request, 'billing.receipt', $receipt->receipt_number, [
-            'receipt'    => $receipt,
-            'invoice'    => $invoice,
-            'order'      => $order,
+            'receipt' => $receipt,
+            'invoice' => $invoice,
+            'order' => $order,
             'receivedBy' => DB::table('users')->where('user_id', $receipt->issued_by)->value('name'),
-            'payer'      => $invoice->billed_to_name ?? ($order->organization_name ?: $order->name),
-            'amounts'    => $amounts,
+            'payer' => $invoice->billed_to_name ?? ($order->organization_name ?: $order->name),
+            'amounts' => $amounts,
         ]);
     }
 
     private function render(Request $request, string $view, string $filename, array $data)
     {
         $data += [
-            'labels'    => $this->billing->labels(),
-            'company'   => $this->billing->company(),
+            'labels' => $this->billing->labels(),
+            'company' => $this->billing->company(),
             'printedAt' => now()->format('F d, Y g:i A'),
         ];
 
         if ($request->query('format') === 'html') {
             return response(view($view, $data + ['mode' => 'html'])->render(), 200, [
-                'Content-Type'            => 'text/html; charset=UTF-8',
+                'Content-Type' => 'text/html; charset=UTF-8',
                 // Narrower than the API default (default-src 'none'), which would block the inline styles.
                 'Content-Security-Policy' => "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
             ]);
         }
 
-        return \Barryvdh\DomPDF\Facade\Pdf::loadView($view, $data + ['mode' => 'pdf'])
+        return Pdf::loadView($view, $data + ['mode' => 'pdf'])
             ->setPaper('a4', 'portrait')
             ->download("VFRB-{$filename}.pdf");
     }
@@ -238,7 +248,7 @@ class BillingController extends Controller
     private function notifyCustomer(int $orderId, string $title, string $message): void
     {
         $userId = DB::table('orders')->where('order_id', $orderId)->value('user_id');
-        $now    = now();
+        $now = now();
         DB::table('notifications')->insert([
             'user_id' => $userId, 'order_id' => $orderId, 'message' => $message, 'type' => 'payment',
             'title' => $title, 'is_read' => 0, 'date_sent' => $now, 'created_at' => $now, 'updated_at' => $now,
