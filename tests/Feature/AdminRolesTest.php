@@ -37,6 +37,19 @@ class AdminRolesTest extends TestCase
         $this->postJson('/api/admin/suppliers', [])->assertForbidden();
     }
 
+    public function test_customer_summary_counts_every_type_and_untyped_up_to_the_total(): void
+    {
+        foreach (['government', 'organization', null] as $type) {
+            $this->makeUser('customer')->forceFill(['client_type' => $type])->save();
+        }
+        $this->actingAs($this->makeUser('manager'), 'sanctum');
+        $summary = $this->getJson('/api/admin/customers')->assertOk()->json('summary');
+
+        $this->assertSame(['total', 'individual', 'corporate', 'school', 'medical', 'government', 'organization', 'untyped'], array_keys($summary));
+        $this->assertSame($summary['total'], array_sum($summary) - $summary['total']);
+        $this->assertGreaterThanOrEqual(1, $summary['untyped']);
+    }
+
     public function test_manager_manages_admin_accounts_and_owner_cannot(): void
     {
         $other = $this->makeUser('manager');
@@ -47,9 +60,16 @@ class AdminRolesTest extends TestCase
         $this->patchJson("/api/admin/users/{$other->user_id}/toggle")->assertOk()->assertJson(['is_active' => false]);
     }
 
-    public function test_staff_role_is_rejected_for_new_accounts(): void
+    public function test_staff_accounts_need_an_assigned_stage_and_others_must_not_have_one(): void
     {
         $this->actingAs($this->makeUser('manager'), 'sanctum');
-        $this->postJson('/api/admin/users', ['name' => 'X', 'role' => 'staff'])->assertStatus(422)->assertJsonValidationErrors('role');
+        $this->postJson('/api/admin/users', ['name' => 'X', 'role' => 'staff'])->assertStatus(422)
+            ->assertJsonValidationErrors('assigned_stage')->assertJsonMissingValidationErrors('role');
+        $this->postJson('/api/admin/users', ['name' => 'X', 'role' => 'staff', 'assigned_stage' => 'ironing'])->assertJsonValidationErrors('assigned_stage');
+        $this->postJson('/api/admin/users', ['name' => 'X', 'role' => 'manager', 'assigned_stage' => 'sewing'])->assertJsonValidationErrors('assigned_stage');
+
+        $station = $this->makeUser('manager');
+        $this->putJson("/api/admin/users/{$station->user_id}", ['role' => 'staff', 'assigned_stage' => 'cutting'])->assertOk()->assertJsonPath('role', 'staff');
+        $this->assertSame('cutting', DB::table('users')->where('user_id', $station->user_id)->value('assigned_stage'));
     }
 }

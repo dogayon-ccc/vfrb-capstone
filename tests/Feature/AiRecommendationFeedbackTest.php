@@ -1,7 +1,9 @@
 <?php
+
 // tests/Feature/AiRecommendationFeedbackTest.php
 // Staff accept/reject feedback on AI material recommendations (2026-10-16): who may give it, that it persists, that a reviewed list
 // is never wiped by a regeneration, and that later recommendations for the same garment use it (prompt and catalog fallback).
+
 namespace Tests\Feature;
 
 use App\Models\User;
@@ -9,6 +11,7 @@ use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Spatie\Permission\Models\Role;
 use Tests\TestCase;
@@ -23,14 +26,20 @@ class AiRecommendationFeedbackTest extends TestCase
         parent::setUp();
         $this->assertNotSame('pgsql', DB::connection()->getDriverName(), 'Point DB_* at the local vfrb_test database.');
         config(['services.gemini.key_1' => 'test-key', 'services.gemini.key_2' => null, 'services.gemini.key_3' => null]);
+
+        // These tests use fabric VFRB buys for direct orders; the reclassification is master data and rolls back.
+        if (Schema::hasColumn('materials', 'ownership')) {
+            DB::table('materials')->where('category', 'Fabric')->update(['ownership' => 'vfrb']);
+        }
     }
 
     private function makeUser(string $role): User
     {
-        $user = User::create(['name' => ucfirst($role) . ' Test', 'email' => uniqid($role) . '@example.test', 'password' => bcrypt('secret-pass')]);
+        $user = User::create(['name' => ucfirst($role).' Test', 'email' => uniqid($role).'@example.test', 'password' => bcrypt('secret-pass')]);
         $user->forceFill(['email_verified_at' => now()])->save();
         Role::firstOrCreate(['name' => $role, 'guard_name' => 'web']);
         $user->assignRole($role);
+
         return $user;
     }
 
@@ -39,6 +48,7 @@ class AiRecommendationFeedbackTest extends TestCase
     {
         DB::table('orders')->where('order_id', 8)->update(['garment_type' => $garment]);
         $name = DB::table('materials')->where('material_id', $materialId)->value('material_name');
+
         return DB::table('material_recommendations')->insertGetId([
             'order_id' => 8, 'material_id' => $materialId, 'material_name' => $name, 'category' => 'Fabric', 'unit' => 'yards', 'status' => 'pending',
             'staff_feedback' => $verdict, 'staff_feedback_at' => $verdict ? now() : null, 'created_at' => now(), 'updated_at' => now(),
@@ -48,6 +58,7 @@ class AiRecommendationFeedbackTest extends TestCase
     private function recommend()
     {
         Sanctum::actingAs(User::findOrFail(5), ['*']);
+
         return $this->postJson('/api/customer/ai/recommend-materials', ['order_id' => 9]);
     }
 
@@ -98,6 +109,7 @@ class AiRecommendationFeedbackTest extends TestCase
 
         Http::assertSent(function (Request $r) {
             $prompt = $r->data()['contents'][0]['parts'][0]['text'];
+
             return str_contains($prompt, 'rejected for this garment on earlier orders (avoid unless the design clearly needs them): Cotton-Poly Blend Fabric (Navy)')
                 && str_contains($prompt, 'approved for this garment on earlier orders (good candidates when they fit this design): Cotton Fabric');
         });

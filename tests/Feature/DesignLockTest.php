@@ -29,6 +29,79 @@ class DesignLockTest extends TestCase
         return $designId;
     }
 
+    // A design reached only through orders.design_id (no source_order_id), as a Studio design attached to an order is.
+    private function designLinkedByOrder(int $userId, string $status): array
+    {
+        $designId = DB::table('designs')->insertGetId([
+            'design_name' => 'link-test', 'garment_type' => 'Polo Shirt',
+            'custom_builder_config' => json_encode(['garment' => 'polo']), 'created_at' => now(), 'updated_at' => now(),
+        ], 'design_id');
+        $orderId = $this->orderFor($userId, $designId, $status);
+
+        return [$designId, $orderId];
+    }
+
+    private function orderFor(int $userId, int $designId, string $status): int
+    {
+        return DB::table('orders')->insertGetId([
+            'user_id' => $userId, 'design_id' => $designId, 'garment_type' => 'Polo Shirt', 'quantity_ordered' => 100, 'status' => $status,
+            'created_at' => now(), 'updated_at' => now(),
+        ], 'order_id');
+    }
+
+    private function listed(int $designId): array
+    {
+        return collect($this->getJson('/api/customer/designs')->assertOk()->json())->keyBy('id')[$designId];
+    }
+
+    public function test_design_linked_only_by_design_id_reports_its_order(): void
+    {
+        [$design, $order] = $this->designLinkedByOrder(5, 'pending');
+        Sanctum::actingAs(User::findOrFail(5), ['*']);
+
+        $row = $this->listed($design);
+        $this->assertSame($order, $row['order_id']);
+        $this->assertFalse($row['locked']);
+        $this->assertFalse($row['is_archived']);
+    }
+
+    public function test_design_link_uses_the_newest_non_cancelled_order(): void
+    {
+        [$design, $first] = $this->designLinkedByOrder(5, 'pending');
+        $second = $this->orderFor(5, $design, 'pending');
+        $this->orderFor(5, $design, 'cancelled');
+        Sanctum::actingAs(User::findOrFail(5), ['*']);
+
+        $this->assertGreaterThan($first, $second);
+        $this->assertSame($second, $this->listed($design)['order_id']);
+    }
+
+    public function test_cancelled_order_link_is_not_reported(): void
+    {
+        [$design] = $this->designLinkedByOrder(5, 'cancelled');
+        Sanctum::actingAs(User::findOrFail(5), ['*']);
+
+        $this->assertNull($this->listed($design)['order_id']);
+    }
+
+    public function test_another_customers_order_link_is_not_reported(): void
+    {
+        [$design] = $this->designLinkedByOrder(5, 'pending');
+        Sanctum::actingAs(User::findOrFail(6), ['*']);
+
+        $this->assertNull($this->listed($design)['order_id']);
+    }
+
+    public function test_source_order_id_wins_over_a_design_id_link(): void
+    {
+        $design = $this->designOnOrder(5, 'pending');
+        $source = DB::table('designs')->where('design_id', $design)->value('source_order_id');
+        $this->orderFor(5, $design, 'pending');
+        Sanctum::actingAs(User::findOrFail(5), ['*']);
+
+        $this->assertSame($source, $this->listed($design)['order_id']);
+    }
+
     public function test_test_database_has_proposal_status_column(): void
     {
         $this->assertTrue(Schema::hasColumn('orders', 'proposal_status'));

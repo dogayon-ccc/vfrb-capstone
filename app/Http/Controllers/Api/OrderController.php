@@ -32,6 +32,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Middleware\RoleMiddleware;
 use App\Models\AuditLog;
 use App\Models\MaterialRecommendation;
 use App\Models\Order;
@@ -40,10 +41,13 @@ use App\Notifications\OrderStatusNotification;
 use App\Notifications\PortalMailNotification;
 use App\Services\BillingService;
 use App\Services\MaterialShortageService;
+use App\Services\ProductionStageService;
 use App\Support\EmailNotify;
 use App\Support\FileUrl;
+use App\Support\OrderStatusLabel;
 use App\Support\StudioSet;
 use App\Support\UploadDisk;
+use App\Support\UploadRules;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -141,10 +145,10 @@ class OrderController extends Controller
         return $o;
     }
 
-    // Customers never receive money fields; prices are agreed off-platform and the proposal is date-only.
+    // Customers never receive money, payment or QC fields; payments are recorded by VFRB once received.
     private static function clientMoney($o)
     {
-        unset($o->agreed_total, $o->discount_rate, $o->down_payment_amount);
+        unset($o->agreed_total, $o->discount_rate, $o->discount_pct, $o->down_payment_amount, $o->payment_method, $o->payment_terms, $o->qc_required, $o->qc_passed_at);
 
         return $o;
     }
@@ -232,6 +236,7 @@ class OrderController extends Controller
             'quantity_ordered' => 'required|integer|min:100',
             'fabric_type' => 'nullable|string|max:100',
             'delivery_address' => 'nullable|string|max:1000',
+            'delivery_method' => 'nullable|in:vfrb_deliver,pickup',
             'color' => 'nullable|string|max:50',
             'order_type' => 'nullable|in:direct,subcontract,bulk', // no rush orders
             'sizing_type' => 'nullable|in:standard,custom',
@@ -244,7 +249,7 @@ class OrderController extends Controller
             'po_reference' => 'nullable|string|max:100',
             'client_design_notes' => 'required|string|min:15',
             'studio_config' => 'nullable|string',    // JSON string from canvas
-            'design_ref_file' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:5120',
+            'design_ref_file' => UploadRules::reference(),
             'design_preview_file' => 'nullable|file|mimes:png|max:5120',
             'design_3d_snapshot_file' => 'nullable|file|mimes:png|max:5120',
             'sizes' => 'nullable|string',    // JSON string
@@ -377,7 +382,8 @@ class OrderController extends Controller
                 'sizing_type' => $request->input('sizing_type', 'standard'),
                 'target_delivery_date' => $request->input('preferred_date') ?: $request->input('deadline'),
                 'fabric_type' => $request->input('fabric_type'),
-                'delivery_address' => $request->input('delivery_address'),
+                'delivery_address' => $request->input('delivery_method') === 'pickup' ? null : $request->input('delivery_address'),
+                'delivery_method' => $request->input('delivery_method') ?: 'vfrb_deliver',
                 'po_reference' => $request->input('po_reference'),
                 'client_design_notes' => $request->input('client_design_notes'),
                 'client_design_ref_file' => $refFilePath,
@@ -495,7 +501,7 @@ class OrderController extends Controller
             } else {
                 $statuses = array_map('trim', explode(',', $status));
             }
-            $query->whereIn('orders.status', $statuses);
+            $query->whereIn('orders.status', $this->stationStatuses($request, $statuses));
         }
 
         $result = $query->paginate($perPage);
@@ -517,6 +523,19 @@ class OrderController extends Controller
         });
 
         return response()->json($result);
+    }
+
+    // A station only sees production orders at its own stage or still upstream of it.
+    private function stationStatuses(Request $request, array $statuses): array
+    {
+        $stage = $request->user()->assigned_stage;
+        if (! $stage || RoleMiddleware::roleOf($request) !== 'staff') {
+            return $statuses;
+        }
+        $stages = ProductionStageService::productionStages();
+        $later = array_slice($stages, array_search($stage, $stages, true) + 1);
+
+        return array_values(array_diff($statuses, $later));
     }
 
     // ── GET /api/admin/orders/{id} ────────────────────────────────────────────
@@ -564,6 +583,9 @@ class OrderController extends Controller
         if (! $order) {
             return response()->json(['message' => 'Order not found.'], 404);
         }
+        if ($userId) {
+            $order->status = OrderStatusLabel::for($order->status);
+        }
         $cfg = json_decode($order->studio_config ?? '', true);
         if (! is_array($cfg)) {
             return response()->json(['message' => 'This order has no Design Studio design.'], 422);
@@ -572,32 +594,34 @@ class OrderController extends Controller
         $layers = [];
         foreach (['Front' => 'frontOverlays', 'Back' => 'backOverlays'] as $face => $key) {
             foreach ((array) ($cfg[$key] ?? []) as $o) {
-                if (! is_array($o) || empty($o['__logo']) && empty($o['__text'])) continue;
+                if (! is_array($o) || empty($o['__logo']) && empty($o['__text'])) {
+                    continue;
+                }
                 $sx = (float) ($o['scaleX'] ?? 1);
                 $sy = (float) ($o['scaleY'] ?? 1);
                 $layers[] = [
-                    'face'  => $face,
-                    'kind'  => ! empty($o['__text']) ? 'Text' : (! empty($o['__artwork']) ? 'Artwork' : 'Logo'),
-                    'text'  => $o['text'] ?? null,
-                    'font'  => $o['fontFamily'] ?? null,
-                    'fill'  => is_string($o['fill'] ?? null) ? strtoupper($o['fill']) : null,
-                    'x'     => round((float) ($o['left'] ?? 0)),
-                    'y'     => round((float) ($o['top'] ?? 0)),
-                    'w'     => round((float) ($o['width'] ?? 0) * $sx),
-                    'h'     => round((float) ($o['height'] ?? 0) * $sy),
+                    'face' => $face,
+                    'kind' => ! empty($o['__text']) ? 'Text' : (! empty($o['__artwork']) ? 'Artwork' : 'Logo'),
+                    'text' => $o['text'] ?? null,
+                    'font' => $o['fontFamily'] ?? null,
+                    'fill' => is_string($o['fill'] ?? null) ? strtoupper($o['fill']) : null,
+                    'x' => round((float) ($o['left'] ?? 0)),
+                    'y' => round((float) ($o['top'] ?? 0)),
+                    'w' => round((float) ($o['width'] ?? 0) * $sx),
+                    'h' => round((float) ($o['height'] ?? 0) * $sy),
                     'angle' => round((float) ($o['angle'] ?? 0)),
-                    'img'   => empty($o['__text']) ? $this->pdfImage($o['src'] ?? null) : null,
+                    'img' => empty($o['__text']) ? $this->pdfImage($o['src'] ?? null) : null,
                 ];
             }
         }
 
         $pdf = Pdf::loadView('pdf.spec-sheet', [
-            'order'    => $order,
-            'cfg'      => $cfg,
-            'zones'    => array_filter((array) ($cfg['colors'] ?? []), fn ($hex) => is_string($hex) && $hex !== ''),
-            'layers'   => $layers,
-            'sizes'    => DB::table('measurements')->where('order_id', $id)->orderBy('measurement_id')->get(['type', 'size_label', 'qty']),
-            'preview'  => $this->pdfImage($order->client_design_preview_file ? $this->resolveDesignRefUrl($order->client_design_preview_file) : ($cfg['previewPng'] ?? null)),
+            'order' => $order,
+            'cfg' => $cfg,
+            'zones' => array_filter((array) ($cfg['colors'] ?? []), fn ($hex) => is_string($hex) && $hex !== ''),
+            'layers' => $layers,
+            'sizes' => DB::table('measurements')->where('order_id', $id)->orderBy('measurement_id')->get(['type', 'size_label', 'qty']),
+            'preview' => $this->pdfImage($order->client_design_preview_file ? $this->resolveDesignRefUrl($order->client_design_preview_file) : ($cfg['previewPng'] ?? null)),
             'printedAt' => now()->format('F d, Y g:i A'),
         ])->setPaper('a4', 'portrait');
 
@@ -607,12 +631,19 @@ class OrderController extends Controller
     // dompdf has remote loading off, so remote images are fetched here and embedded; data URLs pass through.
     private function pdfImage(?string $src): ?string
     {
-        if (! $src) return null;
-        if (str_starts_with($src, 'data:image/')) return $src;
-        if (! preg_match('#^https?://#i', $src)) return null;
+        if (! $src) {
+            return null;
+        }
+        if (str_starts_with($src, 'data:image/')) {
+            return $src;
+        }
+        if (! preg_match('#^https?://#i', $src)) {
+            return null;
+        }
         try {
             $res = Http::timeout(8)->get($src);
             $type = $res->header('Content-Type');
+
             return $res->successful() && str_starts_with($type, 'image/') ? "data:{$type};base64,".base64_encode($res->body()) : null;
         } catch (\Throwable) {
             return null;
@@ -842,6 +873,7 @@ class OrderController extends Controller
                 StudioSet::confirmPendingSiblings($id);
             }
         }
+        (new ProductionStageService)->startProduction($id);
 
         Cache::forget('dashboard_stats');
 
@@ -917,7 +949,7 @@ class OrderController extends Controller
         EmailNotify::users([$order->user_id], new PortalMailNotification(
             "Proposal for your VFRB order #{$id}",
             ["Promised delivery date: {$promised}", "Note from VFRB: {$request->input('proposal_note')}", 'Please accept or decline the proposal in the portal.'],
-            'Review proposal', "/customer/orders/{$id}"));
+            'Review proposal', "/orders/{$id}"));
 
         Cache::forget('dashboard_stats');
 
@@ -972,11 +1004,12 @@ class OrderController extends Controller
 
             // Receipt only when no payment was logged for this order yet, so a manual entry is never doubled.
             if (! DB::table('sales_transactions')->where('order_id', $id)->exists()) {
-                app(BillingService::class)->recordPayment($id, $amount, $request->input('payment_method', 'cash'), 'down_payment',
+                app(BillingService::class)->recordPayment($id, $amount, $request->input('payment_method', 'bank_transfer'), 'down_payment',
                     null, 'Down payment', null, (int) $request->user()->user_id, $request->input('reference_no'));
             }
         });
         $this->notifyCustomer($order->user_id, $id, "VFRB received your down payment for order #{$id}.");
+        (new ProductionStageService)->startProduction($id);
 
         return response()->json(['message' => "Down payment recorded for order #{$id}.", 'order' => DB::table('orders')->where('order_id', $id)->first()]);
     }
@@ -1001,15 +1034,18 @@ class OrderController extends Controller
         AuditLog::record('order_status_changed', 'orders', $id);
 
         $stockNote = app(MaterialShortageService::class)->summary($id);
-        $managerIds = $this->notifyManagers($id, "Customer accepted the proposal for order #{$id}. Order confirmed; waiting for the down payment.".($stockNote ? " {$stockNote}" : ''));
+        // Subcontract orders are paid at delivery, so they go straight into production.
+        $subcontract = $order->order_type === 'subcontract';
+        (new ProductionStageService)->startProduction($id);
+        $managerIds = $this->notifyManagers($id, "Customer accepted the proposal for order #{$id}. ".($subcontract ? 'Subcontract order: production started; payment is due at delivery.' : 'Order confirmed; waiting for the down payment.').($stockNote ? " {$stockNote}" : ''));
         EmailNotify::users($managerIds, new PortalMailNotification(
-            "Proposal accepted: order #{$id}", ["The customer accepted the proposal for order #{$id}. Record the down payment before production starts."],
+            "Proposal accepted: order #{$id}", [$subcontract ? "The customer accepted the proposal for order #{$id}. Production has started; payment is due at delivery." : "The customer accepted the proposal for order #{$id}. Record the down payment before production starts."],
             'Open order', "/admin/orders/{$id}"));
         EmailNotify::users([$order->user_id], new OrderStatusNotification($id, 'confirmed'));
 
         Cache::forget('dashboard_stats');
 
-        return response()->json(['message' => "Order #{$id} confirmed. Production starts once VFRB receives the down payment.", 'order' => self::clientMoney(self::clientStatus(DB::table('orders')->where('order_id', $id)->first()))]);
+        return response()->json(['message' => $subcontract ? "Order #{$id} confirmed. Production has started." : "Order #{$id} confirmed. Production starts once VFRB receives the down payment.", 'order' => self::clientMoney(self::clientStatus(DB::table('orders')->where('order_id', $id)->first()))]);
     }
 
     // ── POST /api/customer/orders/{id}/decline { reason } ─────────────────────

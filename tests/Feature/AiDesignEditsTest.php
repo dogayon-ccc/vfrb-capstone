@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Models\User;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
+use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 // POST /api/ai/design-edits with Gemini faked. Writes nothing to any database.
@@ -13,6 +15,14 @@ class AiDesignEditsTest extends TestCase
     {
         parent::setUp();
         config(['services.gemini.key_1' => 'test-key', 'services.gemini.key_2' => null, 'services.gemini.key_3' => null]);
+        Sanctum::actingAs(new User, ['*']);
+    }
+
+    public function test_ai_studio_routes_require_login(): void
+    {
+        $this->app['auth']->forgetGuards();
+        $this->postJson('/api/ai/design-edits', $this->body())->assertUnauthorized();
+        $this->postJson('/api/ai/describe-design', ['description' => 'navy scrub top'])->assertUnauthorized();
     }
 
     private function gemini(mixed $payload)
@@ -24,9 +34,9 @@ class AiDesignEditsTest extends TestCase
     {
         return array_replace_recursive([
             'instruction' => 'Make the collar white and add SMITH on the back',
-            'template'    => ['id' => 'polo-short-male', 'garment' => 'Polo Shirt', 'zones' => ['body', 'collar', 'sleeve'],
-                              'placements' => ['left_chest', 'back_center', 'left_arm'], 'patterns' => ['solid', 'hstripes']],
-            'state'       => ['colors' => ['body' => '#1B2A4A', 'collar' => '#1B2A4A'], 'patterns' => ['body' => 'solid'], 'texts' => []],
+            'template' => ['id' => 'polo-short-male', 'garment' => 'Polo Shirt', 'zones' => ['body', 'collar', 'sleeve'],
+                'placements' => ['left_chest', 'back_center', 'left_arm'], 'patterns' => ['solid', 'hstripes']],
+            'state' => ['colors' => ['body' => '#1B2A4A', 'collar' => '#1B2A4A'], 'patterns' => ['body' => 'solid'], 'texts' => []],
         ], $over);
     }
 
@@ -50,6 +60,7 @@ class AiDesignEditsTest extends TestCase
         // The model was constrained to this template's own values.
         Http::assertSent(function (Request $r) {
             $schema = $r['generationConfig']['responseJsonSchema'] ?? $r['generationConfig']['responseSchema'] ?? null;
+
             return $schema && $schema['properties']['operations']['items']['properties']['zone']['enum'] === ['body', 'collar', 'sleeve'];
         });
     }

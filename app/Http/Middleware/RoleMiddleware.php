@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Middleware/RoleMiddleware.php
 // FIXES v10:
 //   supplier_id fallback removed — column gone from users table
@@ -18,7 +19,7 @@ class RoleMiddleware
     {
         $user = $request->user();
 
-        if (!$user) {
+        if (! $user) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
@@ -28,18 +29,13 @@ class RoleMiddleware
         // DB role name is 'customer' (roles.id=3) — do not rename to 'client' here. UI/routes
         // say "client"; the Spatie role identifier does not, and every route guard checks
         // against this exact string via model_has_roles above.
-        if (!$userRole) {
+        if (! $userRole) {
             $userRole = 'customer';
-        }
-
-        // The staff role is retired: its existing tokens are refused everywhere.
-        if ($userRole === 'staff') {
-            return response()->json(['message' => 'Staff accounts have been retired. Ask an Administrator for access.'], 403);
         }
 
         // Admin accounts are auto-verified on creation, so a null email_verified_at
         // means they were deactivated (UserController::adminToggle).
-        if (in_array($userRole, ['manager', 'owner'], true) && is_null($user->email_verified_at)) {
+        if (in_array($userRole, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
@@ -47,7 +43,7 @@ class RoleMiddleware
         if ($userRole === 'customer' && is_null($user->email_verified_at)) {
             return response()->json([
                 'message' => 'Please verify your email address to continue.',
-                'code'    => 'email_unverified',
+                'code' => 'email_unverified',
             ], 403);
         }
 
@@ -61,7 +57,7 @@ class RoleMiddleware
         return response()->json([
             'message' => 'Forbidden. Insufficient permissions.',
             'required_role' => implode(' or ', $roles),
-            'your_role'     => $userRole,
+            'your_role' => $userRole,
         ], 403);
     }
 
@@ -96,6 +92,6 @@ class RoleMiddleware
     // Keyed by database too: the local QA stack shares this file cache with the Supabase setup, and user ids overlap.
     private static function roleKey(int $userId): string
     {
-        return 'vfrb_role:' . DB::connection()->getDatabaseName() . ":{$userId}";
+        return 'vfrb_role:'.DB::connection()->getDatabaseName().":{$userId}";
     }
 }

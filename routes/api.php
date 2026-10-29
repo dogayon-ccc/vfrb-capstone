@@ -1,4 +1,5 @@
 <?php
+
 // routes/api.php — VFRB Enterprise
 // ============================================================
 // VERIFIED against:
@@ -30,37 +31,39 @@
 //   'role:manager'         — Spatie: manager only
 //   No supplier portal — ever.
 
-use App\Http\Controllers\Api\AIController;
-use App\Http\Controllers\Api\RecommendationGuidanceController;
+use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AdminDashboardController;
 use App\Http\Controllers\Api\AdminReportController;
-use App\Http\Controllers\Api\ActivityLogController;
+use App\Http\Controllers\Api\AIController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AutomationController;
 use App\Http\Controllers\Api\BillingController;
-use App\Http\Controllers\Api\ClientMaterialController;
 use App\Http\Controllers\Api\BillingProfileController;
-use App\Http\Controllers\Api\NotificationPreferenceController;
+use App\Http\Controllers\Api\ClientMaterialController;
 use App\Http\Controllers\Api\CustomerContactController;
 use App\Http\Controllers\Api\CustomerFabricPreferenceController;
 use App\Http\Controllers\Api\DeliveryController;
 use App\Http\Controllers\Api\DesignController;
+use App\Http\Controllers\Api\FeedbackController;
 use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\MessageController;
 use App\Http\Controllers\Api\NotificationController;
+use App\Http\Controllers\Api\NotificationPreferenceController;
 use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\OrderDraftController;
 use App\Http\Controllers\Api\OutputLogController;
 use App\Http\Controllers\Api\PhysicalCountController;
 use App\Http\Controllers\Api\ProductionController;
+use App\Http\Controllers\Api\ProfilePhotoController;
 use App\Http\Controllers\Api\PurchaseOrderController;
 use App\Http\Controllers\Api\QCChecklistController;
+use App\Http\Controllers\Api\RecommendationGuidanceController;
+use App\Http\Controllers\Api\SalesTransactionController;
 use App\Http\Controllers\Api\SettingsController;
 use App\Http\Controllers\Api\ShippingAddressController;
-use App\Http\Controllers\Api\SalesTransactionController;
+use App\Http\Controllers\Api\UploadRulesController;
 use App\Http\Controllers\Api\UserController;
-use App\Http\Controllers\Api\ProfilePhotoController;
-use App\Http\Controllers\Api\AutomationController;
-use App\Http\Controllers\Api\OrderDraftController;
 use App\Http\Controllers\Api\VersionController;
 use Illuminate\Support\Facades\Route;
 
@@ -76,20 +79,22 @@ use Illuminate\Support\Facades\Route;
 Route::get('/version', [VersionController::class, 'show']);
 
 // ── Customer auth ─────────────────────────────────────────────
-Route::post('/login',    [AuthController::class, 'login'])->middleware('throttle:10,1');
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:10,1');
 // Self-registration is disabled: an Administrator creates customer accounts (POST /api/admin/users).
+// Public "Request access": records a customer_contacts row and notifies managers; never creates a user.
+Route::post('/request-access', [CustomerContactController::class, 'requestAccess'])->middleware('throttle:5,1');
 
 // ── Admin auth (alias so both /api/admin/login and /api/login work) ──
 Route::post('/admin/login', [AuthController::class, 'adminLogin'])->middleware('throttle:10,1');
 
 // ── Password reset ────────────────────────────────────────────
 Route::post('/password/forgot', [AuthController::class, 'forgotPassword'])->middleware('throttle:5,1');
-Route::post('/password/reset',  [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
+Route::post('/password/reset', [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
 
-// ── AI Design Studio prompt (PUBLIC — customer uses before login) ─
-Route::post('/ai/describe-design', [AIController::class, 'describeDesign'])->middleware('throttle:30,1');
+// ── AI Design Studio prompt (Design Studio requires a customer login) ─
+Route::post('/ai/describe-design', [AIController::class, 'describeDesign'])->middleware(['auth:sanctum', 'throttle:30,1']);
 // Studio edit-by-instruction: strict operations on the current template's real zones (AIController::designEdits).
-Route::post('/ai/design-edits', [AIController::class, 'designEdits'])->middleware('throttle:20,1');
+Route::post('/ai/design-edits', [AIController::class, 'designEdits'])->middleware(['auth:sanctum', 'throttle:20,1']);
 
 // ── Google OAuth ──────────────────────────────────────────────
 // Real routes now live in routes/web.php (Aug 23 2026) — GET
@@ -121,13 +126,13 @@ Route::middleware(['auth:sanctum', 'auth.throttle:shared,60'])->group(function (
 
     // ── Notification preferences (own row only, any role) ─────────
     // Settings.jsx: GET/PATCH /api/settings/notifications
-    Route::get('/settings/notifications',   [SettingsController::class, 'notificationShow']);
+    Route::get('/settings/notifications', [SettingsController::class, 'notificationShow']);
     Route::patch('/settings/notifications', [SettingsController::class, 'notificationUpdate']);
 
     // ── Appearance + profile photo (own account only, any role) ───
-    Route::get('/settings/appearance',   [SettingsController::class, 'appearanceShow']);
+    Route::get('/settings/appearance', [SettingsController::class, 'appearanceShow']);
     Route::patch('/settings/appearance', [SettingsController::class, 'appearanceUpdate']);
-    Route::post('/profile/photo',   [ProfilePhotoController::class, 'store'])->middleware('auth.throttle:avatar-upload,10');
+    Route::post('/profile/photo', [ProfilePhotoController::class, 'store'])->middleware('auth.throttle:avatar-upload,10');
     Route::delete('/profile/photo', [ProfilePhotoController::class, 'destroy']);
 
 });
@@ -151,12 +156,12 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // OrderDetail.jsx: GET  /api/customer/orders/{id}
     // AIMaterials.jsx: GET  /api/customer/orders  (to build order selector)
     //                  GET  /api/customer/orders/{id} (load specific order)
-    Route::get('/orders',     [OrderController::class, 'customerIndex']);
-    Route::post('/orders',    [OrderController::class, 'customerStore']);
+    Route::get('/orders', [OrderController::class, 'customerIndex']);
+    Route::post('/orders', [OrderController::class, 'customerStore']);
     Route::get('/orders/{id}', [OrderController::class, 'customerShow']);
     Route::get('/orders/{id}/spec-sheet', [OrderController::class, 'customerSpecSheet']);
     // Proposal replies: accept confirms the order; decline needs a reason; message goes to the order thread.
-    Route::post('/orders/{id}/accept',  [OrderController::class, 'customerAcceptProposal']);
+    Route::post('/orders/{id}/accept', [OrderController::class, 'customerAcceptProposal']);
     Route::post('/orders/{id}/decline', [OrderController::class, 'customerDeclineProposal']);
     Route::post('/orders/{id}/message', [OrderController::class, 'customerProposalMessage']);
 
@@ -177,7 +182,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
 
     // ── Customer chooses their own materials instead of the AI ──────────────
     // NEW — read-only catalog (no stock/cost exposed to customers) + manual pick
-    Route::get('/materials-catalog',        [AIController::class, 'customerMaterialsCatalog']);
+    Route::get('/materials-catalog', [AIController::class, 'customerMaterialsCatalog']);
     Route::post('/orders/{id}/select-materials', [AIController::class, 'customerSelectMaterials']);
 
     // ── Get recommendation summary for an order (OrderDetail.jsx) ──────────────
@@ -187,9 +192,9 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     Route::get('/orders/{id}/ai-recommendation', [AIController::class, 'showForOrder']);
 
     // ── Billing: own orders only; no amounts on screen, amount-free PDFs (?format=pdf or ?format=html) ──
-    Route::get('/orders/{id}/billing',      [BillingController::class, 'customerOrderBilling']);
-    Route::get('/invoices/{id}/document',   [BillingController::class, 'customerInvoiceDocument']);
-    Route::get('/receipts/{id}/document',   [BillingController::class, 'customerReceiptDocument']);
+    Route::get('/orders/{id}/billing', [BillingController::class, 'customerOrderBilling']);
+    Route::get('/invoices/{id}/document', [BillingController::class, 'customerInvoiceDocument']);
+    Route::get('/receipts/{id}/document', [BillingController::class, 'customerReceiptDocument']);
 
     // ── Design archive/catalog (InspoGallery.jsx) ────────────────
     // GET /api/customer/designs — starter templates + this customer's
@@ -208,18 +213,18 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     //                  GET  /api/customer/messages/{id}    (thread for order)
     // OrderDetail.jsx: GET  /api/customer/messages/{id}    (same — order messages)
     //                  POST /api/customer/messages         (quick reply from detail page)
-    Route::get('/messages',     [MessageController::class, 'customerIndex']);
+    Route::get('/messages', [MessageController::class, 'customerIndex']);
     Route::get('/messages/unread-count', [MessageController::class, 'customerUnreadCount']);
-    Route::post('/messages',    [MessageController::class, 'customerStore']);
+    Route::post('/messages', [MessageController::class, 'customerStore']);
     Route::get('/messages/{id}', [MessageController::class, 'customerShow']);
 
     // ── Notifications ────────────────────────────────────────────
     // CustomerLayout.jsx: GET /api/customer/notifications/summary (bell badge)
     // CustomerDashboard.jsx: GET /api/customer/notifications + PATCH /{id}/read
     Route::get('/notifications/summary', [NotificationController::class, 'customerSummary']);
-    Route::get('/notifications',         [NotificationController::class, 'customerIndex']);
+    Route::get('/notifications', [NotificationController::class, 'customerIndex']);
     Route::patch('/notifications/{id}/read', [NotificationController::class, 'customerMarkRead']);
-    Route::post('/notifications/read-all',   [NotificationController::class, 'customerMarkAllRead']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'customerMarkAllRead']);
 
     // ── Delivery (read-only for customer) ────────────────────────
     // OrderDetail.jsx may show delivery status — customer can only view
@@ -229,21 +234,21 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // Profile.jsx: GET /api/customer/profile
     //              PUT /api/customer/profile
     //              PUT /api/customer/profile/password
-    Route::get('/profile',            [UserController::class, 'customerProfile']);
-    Route::put('/profile',            [UserController::class, 'customerUpdateProfile']);
-    Route::put('/profile/password',   [UserController::class, 'customerUpdatePassword']);
+    Route::get('/profile', [UserController::class, 'customerProfile']);
+    Route::put('/profile', [UserController::class, 'customerUpdateProfile']);
+    Route::put('/profile/password', [UserController::class, 'customerUpdatePassword']);
 
     // ── Shipping addresses / Billing profiles / Fabric preferences (Sept 16
     // 2026) — customer-owned account records, not yet wired into OrderWizard
     // or invoice generation (see each migration's comment for scope).
-    Route::get('/shipping-addresses',         [ShippingAddressController::class, 'index']);
-    Route::post('/shipping-addresses',        [ShippingAddressController::class, 'store']);
-    Route::put('/shipping-addresses/{id}',    [ShippingAddressController::class, 'update']);
+    Route::get('/shipping-addresses', [ShippingAddressController::class, 'index']);
+    Route::post('/shipping-addresses', [ShippingAddressController::class, 'store']);
+    Route::put('/shipping-addresses/{id}', [ShippingAddressController::class, 'update']);
     Route::delete('/shipping-addresses/{id}', [ShippingAddressController::class, 'destroy']);
 
-    Route::get('/billing-profiles',         [BillingProfileController::class, 'index']);
-    Route::post('/billing-profiles',        [BillingProfileController::class, 'store']);
-    Route::put('/billing-profiles/{id}',    [BillingProfileController::class, 'update']);
+    Route::get('/billing-profiles', [BillingProfileController::class, 'index']);
+    Route::post('/billing-profiles', [BillingProfileController::class, 'store']);
+    Route::put('/billing-profiles/{id}', [BillingProfileController::class, 'update']);
     Route::delete('/billing-profiles/{id}', [BillingProfileController::class, 'destroy']);
 
     // Model + table existed already (one row per user); controller/routes
@@ -254,31 +259,34 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // Picker catalog reuses the existing /materials-catalog endpoint
     // (AIController::customerMaterialsCatalog) — filter client-side to
     // category === 'Fabric'. No duplicate catalog route here.
-    Route::get('/fabric-preferences',         [CustomerFabricPreferenceController::class, 'index']);
-    Route::post('/fabric-preferences',        [CustomerFabricPreferenceController::class, 'store']);
+    Route::get('/fabric-preferences', [CustomerFabricPreferenceController::class, 'index']);
+    Route::post('/fabric-preferences', [CustomerFabricPreferenceController::class, 'store']);
     Route::delete('/fabric-preferences/{id}', [CustomerFabricPreferenceController::class, 'destroy']);
 
     // DesignStudio.jsx: Design draft persistence (Task T)
     //   GET    /api/customer/drafts/latest  → restore latest draft on mount
     //   POST   /api/customer/drafts         → auto-save (debounced 30s) + manual Save
     //   DELETE /api/customer/drafts/latest  → clear draft after Order This
-    Route::get('/drafts/latest',    [OrderDraftController::class, 'latest']);
-    Route::post('/drafts',          [OrderDraftController::class, 'store']);
+    Route::get('/drafts/latest', [OrderDraftController::class, 'latest']);
+    Route::post('/drafts', [OrderDraftController::class, 'store']);
     Route::delete('/drafts/latest', [OrderDraftController::class, 'destroy']);
+
+    // Studio + Order Wizard: accepted reference-file types and size (App\Support\UploadRules).
+    Route::get('/upload-rules', UploadRulesController::class);
 
     // ── Feedback (Aug 27 2026) — any customer can submit a note about the
     // system itself. Deliberately minimal — see migration comment.
-    Route::post('/feedback', [\App\Http\Controllers\Api\FeedbackController::class, 'store']);
+    Route::post('/feedback', [FeedbackController::class, 'store']);
 });
 
 // ══════════════════════════════════════════════════════════════
-// ADMIN PORTAL — STAFF + MANAGER (operational routes)
+// ADMIN PORTAL — MANAGER + OWNER + STATION (operational routes; StationScope limits staff)
 // ══════════════════════════════════════════════════════════════
 // Rate limiting (Aug 23 2026): 120/min — highest of the four tiers, since
 // AdminLayout.jsx polls notifications and dashboard widgets fairly
 // actively during a normal work shift. Still low enough to stop a
 // scripted scrape or a runaway retry loop.
-Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
+Route::middleware(['auth:sanctum', 'role:manager,owner,staff', 'owner.readonly', 'station', 'auth.throttle:staff,120'])->prefix('admin')->group(function () {
 
     // AI recommendation feedback (Oct 13 2026): staff accept/reject per recommended line.
     Route::patch('/material-recommendations/{recId}/feedback', [RecommendationGuidanceController::class, 'feedback'])->whereNumber('recId');
@@ -290,7 +298,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
 
     // ── Feedback (Aug 27 2026) — any staff/manager can also submit; only
     // managers can view the list (see role:manager group below).
-    Route::post('/feedback', [\App\Http\Controllers\Api\FeedbackController::class, 'store']);
+    Route::post('/feedback', [FeedbackController::class, 'store']);
 
     // ── Notifications ────────────────────────────────────────────
     // Dashboard.jsx:  GET  /api/admin/notifications?per_page=20
@@ -298,14 +306,14 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                 PATCH /api/admin/notifications/{id}/read
     // NOTE: read-all must come BEFORE /{id}/read to avoid Laravel treating
     //       "read-all" as an {id} parameter.
-    Route::get('/notifications',              [NotificationController::class, 'adminIndex']);
-    Route::post('/notifications/read-all',    [NotificationController::class, 'adminMarkAllRead']);
-    Route::patch('/notifications/{id}/read',  [NotificationController::class, 'adminMarkRead']);
+    Route::get('/notifications', [NotificationController::class, 'adminIndex']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'adminMarkAllRead']);
+    Route::patch('/notifications/{id}/read', [NotificationController::class, 'adminMarkRead']);
     Route::get('/notifications/unread-count', [NotificationController::class, 'adminUnreadCount']);
 
     // ── Auth ─────────────────────────────────────────────────────
     // The excluded role string must match the group's exactly, or RoleMiddleware answers every login with 401.
-    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly'])->middleware('throttle:10,1');
+    Route::post('/login', [AuthController::class, 'adminLogin'])->withoutMiddleware(['auth:sanctum', 'role:manager,owner,staff', 'owner.readonly', 'station'])->middleware('throttle:10,1');
 
     // ── Orders ───────────────────────────────────────────────────
     // Orders.jsx:           GET /api/admin/orders
@@ -323,14 +331,14 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::get('/orders/garment-types', [OrderController::class, 'garmentTypes']);
     // Orders.jsx column + Dashboard.jsx "Orders in production" card (also before {id}).
     Route::get('/orders/production-summaries', [OutputLogController::class, 'productionSummaries']);
-    Route::get('/orders',      [OrderController::class, 'adminIndex']);
+    Route::get('/orders', [OrderController::class, 'adminIndex']);
 
     // ── Client master data (read-only) — CustomersMaster.jsx: GET /api/admin/customers
     // Customers live in `users` (role 'customer'); staff + manager may view, nobody edits from here.
     Route::get('/customers', [UserController::class, 'adminCustomers']);
 
     // ── Walk-in customer contacts: the manager records them. No account is created.
-    Route::get('/customer-contacts',  [CustomerContactController::class, 'index']);
+    Route::get('/customer-contacts', [CustomerContactController::class, 'index']);
     Route::post('/customer-contacts', [CustomerContactController::class, 'store']);
     Route::get('/orders/{id}', [OrderController::class, 'adminShow']);
     // Invoice.jsx "Download PDF" button moved to the manager-only group
@@ -340,7 +348,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::patch('/orders/{id}', [OrderController::class, 'adminUpdate']);
 
     // Client-supplied materials per order (receive / wastage / return; Cutting issues automatically).
-    Route::get('/orders/{id}/client-materials',  [ClientMaterialController::class, 'show']);
+    Route::get('/orders/{id}/client-materials', [ClientMaterialController::class, 'show']);
     Route::post('/orders/{id}/client-materials', [ClientMaterialController::class, 'store'])->middleware('jobfn:inventory');
 
     // ── Production Stage Advance ──────────────────────────────────
@@ -355,15 +363,15 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // the Aug 28 2026 consolidation, delegated 100% of its logic to
     // ProductionStageService::logOutput() with no unique code of its own —
     // confirmed zero functional loss, removed as dead code (Aug 28 2026).
-    Route::get('/orders/{id}/production',    [ProductionController::class, 'stages']);
+    Route::get('/orders/{id}/production', [ProductionController::class, 'stages']);
     Route::get('/orders/{id}/production-summary', [OutputLogController::class, 'productionSummary']);
-    Route::post('/orders/{id}/defects',           [OutputLogController::class, 'reportDefect'])->middleware('jobfn:production');
+    Route::post('/orders/{id}/defects', [OutputLogController::class, 'reportDefect'])->middleware('jobfn:production');
 
     // ── QC Checklist ─────────────────────────────────────────────
     // DailyOutputLog.jsx (inline at the QC stage): GET/POST /api/admin/orders/{orderId}/qc
     // QCChecklist.jsx (read-only history):          GET /api/admin/qc-checklists
-    Route::get('/orders/{orderId}/qc',  [QCChecklistController::class, 'show'])->middleware('jobfn:production');
-    Route::get('/qc-checklists',        [QCChecklistController::class, 'index'])->middleware('jobfn:production');
+    Route::get('/orders/{orderId}/qc', [QCChecklistController::class, 'show'])->middleware('jobfn:production');
+    Route::get('/qc-checklists', [QCChecklistController::class, 'index'])->middleware('jobfn:production');
     Route::post('/orders/{orderId}/qc', [QCChecklistController::class, 'store'])->middleware('jobfn:production');
 
     // ── Daily Output Logs ─────────────────────────────────────────
@@ -373,9 +381,9 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // summary/{orderId} must come BEFORE /{id} to avoid param collision
     // POST must also come before /{id} for Laravel route resolution
     Route::get('/output-logs/summary/{orderId}', [OutputLogController::class, 'summaryByOrder'])->middleware('jobfn:production');
-    Route::post('/output-logs',                  [OutputLogController::class, 'store'])->middleware('jobfn:production');
-    Route::get('/output-logs',                   [OutputLogController::class, 'index'])->middleware('jobfn:production');
-    Route::get('/output-logs/{id}',              [OutputLogController::class, 'show'])->middleware('jobfn:production');
+    Route::post('/output-logs', [OutputLogController::class, 'store'])->middleware('jobfn:production');
+    Route::get('/output-logs', [OutputLogController::class, 'index'])->middleware('jobfn:production');
+    Route::get('/output-logs/{id}', [OutputLogController::class, 'show'])->middleware('jobfn:production');
 
     // ── Inventory ─────────────────────────────────────────────────
     // Inventory.jsx: GET /api/admin/inventory
@@ -384,11 +392,11 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                POST /api/admin/inventory/stock-out (type = stock_out)
     // Frontend uses: axios.post(`/api/admin/inventory/stock-${type}`)
     // where type is 'in' or 'out' — routes must match exactly
-    Route::get('/inventory',      [InventoryController::class, 'index']);
+    Route::get('/inventory', [InventoryController::class, 'index']);
     Route::get('/inventory/logs', [InventoryController::class, 'allLogs']); // FIX: was 'logs' → 500
     Route::get('/inventory/client-stock', [InventoryController::class, 'clientStock']); // client-supplied material per open order
     Route::get('/inventory/export', [InventoryController::class, 'export']); // ?format=csv|pdf, stock only (no costs)
-    Route::post('/inventory/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
+    Route::post('/inventory/stock-in', [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
     Route::post('/inventory/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
 
     // ── Materials ─────────────────────────────────────────────────
@@ -396,15 +404,15 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // PhysicalCount.jsx:GET  /api/admin/materials  (for dropdown)
     // PurchaseOrders.jsx:GET /api/admin/materials  (for RFQ dropdown)
     // Inventory.jsx:    PUT  /api/admin/materials/{id}
-    Route::get('/materials',       [InventoryController::class, 'index'])->middleware('jobfn:inventory');
-    Route::post('/materials',      [InventoryController::class, 'store'])->middleware('jobfn:inventory');
-    Route::put('/materials/{id}',  [InventoryController::class, 'update'])->middleware('jobfn:inventory');
+    Route::get('/materials', [InventoryController::class, 'index'])->middleware('jobfn:inventory');
+    Route::post('/materials', [InventoryController::class, 'store'])->middleware('jobfn:inventory');
+    Route::put('/materials/{id}', [InventoryController::class, 'update'])->middleware('jobfn:inventory');
     Route::delete('/materials/{id}', [InventoryController::class, 'destroy'])->middleware('jobfn:inventory');
-    Route::get('/materials/{id}',  [InventoryController::class, 'show'])->middleware('jobfn:inventory');
-    Route::post('/materials/{id}/stock-in',  [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
+    Route::get('/materials/{id}', [InventoryController::class, 'show'])->middleware('jobfn:inventory');
+    Route::post('/materials/{id}/stock-in', [InventoryController::class, 'stockIn'])->middleware('jobfn:inventory');
     Route::post('/materials/{id}/stock-out', [InventoryController::class, 'stockOut'])->middleware('jobfn:inventory');
-    Route::post('/materials/{id}/adjust',    [InventoryController::class, 'adjust'])->middleware('jobfn:inventory');
-    Route::get('/materials/{id}/logs',       [InventoryController::class, 'logs'])->middleware('jobfn:inventory');
+    Route::post('/materials/{id}/adjust', [InventoryController::class, 'adjust'])->middleware('jobfn:inventory');
+    Route::get('/materials/{id}/logs', [InventoryController::class, 'logs'])->middleware('jobfn:inventory');
 
     // Material usage-rate routes removed (Aug 29 2026, this pass) — the
     // three controller methods they pointed to (InventoryController::
@@ -423,38 +431,38 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                    PATCH /api/admin/physical-counts/{id}/reconcile (manager only — but staff triggers, manager approves)
     // summary and sheet must come BEFORE /{id} to avoid collision
     Route::get('/physical-counts/summary', [PhysicalCountController::class, 'summary'])->middleware('jobfn:inventory');
-    Route::get('/physical-counts/sheet',   [PhysicalCountController::class, 'sheet'])->middleware('jobfn:inventory');
-    Route::get('/physical-counts',         [PhysicalCountController::class, 'index'])->middleware('jobfn:inventory');
-    Route::post('/physical-counts',        [PhysicalCountController::class, 'store'])->middleware('jobfn:inventory');
+    Route::get('/physical-counts/sheet', [PhysicalCountController::class, 'sheet'])->middleware('jobfn:inventory');
+    Route::get('/physical-counts', [PhysicalCountController::class, 'index'])->middleware('jobfn:inventory');
+    Route::post('/physical-counts', [PhysicalCountController::class, 'store'])->middleware('jobfn:inventory');
 
     // ── Messages (order-based thread) ────────────────────────────
     // Messages.jsx:    GET  /api/admin/messages        (all threads)
     //                  GET  /api/admin/messages/{id}   (thread for order)
     //                  POST /api/admin/messages        (send)
-    Route::get('/messages',      [MessageController::class, 'adminIndex']);
+    Route::get('/messages', [MessageController::class, 'adminIndex']);
     Route::get('/messages/unread-count', [MessageController::class, 'adminUnreadCount']);
     Route::get('/messages/{id}', [MessageController::class, 'adminShow']);
-    Route::post('/messages',     [MessageController::class, 'adminStore']);
+    Route::post('/messages', [MessageController::class, 'adminStore']);
 
     // ── Delivery ──────────────────────────────────────────────────
     // DeliveryTracking.jsx: GET   /api/admin/delivery
     //                       PATCH /api/admin/delivery/{id}/status
     //                       PATCH /api/admin/delivery/{id}/delivered (quick-mark)
-    Route::get('/delivery',                       [DeliveryController::class, 'index']);
-    Route::get('/delivery/{id}',                  [DeliveryController::class, 'show']);
-    Route::post('/delivery',                      [DeliveryController::class, 'store']);
-    Route::patch('/delivery/{id}/status',         [DeliveryController::class, 'updateStatus']);
-    Route::patch('/delivery/{id}/delivered',      [DeliveryController::class, 'markDelivered']);
+    Route::get('/delivery', [DeliveryController::class, 'index']);
+    Route::get('/delivery/{id}', [DeliveryController::class, 'show']);
+    Route::post('/delivery', [DeliveryController::class, 'store']);
+    Route::patch('/delivery/{id}/status', [DeliveryController::class, 'updateStatus']);
+    Route::patch('/delivery/{id}/delivered', [DeliveryController::class, 'markDelivered']);
 
     // ── Purchase Orders ───────────────────────────────────────────
     // PurchaseOrders.jsx: GET   /api/admin/purchase-orders
     //                     POST  /api/admin/purchase-orders  (create PO)
     //                     PATCH /api/admin/purchase-orders/{id}/receive
     //                     PATCH /api/admin/purchase-orders/{id}/confirm-color
-    Route::get('/purchase-orders',                           [PurchaseOrderController::class, 'index']);
-    Route::post('/purchase-orders',                          [PurchaseOrderController::class, 'store']);
-    Route::get('/purchase-orders/{id}',                      [PurchaseOrderController::class, 'show']);
-    Route::patch('/purchase-orders/{id}/receive',            [PurchaseOrderController::class, 'receive'])->middleware('jobfn:inventory'); // credits stock, same guard as stock-in
+    Route::get('/purchase-orders', [PurchaseOrderController::class, 'index']);
+    Route::post('/purchase-orders', [PurchaseOrderController::class, 'store']);
+    Route::get('/purchase-orders/{id}', [PurchaseOrderController::class, 'show']);
+    Route::patch('/purchase-orders/{id}/receive', [PurchaseOrderController::class, 'receive'])->middleware('jobfn:inventory'); // credits stock, same guard as stock-in
 
     // ── RFQ ───────────────────────────────────────────────────────
     // PurchaseOrders.jsx: GET  /api/admin/rfq
@@ -462,10 +470,10 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                     POST /api/admin/rfq/{id}/respond    (staff logs supplier reply)
     //                     PATCH /api/admin/rfq/{id}/close
     //                     PATCH /api/admin/rfq/{id}/convert-po (manager converts to PO)
-    Route::get('/rfq',                          [PurchaseOrderController::class, 'rfqIndex']);
-    Route::post('/rfq',                         [PurchaseOrderController::class, 'rfqStore']);
-    Route::post('/rfq/{id}/respond',            [PurchaseOrderController::class, 'rfqRespond']);
-    Route::patch('/rfq/{id}/close',             [PurchaseOrderController::class, 'rfqClose']);
+    Route::get('/rfq', [PurchaseOrderController::class, 'rfqIndex']);
+    Route::post('/rfq', [PurchaseOrderController::class, 'rfqStore']);
+    Route::post('/rfq/{id}/respond', [PurchaseOrderController::class, 'rfqRespond']);
+    Route::patch('/rfq/{id}/close', [PurchaseOrderController::class, 'rfqClose']);
 
     // ── Suppliers — READ ONLY here (staff+manager) ────────────────
     // FIX (Aug 28 2026 — role gap): Suppliers.jsx is manager-exclusive
@@ -483,20 +491,20 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // broken the real, locked RFQ workflow — moving only the writes
     // closes the actual gap without breaking anything.
     // POST/PUT moved to the manager-only group below.
-    Route::get('/suppliers',        [PurchaseOrderController::class, 'suppliersIndex']);
+    Route::get('/suppliers', [PurchaseOrderController::class, 'suppliersIndex']);
 
     // ── Sales Transactions ────────────────────────────────────────
     // SalesTransactions.jsx: GET  /api/admin/transactions
     //                        POST /api/admin/transactions
-    Route::get('/transactions',  [SalesTransactionController::class, 'index']);
+    Route::get('/transactions', [SalesTransactionController::class, 'index']);
     Route::post('/transactions', [SalesTransactionController::class, 'store']);
     Route::get('/transactions/{id}', [SalesTransactionController::class, 'show']);
     Route::get('/transactions/{id}/receipt-pdf', [SalesTransactionController::class, 'downloadReceiptPdf']);
 
     // ── Billing documents (Oct 14 2026): read-only for staff; issue/mark-paid/void are manager-only below ──
-    Route::get('/orders/{id}/billing',      [BillingController::class, 'adminOrderBilling']);
-    Route::get('/invoices/{id}/document',   [BillingController::class, 'adminInvoiceDocument']);
-    Route::get('/receipts/{id}/document',   [BillingController::class, 'adminReceiptDocument']);
+    Route::get('/orders/{id}/billing', [BillingController::class, 'adminOrderBilling']);
+    Route::get('/invoices/{id}/document', [BillingController::class, 'adminInvoiceDocument']);
+    Route::get('/receipts/{id}/document', [BillingController::class, 'adminReceiptDocument']);
 
     // ── Reports (TASK P) moved to the manager-only group below (Sept 15
     // 2026, QA account) — Reports is manager-exclusive per the locked
@@ -529,31 +537,31 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // Reports.jsx:  GET /api/admin/reports
     //               GET /api/admin/reports/sales
     // Invoice.jsx:  GET /api/admin/orders/{id}/invoice-pdf ("Download PDF")
-    Route::get('/reports',                 [AdminReportController::class, 'index']);
-    Route::get('/reports/sales',           [AdminReportController::class, 'salesSummary']);
+    Route::get('/reports', [AdminReportController::class, 'index']);
+    Route::get('/reports/sales', [AdminReportController::class, 'salesSummary']);
     Route::get('/orders/{id}/invoice-pdf', [OrderController::class, 'downloadInvoicePdf']);
-    Route::get('/orders/{id}/spec-sheet',  [OrderController::class, 'adminSpecSheet']);
+    Route::get('/orders/{id}/spec-sheet', [OrderController::class, 'adminSpecSheet']);
 
     // ── Order proposal + down payment (Oct 17 2026): manager sets date, total and down payment ──
     Route::get('/orders/{id}/suggested-date', [OrderController::class, 'suggestedDate']);
-    Route::post('/orders/{id}/propose',       [OrderController::class, 'propose']);
-    Route::post('/orders/{id}/down-payment',  [OrderController::class, 'recordDownPayment']);
+    Route::post('/orders/{id}/propose', [OrderController::class, 'propose']);
+    Route::post('/orders/{id}/down-payment', [OrderController::class, 'recordDownPayment']);
 
     // ── Billing actions (Oct 14 2026): amounts come only from orders.agreed_total and recorded payments ──
-    Route::post('/orders/{id}/invoice',       [BillingController::class, 'issue']);
-    Route::patch('/invoices/{id}/mark-paid',  [BillingController::class, 'markPaid']);
-    Route::patch('/invoices/{id}/void',       [BillingController::class, 'void']);
+    Route::post('/orders/{id}/invoice', [BillingController::class, 'issue']);
+    Route::patch('/invoices/{id}/mark-paid', [BillingController::class, 'markPaid']);
+    Route::patch('/invoices/{id}/void', [BillingController::class, 'void']);
 
     // ── Design showcase moderation (Sept 18 2026) ──────────────────
     // ── AI recommendation guidance (Oct 13 2026): manager-written prompt grounding ──
-    Route::get('/recommendation-guidance',      [RecommendationGuidanceController::class, 'index']);
-    Route::post('/recommendation-guidance',     [RecommendationGuidanceController::class, 'store']);
+    Route::get('/recommendation-guidance', [RecommendationGuidanceController::class, 'index']);
+    Route::post('/recommendation-guidance', [RecommendationGuidanceController::class, 'store']);
     Route::put('/recommendation-guidance/{id}', [RecommendationGuidanceController::class, 'update'])->whereNumber('id');
 
-    Route::get('/designs/showcase-queue',        [DesignController::class, 'adminShowcaseQueue']);
+    Route::get('/designs/showcase-queue', [DesignController::class, 'adminShowcaseQueue']);
     Route::post('/designs/{id}/showcase-approve', [DesignController::class, 'adminShowcaseApprove']);
-    Route::post('/designs/{id}/showcase-reject',  [DesignController::class, 'adminShowcaseReject']);
-    Route::post('/designs/{id}/showcase-remove',  [DesignController::class, 'adminShowcaseRemove']);
+    Route::post('/designs/{id}/showcase-reject', [DesignController::class, 'adminShowcaseReject']);
+    Route::post('/designs/{id}/showcase-remove', [DesignController::class, 'adminShowcaseRemove']);
 
     // ── Suppliers — WRITE routes (Aug 28 2026 role-gap fix) ───────
     // Moved from the staff+manager group above: Suppliers.jsx is already
@@ -562,19 +570,19 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // create/edit supplier master data. GET stays in the staff+manager
     // group above (PurchaseOrders.jsx's staff-facing RFQ flow needs read
     // access to the supplier list — see comment there).
-    Route::post('/suppliers',       [PurchaseOrderController::class, 'suppliersStore']);
-    Route::put('/suppliers/{id}',   [PurchaseOrderController::class, 'suppliersUpdate']);
+    Route::post('/suppliers', [PurchaseOrderController::class, 'suppliersStore']);
+    Route::put('/suppliers/{id}', [PurchaseOrderController::class, 'suppliersUpdate']);
 
     // ── Feedback triage (Aug 27 2026) — manager-only, like Reports/Users.
-    Route::get('/feedback',        [\App\Http\Controllers\Api\FeedbackController::class, 'index']);
-    Route::patch('/feedback/{id}', [\App\Http\Controllers\Api\FeedbackController::class, 'update']);
+    Route::get('/feedback', [FeedbackController::class, 'index']);
+    Route::patch('/feedback/{id}', [FeedbackController::class, 'update']);
 
     // ── Activity Log (Aug 22 2026) — manager-only, like Reports/Invoice
     // above (Sept 15 2026 fix). Reads across every staff/manager action
     // table, so it stays fully gated. ──
     // ActivityLog.jsx: GET /api/admin/activity-log
     //                  GET /api/admin/activity-log/action-types
-    Route::get('/activity-log',              [ActivityLogController::class, 'index']);
+    Route::get('/activity-log', [ActivityLogController::class, 'index']);
     Route::get('/activity-log/action-types', [ActivityLogController::class, 'actionTypes']);
 
     // ── Audit Log (Oct 16 2026) — insert-only audit_logs: logins, logouts,
@@ -583,7 +591,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
 
     // ── Stage advance (manager override — bypasses qty check, still gates QC) ─
     // ProductionTracking.jsx advance button
-    Route::post('/orders/{id}/advance',  [ProductionController::class, 'advance']);
+    Route::post('/orders/{id}/advance', [ProductionController::class, 'advance']);
     Route::patch('/orders/{id}/confirm', [ProductionController::class, 'confirm']); // pending → confirmed
     // materialCheck() route removed Aug 29 2026 — the controller method itself
     // was already deleted as part of the no-formula redesign (see confirm()'s
@@ -610,11 +618,11 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //                     POST   /api/admin/users/create  (alias — Register.jsx uses this)
     //                     PATCH  /api/admin/users/{id}/toggle  (activate/deactivate)
     // create must come BEFORE /{id} to avoid collision
-    Route::get('/users',                     [UserController::class, 'adminIndex']);
-    Route::post('/users/create',             [UserController::class, 'adminCreate']);
-    Route::post('/users',                    [UserController::class, 'adminCreate']);
-    Route::put('/users/{id}',                [UserController::class, 'adminUpdate']);
-    Route::patch('/users/{id}/toggle',       [UserController::class, 'adminToggle']);
+    Route::get('/users', [UserController::class, 'adminIndex']);
+    Route::post('/users/create', [UserController::class, 'adminCreate']);
+    Route::post('/users', [UserController::class, 'adminCreate']);
+    Route::put('/users/{id}', [UserController::class, 'adminUpdate']);
+    Route::patch('/users/{id}/toggle', [UserController::class, 'adminToggle']);
 
     // ── Automation — manual "Run Now" trigger (manager only) ──────
     // Same command the scheduler calls (routes/console.php) — manual and
@@ -640,7 +648,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     // ── System Settings — company info edit (manager only; staff has view-only above) ──
     // Settings.jsx: PATCH /api/admin/settings/company
     //               POST  /api/admin/settings/company/logo
-    Route::patch('/settings/company',      [SettingsController::class, 'companyUpdate']);
-    Route::post('/settings/company/logo',  [SettingsController::class, 'companyLogoUpload'])->middleware('auth.throttle:logo-upload,10');
+    Route::patch('/settings/company', [SettingsController::class, 'companyUpdate']);
+    Route::post('/settings/company/logo', [SettingsController::class, 'companyLogoUpload'])->middleware('auth.throttle:logo-upload,10');
 
 });

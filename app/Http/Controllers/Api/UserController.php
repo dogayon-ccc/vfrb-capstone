@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/UserController.php
 // VFRB Enterprise — User Management
 //
@@ -28,7 +29,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Middleware\RoleMiddleware;
 use App\Models\AuditLog;
+use App\Rules\PhMobile;
+use App\Services\ProductionStageService;
 use App\Support\Sql;
+use App\Support\UploadDisk;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -38,32 +42,35 @@ use Illuminate\Validation\Rules\Password as PasswordRule;
 
 class UserController extends Controller
 {
+    private const CLIENT_TYPES = ['individual', 'corporate', 'school', 'medical', 'government', 'organization'];
+
     // ── GET /api/admin/users ──────────────────────────────────────────────────
     // UserManagement.jsx: staff, manager and owner user list (excludes customers)
     public function adminIndex(Request $request)
     {
         $perPage = (int) $request->input('per_page', 20);
-        $search  = $request->input('search', '');
+        $search = $request->input('search', '');
 
         // Staff, manager and owner accounts with their role in one join (was a role query per user).
         $query = DB::table('users')
             ->join('model_has_roles as mr', 'mr.model_id', '=', 'users.user_id')
             ->join('roles as r', 'r.id', '=', 'mr.role_id')
             ->whereIn('r.name', ['staff', 'manager', 'owner'])
-            ->select('users.user_id', 'users.name', 'users.email', 'users.contact_number', 'users.job_function',
-                     'users.organization_name', 'users.email_verified_at', 'users.created_at', 'users.updated_at', 'r.name as role');
+            ->select('users.user_id', 'users.name', 'users.email', 'users.contact_number', 'users.job_function', 'users.assigned_stage',
+                'users.organization_name', 'users.email_verified_at', 'users.created_at', 'users.updated_at', 'r.name as role');
 
         if ($search) {
             $query->where(function ($q) use ($search) {
                 $q->where('users.name', Sql::like(), "%{$search}%")
-                  ->orWhere('users.email', Sql::like(), "%{$search}%");
+                    ->orWhere('users.email', Sql::like(), "%{$search}%");
             });
         }
 
         $users = $query->orderBy('users.name')->paginate($perPage);
 
         $users->getCollection()->transform(function ($user) {
-            $user->is_active = !is_null($user->email_verified_at);
+            $user->is_active = ! is_null($user->email_verified_at);
+
             return $user;
         });
 
@@ -78,8 +85,8 @@ class UserController extends Controller
     public function adminCustomers(Request $request)
     {
         $perPage = min(max((int) $request->input('per_page', 25), 1), 100);
-        $search  = trim((string) $request->input('search', ''));
-        $type    = $request->input('client_type');
+        $search = trim((string) $request->input('search', ''));
+        $type = $request->input('client_type');
 
         $customerIds = DB::table('model_has_roles')
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
@@ -107,16 +114,16 @@ class UserController extends Controller
                 'oa.last_order_at'
             );
 
-        if ($type && in_array($type, ['individual', 'corporate', 'school', 'medical'], true)) {
+        if ($type && in_array($type, self::CLIENT_TYPES, true)) {
             $query->where('users.client_type', $type);
         }
         if ($search !== '') {
-            $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $search) . '%';
+            $like = '%'.str_replace(['%', '_'], ['\\%', '\\_'], $search).'%';
             $query->where(function ($q) use ($like) {
                 $q->where('users.name', Sql::like(), $like)
-                  ->orWhere('users.email', Sql::like(), $like)
-                  ->orWhere('users.organization_name', Sql::like(), $like)
-                  ->orWhere('users.contact_number', Sql::like(), $like);
+                    ->orWhere('users.email', Sql::like(), $like)
+                    ->orWhere('users.organization_name', Sql::like(), $like)
+                    ->orWhere('users.contact_number', Sql::like(), $like);
             });
         }
 
@@ -128,14 +135,11 @@ class UserController extends Controller
 
         $page = $query->orderBy('users.name')->paginate($perPage);
 
+        $byType = array_map(fn ($t) => (int) ($summary[$t] ?? 0), array_combine(self::CLIENT_TYPES, self::CLIENT_TYPES));
+        $total = (int) $summary->sum();
+
         return response()->json(array_merge($page->toArray(), [
-            'summary' => [
-                'total'      => (int) $summary->sum(),
-                'individual' => (int) ($summary['individual'] ?? 0),
-                'corporate'  => (int) ($summary['corporate'] ?? 0),
-                'school'     => (int) ($summary['school'] ?? 0),
-                'medical'    => (int) ($summary['medical'] ?? 0),
-            ],
+            'summary' => ['total' => $total] + $byType + ['untyped' => $total - array_sum($byType)],
         ]));
     }
 
@@ -149,38 +153,40 @@ class UserController extends Controller
             $request->merge(['username' => strtolower(trim((string) $request->input('username'))) ?: null]);
         }
         $request->validate([
-            'name'                  => 'required|string|max:100',
-            'email'                 => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
-            'password'              => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
-            'role'                  => 'required|in:customer,manager,owner|exists:roles,name',
-            'contact_number'        => 'nullable|string|max:20',
-            'organization_name'     => ($isCustomer ? 'required' : 'nullable') . '|string|max:100',
-            'username'              => ['nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
-            'client_type'           => ($isCustomer ? 'required' : 'nullable') . '|in:corporate,school,government,medical,organization',
+            'name' => 'required|string|max:100',
+            'email' => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
+            'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
+            'role' => 'required|in:customer,staff,manager,owner|exists:roles,name',
+            'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
+            'contact_number' => 'nullable|string|max:20',
+            'organization_name' => ($isCustomer ? 'required' : 'nullable').'|string|max:100',
+            'username' => ['nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
+            'client_type' => ($isCustomer ? 'required' : 'nullable').'|in:corporate,school,government,medical,organization',
         ], [
-            'email.unique'    => 'An account with this email already exists.',
-            'email.email'     => 'Please enter a real, valid email address.',
+            'email.unique' => 'An account with this email already exists.',
+            'email.email' => 'Please enter a real, valid email address.',
             'username.unique' => 'That username is taken.',
-            'username.regex'  => 'Use 3-30 letters, numbers, dots or underscores.',
+            'username.regex' => 'Use 3-30 letters, numbers, dots or underscores.',
         ]);
 
-        if (!$this->canManageRole($request, $request->input('role'))) {
+        if (! $this->canManageRole($request, $request->input('role'))) {
             return response()->json(['message' => 'Only an Administrator (Manager) can create Administrator or Owner accounts.'], 403);
         }
 
         $userId = DB::table('users')->insertGetId([
-            'name'              => $request->input('name'),
-            'email'             => $request->input('email'),
-            'password'          => Hash::make($request->input('password')),
-            'contact_number'    => $request->input('contact_number'),
+            'name' => $request->input('name'),
+            'email' => $request->input('email'),
+            'password' => Hash::make($request->input('password')),
+            'contact_number' => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
-            'username'          => $isCustomer ? $request->input('username') : null,
-            'client_type'       => $isCustomer ? $request->input('client_type') : null,
-            'job_function'      => 'general',
+            'username' => $isCustomer ? $request->input('username') : null,
+            'client_type' => $isCustomer ? $request->input('client_type') : null,
+            'job_function' => 'general',
+            'assigned_stage' => $request->input('role') === 'staff' ? $request->input('assigned_stage') : null,
             // Accounts created by an Administrator or the Owner are granted access immediately.
             'email_verified_at' => now(),
-            'created_at'        => now(),
-            'updated_at'        => now(),
+            'created_at' => now(),
+            'updated_at' => now(),
         ], 'user_id');
 
         // Assign role via Spatie model_has_roles
@@ -190,16 +196,16 @@ class UserController extends Controller
 
         if ($roleId) {
             DB::table('model_has_roles')->insert([
-                'role_id'    => $roleId,
+                'role_id' => $roleId,
                 'model_type' => 'App\\Models\\User',
-                'model_id'   => $userId,
+                'model_id' => $userId,
             ]);
         }
 
         RoleMiddleware::forgetRole($userId);
         AuditLog::record('user_created', 'users', $userId);
 
-        $user       = DB::table('users')->where('user_id', $userId)->first();
+        $user = DB::table('users')->where('user_id', $userId)->first();
         $user->role = $request->input('role');
         unset($user->password, $user->remember_token);
 
@@ -223,29 +229,31 @@ class UserController extends Controller
     public function adminUpdate(Request $request, int $id)
     {
         $user = DB::table('users')->where('user_id', $id)->first();
-        if (!$user) {
+        if (! $user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
         // A customer account is never promoted into staff, manager or owner from here.
-        if (!$this->isAdminAccount($id)) {
+        if (! $this->isAdminAccount($id)) {
             return response()->json(['message' => 'Only Administrator and Owner accounts can be edited here.'], 422);
         }
 
         $oldRole = $this->roleName($id);
-        if (!$this->canManageRole($request, $oldRole)) {
+        if (! $this->canManageRole($request, $oldRole)) {
             return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
         }
         $request->validate([
-            'role' => 'required|in:manager,owner|exists:roles,name',
+            'role' => 'required|in:staff,manager,owner|exists:roles,name',
+            'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
         ]);
 
         $newRole = $request->input('role');
-        if (!$this->canManageRole($request, $newRole)) {
+        if (! $this->canManageRole($request, $newRole)) {
             return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
         }
         DB::table('users')->where('user_id', $id)->update([
             'job_function' => 'general',
-            'updated_at'   => now(),
+            'assigned_stage' => $newRole === 'staff' ? $request->input('assigned_stage') : null,
+            'updated_at' => now(),
         ]);
 
         $roleId = DB::table('roles')->where('name', $newRole)->value('id');
@@ -258,7 +266,7 @@ class UserController extends Controller
             }
         }
 
-        $updated       = DB::table('users')->where('user_id', $id)->first();
+        $updated = DB::table('users')->where('user_id', $id)->first();
         $updated->role = $newRole;
 
         return response()->json($updated);
@@ -271,7 +279,7 @@ class UserController extends Controller
     public function adminToggle(Request $request, int $id)
     {
         $user = DB::table('users')->where('user_id', $id)->first();
-        if (!$user) {
+        if (! $user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
 
@@ -280,10 +288,10 @@ class UserController extends Controller
             return response()->json(['message' => 'You cannot deactivate your own account.'], 422);
         }
 
-        if (!$this->isAdminAccount($id)) {
+        if (! $this->isAdminAccount($id)) {
             return response()->json(['message' => 'Only Administrator and Owner accounts can be activated or deactivated.'], 422);
         }
-        if (!$this->canManageRole($request, $this->roleName($id))) {
+        if (! $this->canManageRole($request, $this->roleName($id))) {
             return response()->json(['message' => 'Only an Administrator (Manager) can activate or deactivate Administrator or Owner accounts.'], 403);
         }
 
@@ -294,11 +302,11 @@ class UserController extends Controller
             ->where('user_id', $id)
             ->update([
                 'email_verified_at' => $newVerified,
-                'updated_at'        => now(),
+                'updated_at' => now(),
             ]);
         AuditLog::record($newVerified ? 'user_activated' : 'user_deactivated', 'users', $id);
 
-        if (!$newVerified) {
+        if (! $newVerified) {
             DB::table('personal_access_tokens')
                 ->where('tokenable_type', 'App\\Models\\User')
                 ->where('tokenable_id', $id)
@@ -306,8 +314,8 @@ class UserController extends Controller
         }
 
         return response()->json([
-            'message'   => $newVerified ? 'User activated.' : 'User deactivated.',
-            'is_active' => !is_null($newVerified),
+            'message' => $newVerified ? 'User activated.' : 'User deactivated.',
+            'is_active' => ! is_null($newVerified),
         ]);
     }
 
@@ -316,14 +324,14 @@ class UserController extends Controller
     public function customerProfile()
     {
         $userId = Auth::id();
-        $user   = DB::table('users')
+        $user = DB::table('users')
             ->where('user_id', $userId)
             ->select('user_id', 'name', 'email', 'contact_number',
-                     'organization_name', 'address', 'client_type',
-                     'avatar', 'email_verified_at', 'created_at')
+                'organization_name', 'address', 'client_type',
+                'avatar', 'email_verified_at', 'created_at')
             ->first();
 
-        if (!$user) {
+        if (! $user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
 
@@ -331,7 +339,7 @@ class UserController extends Controller
             ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('model_has_roles.model_id', $userId)
             ->value('roles.name') ?? 'client';
-        $user->avatar = \App\Support\UploadDisk::url($user->avatar); // stored path → URL, same as /api/user
+        $user->avatar = UploadDisk::url($user->avatar); // stored path → URL, same as /api/user
 
         return response()->json(['user' => $user]);
     }
@@ -340,24 +348,24 @@ class UserController extends Controller
     // Profile.jsx saveProfile(): { name, contact_number, address, organization_name, client_type }
     public function customerUpdateProfile(Request $request)
     {
-        $request->merge(['contact_number' => \App\Rules\PhMobile::normalize($request->input('contact_number'))]);
+        $request->merge(['contact_number' => PhMobile::normalize($request->input('contact_number'))]);
         $request->validate([
-            'name'              => 'required|string|max:100',
-            'contact_number'    => ['nullable', 'string', 'max:20', new \App\Rules\PhMobile],
-            'address'           => 'nullable|string|max:255',
+            'name' => 'required|string|max:100',
+            'contact_number' => ['nullable', 'string', 'max:20', new PhMobile],
+            'address' => 'nullable|string|max:255',
             'organization_name' => 'nullable|string|max:100',
-            'client_type'       => 'nullable|in:individual,corporate,school,medical,government,organization',
+            'client_type' => 'nullable|in:individual,corporate,school,medical,government,organization',
         ]);
 
         DB::table('users')
             ->where('user_id', Auth::id())
             ->update([
-                'name'              => $request->input('name'),
-                'contact_number'    => $request->input('contact_number'),
-                'address'           => $request->input('address'),
+                'name' => $request->input('name'),
+                'contact_number' => $request->input('contact_number'),
+                'address' => $request->input('address'),
                 'organization_name' => $request->input('organization_name'),
-                'client_type'       => $request->input('client_type'),
-                'updated_at'        => now(),
+                'client_type' => $request->input('client_type'),
+                'updated_at' => now(),
             ]);
 
         return response()->json(['message' => 'Profile updated successfully.']);
@@ -382,19 +390,19 @@ class UserController extends Controller
     {
         $request->validate([
             'current_password' => 'required|string',
-            'password'         => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
+            'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
         ]);
 
         $user = DB::table('users')->where('user_id', Auth::id())->first();
 
-        if (!Hash::check($request->input('current_password'), $user->password)) {
+        if (! Hash::check($request->input('current_password'), $user->password)) {
             return response()->json(['message' => 'Current password is incorrect.'], 422);
         }
 
         DB::table('users')
             ->where('user_id', Auth::id())
             ->update([
-                'password'   => Hash::make($request->input('password')),
+                'password' => Hash::make($request->input('password')),
                 'updated_at' => now(),
             ]);
 

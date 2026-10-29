@@ -1,4 +1,5 @@
 <?php
+
 // app/Models/User.php
 // FIXES v10:
 //   supplier_id removed from $fillable — column dropped in DB v4
@@ -6,6 +7,10 @@
 
 namespace App\Models;
 
+use App\Http\Middleware\RoleMiddleware;
+use App\Notifications\CustomResetPasswordNotification;
+use App\Notifications\CustomVerifyEmailNotification;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
@@ -29,6 +34,7 @@ class User extends Authenticatable
         'address',
         'client_type',
         'job_function',
+        'assigned_stage',
         'email_verified_at',
     ];
 
@@ -37,14 +43,14 @@ class User extends Authenticatable
     // restricted functions. Manager role bypasses this entirely.
     public const JOB_FUNCTION_AREAS = [
         'production' => ['production', 'general'],
-        'inventory'  => ['inventory', 'general'],
-        'sales'      => ['sales', 'general'],
+        'inventory' => ['inventory', 'general'],
+        'sales' => ['sales', 'general'],
     ];
 
     // Raw query: Spatie hasRole() returns false for Sanctum-authenticated users (guard mismatch).
     public function isManager(): bool
     {
-        return \App\Http\Middleware\RoleMiddleware::roleFor($this->user_id) === 'manager';
+        return RoleMiddleware::roleFor($this->user_id) === 'manager';
     }
 
     public function hasJobAccess(string $area): bool
@@ -55,6 +61,7 @@ class User extends Authenticatable
         if (($this->job_function ?? 'general') === 'general') {
             return true; // unset/general staff keep today's full access
         }
+
         return in_array($this->job_function, self::JOB_FUNCTION_AREAS[$area] ?? [], true);
     }
 
@@ -65,24 +72,24 @@ class User extends Authenticatable
 
     protected $casts = [
         'email_verified_at' => 'datetime',
-        'password'          => 'hashed',
+        'password' => 'hashed',
     ];
 
     // ─── Relationships ────────────────────────────────────────────────────────
 
-    public function orders(): \Illuminate\Database\Eloquent\Relations\HasMany
+    public function orders(): HasMany
     {
         return $this->hasMany(Order::class, 'user_id', 'user_id');
     }
 
     // FIX: supplier() BelongsTo removed — users no longer have supplier_id FK
 
-    public function messages(): \Illuminate\Database\Eloquent\Relations\HasMany
+    public function messages(): HasMany
     {
         return $this->hasMany(OrderMessage::class, 'sender_id', 'user_id');
     }
 
-    public function notifications(): \Illuminate\Database\Eloquent\Relations\HasMany
+    public function notifications(): HasMany
     {
         return $this->hasMany(Notification::class, 'user_id', 'user_id');
     }
@@ -92,12 +99,12 @@ class User extends Authenticatable
     // Points password reset link to React frontend (not Blade)
     public function sendPasswordResetNotification($token): void
     {
-        $this->notify(new \App\Notifications\CustomResetPasswordNotification($token));
+        $this->notify(new CustomResetPasswordNotification($token));
     }
 
     // Points email verification to API route → redirects to React
     public function sendEmailVerificationNotification(): void
     {
-        $this->notify(new \App\Notifications\CustomVerifyEmailNotification());
+        $this->notify(new CustomVerifyEmailNotification);
     }
 }

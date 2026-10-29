@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
@@ -25,13 +26,14 @@ class SecurityGateTest extends TestCase
     {
         $id = DB::table('designs')->insertGetId([
             'source_order_id' => $sourceOrderId,
-            'design_name'     => 'sec-test',
-            'garment_type'    => 'Polo Shirt',
-            'created_at'      => now(),
-            'updated_at'      => now(),
+            'design_name' => 'sec-test',
+            'garment_type' => 'Polo Shirt',
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
         // Ownership is orders.design_id (what archiveCompletedDesign sets), not designs.source_order_id.
         DB::table('orders')->where('order_id', $sourceOrderId)->update(['design_id' => $id]);
+
         return $id;
     }
 
@@ -40,6 +42,63 @@ class SecurityGateTest extends TestCase
         $this->actAs(5);
         $this->getJson('/api/customer/orders/1')->assertOk();
         $this->getJson('/api/customer/orders/2')->assertNotFound();
+    }
+
+    public function test_customer_order_json_hides_money_payment_method_and_qc_fields_but_admin_keeps_them(): void
+    {
+        $hidden = ['agreed_total', 'discount_rate', 'discount_pct', 'down_payment_amount', 'payment_method', 'payment_terms', 'qc_required', 'qc_passed_at'];
+
+        $this->actAs(5);
+        $detail = $this->getJson('/api/customer/orders/1')->assertOk()->json('order');
+        $listed = $this->getJson('/api/customer/orders')->assertOk()->json('data.0');
+        foreach ($hidden as $key) {
+            $this->assertArrayNotHasKey($key, $detail);
+            $this->assertArrayNotHasKey($key, $listed);
+        }
+
+        $this->actAs(1);
+        $admin = $this->getJson('/api/admin/orders/1')->assertOk()->json();
+        foreach ($hidden as $key) {
+            $this->assertArrayHasKey($key, $admin['order'] ?? $admin);
+        }
+    }
+
+    public function test_customer_delivery_view_hides_staff_notes_and_money(): void
+    {
+        DB::table('orders')->where('order_id', 1)->update(['agreed_total' => 50000, 'status' => 'packing']);
+        DB::table('delivery_tracking')->updateOrInsert(['order_id' => 1], [
+            'delivery_method' => 'vfrb_deliver', 'delivery_status' => 'preparing', 'delivery_address' => '12 Rizal St',
+            'notes' => 'Internal: driver note', 'updated_by' => 1, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->actAs(5);
+        $res = $this->getJson('/api/customer/delivery/1')->assertOk();
+
+        $this->assertSame(['order_id', 'status'], array_keys($res->json('order')));
+        $this->assertSame('in_production', $res->json('order.status'));
+        $this->assertArrayNotHasKey('notes', $res->json('delivery'));
+        $this->assertArrayNotHasKey('updated_by', $res->json('delivery'));
+        $this->assertSame('preparing', $res->json('delivery.delivery_status'));
+    }
+
+    public function test_customer_spec_sheet_shows_the_customer_label_not_the_stage(): void
+    {
+        DB::table('orders')->where('order_id', 1)->update(['status' => 'sewing', 'studio_config' => json_encode(['garment' => 'Polo Shirt', 'colors' => ['body' => '#1B2A4A']])]);
+        $seen = [];
+        Pdf::shouldReceive('loadView')->andReturnUsing(function ($view, $data) use (&$seen) {
+            $seen[] = $data['order']->status;
+
+            return Pdf::getFacadeRoot();
+        });
+        Pdf::shouldReceive('setPaper')->andReturnSelf();
+        Pdf::shouldReceive('download')->andReturn(response('pdf'));
+
+        $this->actAs(5);
+        $this->get('/api/customer/orders/1/spec-sheet')->assertOk();
+        $this->actAs(1);
+        $this->get('/api/admin/orders/1/spec-sheet')->assertOk();
+
+        $this->assertSame(['In Production', 'sewing'], $seen);
     }
 
     public function test_customer_order_list_contains_only_own_orders(): void
@@ -66,7 +125,7 @@ class SecurityGateTest extends TestCase
             'user_id' => 5, 'garment_type' => 'Polo Shirt', 'quantity_ordered' => 100, 'status' => 'pending',
             'created_at' => now(), 'updated_at' => now(),
         ], 'order_id');
-        $mine  = $this->design($pending);
+        $mine = $this->design($pending);
         $other = $this->design(2);
         $this->actAs(5);
         $this->putJson("/api/customer/designs/{$mine}", ['design_name' => 'renamed'])->assertOk();
@@ -111,12 +170,12 @@ class SecurityGateTest extends TestCase
         }
     }
 
-    // The staff role is retired: user 4 keeps its row but every admin route refuses it.
-    public function test_retired_staff_is_refused_everywhere(): void
+    // Staff = station (user 4, no assigned stage): reads production areas, never manager areas or order edits.
+    public function test_station_staff_reads_but_is_refused_manager_areas_and_order_edits(): void
     {
         $this->actAs(4);
-        $this->getJson('/api/admin/orders')->assertForbidden();
-        $this->getJson('/api/admin/dashboard')->assertForbidden();
+        $this->getJson('/api/admin/orders')->assertOk();
+        $this->getJson('/api/admin/dashboard')->assertOk()->assertJsonMissingPath('revenue');
         $this->getJson('/api/admin/reports')->assertForbidden();
         $this->patchJson('/api/admin/orders/1', ['status' => 'completed'])->assertForbidden();
         $this->assertNotSame('completed', DB::table('orders')->where('order_id', 1)->value('status'));
@@ -133,7 +192,7 @@ class SecurityGateTest extends TestCase
         $this->actAs(1);
         $body = ['name' => 'X', 'email' => 'new-cust@gmail.com', 'password' => 'Secret#123', 'password_confirmation' => 'Secret#123', 'role' => 'customer'];
         $this->postJson('/api/admin/users', $body)->assertStatus(422)->assertJsonValidationErrors(['organization_name', 'client_type']);
-        $this->postJson('/api/admin/users', ['role' => 'staff'] + $body)->assertStatus(422)->assertJsonValidationErrors('role');
+        $this->postJson('/api/admin/users', ['role' => 'staff'] + $body)->assertStatus(422)->assertJsonValidationErrors('assigned_stage');
         $this->assertFalse(DB::table('users')->where('email', 'new-cust@gmail.com')->exists());
 
         // An existing customer account (user 5) cannot be turned into an admin from User Management.
@@ -203,10 +262,10 @@ class SecurityGateTest extends TestCase
         $this->withToken($token)->getJson('/api/customer/orders/1')->assertUnauthorized();
     }
 
-    public function test_manager_can_still_deactivate_the_retired_staff_account(): void
+    public function test_manager_can_deactivate_a_station_account(): void
     {
         $staffToken = User::findOrFail(4)->createToken('sec-test')->plainTextToken;
-        $this->withToken($staffToken)->getJson('/api/admin/orders')->assertForbidden();
+        $this->withToken($staffToken)->getJson('/api/admin/orders')->assertOk();
 
         $this->app['auth']->forgetGuards();
         $this->actAs(1);
@@ -214,10 +273,13 @@ class SecurityGateTest extends TestCase
         $this->assertSame(0, DB::table('personal_access_tokens')->where('tokenable_id', 4)->count());
     }
 
-    public function test_retired_staff_cannot_log_in(): void
+    public function test_station_signs_in_only_while_active(): void
     {
-        DB::table('users')->where('user_id', 4)->update(['password' => bcrypt('Sec#Test1234')]);
+        DB::table('users')->where('user_id', 4)->update(['password' => bcrypt('Sec#Test1234'), 'email_verified_at' => now()]);
         $email = DB::table('users')->where('user_id', 4)->value('email');
+        $this->postJson('/api/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertOk()->assertJsonPath('user.role', 'staff');
+
+        DB::table('users')->where('user_id', 4)->update(['email_verified_at' => null]);
         $this->postJson('/api/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertForbidden();
         $this->postJson('/api/admin/login', ['email' => $email, 'password' => 'Sec#Test1234'])->assertForbidden();
     }
@@ -237,8 +299,9 @@ class SecurityGateTest extends TestCase
     }
 
     // Free-form chat was removed (AI scope: materials + B5 design edits): a chat payload is refused before any AI call.
-    public function test_public_design_endpoint_has_no_free_chat_and_caps_the_brief(): void
+    public function test_design_endpoint_has_no_free_chat_and_caps_the_brief(): void
     {
+        $this->actAs(5);
         $this->postJson('/api/ai/describe-design', ['mode' => 'chat', 'prompt' => 'hi', 'chat_context' => 'anything'])
             ->assertStatus(422)->assertJsonValidationErrors('description');
         $this->postJson('/api/ai/describe-design', ['description' => str_repeat('a', 501)])->assertStatus(422);

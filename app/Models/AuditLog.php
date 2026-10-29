@@ -28,7 +28,7 @@ class AuditLog extends Model
         'inventory_adjusted',
         'client_material_received', 'client_material_wastage', 'client_material_returned',
         'user_created', 'user_role_changed', 'user_deactivated', 'user_activated',
-        'customer_contact_created',
+        'customer_contact_created', 'access_requested',
         'settings_updated',
     ];
 

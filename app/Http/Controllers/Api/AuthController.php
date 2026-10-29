@@ -1,4 +1,5 @@
 <?php
+
 // app/Http/Controllers/Api/AuthController.php
 // VFRB Enterprise — Authentication
 //
@@ -32,8 +33,10 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\CustomerContact;
+use App\Models\NotificationPreference;
 use App\Models\User;
 use App\Notifications\CustomVerifyEmailNotification;
+use App\Support\UploadDisk;
 use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -41,8 +44,8 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
-use Illuminate\Validation\Rules\Password as PasswordRule;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rules\Password as PasswordRule;
 use Laravel\Socialite\Facades\Socialite;
 
 class AuthController extends Controller
@@ -53,24 +56,26 @@ class AuthController extends Controller
     {
         // `login` is a username or an email; `email` is still accepted from older clients.
         $request->validate([
-            'login'    => 'required_without:email|nullable|string|max:100',
-            'email'    => 'required_without:login|nullable|string|max:100',
+            'login' => 'required_without:email|nullable|string|max:100',
+            'email' => 'required_without:login|nullable|string|max:100',
             'password' => 'required|string',
         ]);
 
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
-        if (!$user || !Hash::check($request->input('password'), $user->password)) {
+        if (! $user || ! Hash::check($request->input('password'), $user->password)) {
             // The typed login name is never stored: an unknown name is logged as user_id null + IP.
             AuditLog::record('login_failed', userId: $user?->user_id);
+
             return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
 
-        // Retired staff accounts and deactivated admins cannot sign in.
-        if ($role === 'staff' || (in_array($role, ['manager', 'owner'], true) && is_null($user->email_verified_at))) {
+        // Deactivated admin and station accounts cannot sign in.
+        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
             AuditLog::record('login_failed', userId: $user->user_id);
+
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
@@ -79,7 +84,7 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token,
-            'user'  => $this->formatUser($user, $role),
+            'user' => $this->formatUser($user, $role),
         ]);
     }
 
@@ -88,30 +93,33 @@ class AuthController extends Controller
     {
         // `login` is a username or an email; `email` is still accepted from older clients.
         $request->validate([
-            'login'    => 'required_without:email|nullable|string|max:100',
-            'email'    => 'required_without:login|nullable|string|max:100',
+            'login' => 'required_without:email|nullable|string|max:100',
+            'email' => 'required_without:login|nullable|string|max:100',
             'password' => 'required|string',
         ]);
 
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
-        if (!$user || !Hash::check($request->input('password'), $user->password)) {
+        if (! $user || ! Hash::check($request->input('password'), $user->password)) {
             // The typed login name is never stored: an unknown name is logged as user_id null + IP.
             AuditLog::record('login_failed', userId: $user?->user_id);
+
             return response()->json(['message' => 'Invalid username/email or password.'], 401);
         }
 
         $role = $this->getRoleName($user->user_id);
 
-        // Retired staff accounts and deactivated admins cannot sign in.
-        if ($role === 'staff' || (in_array($role, ['manager', 'owner'], true) && is_null($user->email_verified_at))) {
+        // Deactivated admin and station accounts cannot sign in.
+        if (in_array($role, ['staff', 'manager', 'owner'], true) && is_null($user->email_verified_at)) {
             AuditLog::record('login_failed', userId: $user->user_id);
+
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
-        // Admin portal: only manager and owner may log in here
-        if (!in_array($role, ['manager', 'owner'], true)) {
+        // Admin portal: manager, owner and station staff may log in here
+        if (! in_array($role, ['staff', 'manager', 'owner'], true)) {
             AuditLog::record('login_failed', userId: $user->user_id);
+
             return response()->json([
                 'message' => 'This account does not have admin access.',
             ], 403);
@@ -122,7 +130,7 @@ class AuthController extends Controller
 
         return response()->json([
             'token' => $token,
-            'user'  => $this->formatUser($user, $role),
+            'user' => $this->formatUser($user, $role),
         ]);
     }
 
@@ -157,14 +165,14 @@ class AuthController extends Controller
         try {
             $googleUser = Socialite::driver('google')->user();
         } catch (\Exception $e) {
-            return redirect($frontend . '/login?google_error=' . urlencode(
+            return redirect($frontend.'/login?google_error='.urlencode(
                 'Google sign-in failed or was cancelled. Please try again.'
             ));
         }
 
         $email = $googleUser->getEmail();
-        if (!$email) {
-            return redirect($frontend . '/login?google_error=' . urlencode(
+        if (! $email) {
+            return redirect($frontend.'/login?google_error='.urlencode(
                 'Your Google account did not share an email address. Please sign in with email instead.'
             ));
         }
@@ -179,30 +187,32 @@ class AuthController extends Controller
             // this customer-only flow. Reject clearly, issue no token.
             if ($role !== 'customer') {
                 AuditLog::record('login_failed', userId: $existing->user_id);
-                return redirect($frontend . '/login?google_error=' . urlencode(
+
+                return redirect($frontend.'/login?google_error='.urlencode(
                     'This email belongs to an Administrator account. Google sign-in here is for customers only — please sign in with your email and password instead.'
                 ));
             }
 
             // Existing customer — log them in. Backfill google_id/avatar
             // only if missing, never overwrite anything else about them.
-            if (!$existing->google_id) {
+            if (! $existing->google_id) {
                 DB::table('users')->where('user_id', $existing->user_id)->update([
-                    'google_id'  => $googleUser->getId(),
-                    'avatar'     => $googleUser->getAvatar(),
+                    'google_id' => $googleUser->getId(),
+                    'avatar' => $googleUser->getAvatar(),
                     'updated_at' => now(),
                 ]);
                 $existing = DB::table('users')->where('user_id', $existing->user_id)->first();
             }
 
             CustomerContact::linkVerifiedUser($existing->user_id, $email);
-            $token   = $this->createToken($existing->user_id);
+            $token = $this->createToken($existing->user_id);
             $payload = $this->formatUser($existing, 'customer');
             AuditLog::record('login', userId: $existing->user_id);
         } else {
             // Unknown email: accounts are provisioned by an Administrator, never created here.
             AuditLog::record('login_failed');
-            return redirect($frontend . '/login?google_error=' . urlencode(
+
+            return redirect($frontend.'/login?google_error='.urlencode(
                 'No VFRB account uses this Google email. Ask VFRB to create your account first.'
             ));
         }
@@ -211,8 +221,8 @@ class AuthController extends Controller
         // Authorization header, so it's passed via query string to a small
         // dedicated frontend route that stores it and redirects onward —
         // same handoff pattern as email-verification links already use.
-        return redirect($frontend . '/auth/google/complete?token=' . urlencode($token)
-            . '&user=' . urlencode(json_encode($payload)));
+        return redirect($frontend.'/auth/google/complete?token='.urlencode($token)
+            .'&user='.urlencode(json_encode($payload)));
     }
 
     // ── GET /api/user — Current authenticated user ────────────────────────────
@@ -220,11 +230,12 @@ class AuthController extends Controller
     public function me(Request $request)
     {
         $userId = Auth::id();
-        $user   = DB::table('users')->where('user_id', $userId)->first();
-        if (!$user) {
+        $user = DB::table('users')->where('user_id', $userId)->first();
+        if (! $user) {
             return response()->json(['message' => 'User not found.'], 404);
         }
         $role = $this->getRoleName($userId);
+
         return response()->json($this->formatUser($user, $role));
     }
 
@@ -235,6 +246,7 @@ class AuthController extends Controller
         AuditLog::record('logout', userId: $request->user()->user_id);
         // Revoke the current Sanctum token
         $request->user()->currentAccessToken()->delete();
+
         return response()->json(['message' => 'Logged out successfully.']);
     }
 
@@ -259,8 +271,8 @@ class AuthController extends Controller
     public function resetPassword(Request $request)
     {
         $request->validate([
-            'token'    => 'required|string',
-            'email'    => 'required|email',
+            'token' => 'required|string',
+            'email' => 'required|email',
             'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
         ]);
 
@@ -270,9 +282,9 @@ class AuthController extends Controller
                 DB::table('users')
                     ->where('user_id', $user->user_id)
                     ->update([
-                        'password'       => Hash::make($password),
+                        'password' => Hash::make($password),
                         'remember_token' => Str::random(60),
-                        'updated_at'     => now(),
+                        'updated_at' => now(),
                     ]);
             }
         );
@@ -303,10 +315,12 @@ class AuthController extends Controller
         // lookup (notify() needs the Notifiable trait, not the Auth facade
         // user object directly, since that can vary by guard).
         try {
-            User::find($user->user_id)?->notify(new CustomVerifyEmailNotification());
+            User::find($user->user_id)?->notify(new CustomVerifyEmailNotification);
+
             return response()->json(['message' => 'Verification email sent.']);
         } catch (\Throwable $e) {
-            \Log::warning("Resend CustomVerifyEmailNotification failed for user #{$user->user_id}: " . $e->getMessage());
+            \Log::warning("Resend CustomVerifyEmailNotification failed for user #{$user->user_id}: ".$e->getMessage());
+
             return response()->json(['message' => 'Could not send verification email. Please try again.'], 500);
         }
     }
@@ -336,18 +350,18 @@ class AuthController extends Controller
         $frontendUrl = rtrim(config('app.frontend_url', 'http://localhost:5173'), '/');
         $user = User::find($id);
 
-        if (!$user || !hash_equals(sha1($user->getEmailForVerification()), $hash)) {
-            return redirect($frontendUrl . '/verify-email?status=invalid');
+        if (! $user || ! hash_equals(sha1($user->getEmailForVerification()), $hash)) {
+            return redirect($frontendUrl.'/verify-email?status=invalid');
         }
 
         if ($user->email_verified_at) {
-            return redirect($frontendUrl . '/verify-email?status=already_verified');
+            return redirect($frontendUrl.'/verify-email?status=already_verified');
         }
 
         $user->forceFill(['email_verified_at' => now()])->save();
         CustomerContact::linkVerifiedUser($user->user_id, $user->email);
 
-        return redirect($frontendUrl . '/verify-email?status=verified');
+        return redirect($frontendUrl.'/verify-email?status=verified');
     }
 
     // ── Private: getRoleName ──────────────────────────────────────────────────
@@ -360,6 +374,7 @@ class AuthController extends Controller
         if ($login === '') {
             return null;
         }
+
         return DB::table('users')
             ->where(str_contains($login, '@') ? DB::raw('LOWER(email)') : 'username', $login)
             ->first();
@@ -379,7 +394,8 @@ class AuthController extends Controller
     private function createToken(int $userId): string
     {
         // Load the Eloquent user model for Sanctum token creation
-        $eloquentUser = \App\Models\User::find($userId);
+        $eloquentUser = User::find($userId);
+
         return $eloquentUser->createToken('vfrb-token')->plainTextToken;
     }
 
@@ -390,19 +406,20 @@ class AuthController extends Controller
     private function formatUser(object $user, string $role): array
     {
         return [
-            'user_id'           => $user->user_id,
-            'username'          => $user->username ?? null,
-            'name'              => $user->name,
-            'email'             => $user->email,
-            'role'              => $role,
+            'user_id' => $user->user_id,
+            'username' => $user->username ?? null,
+            'name' => $user->name,
+            'email' => $user->email,
+            'role' => $role,
             'email_verified_at' => $user->email_verified_at,
-            'contact_number'    => $user->contact_number,
+            'contact_number' => $user->contact_number,
             'organization_name' => $user->organization_name,
-            'address'           => $user->address,
-            'client_type'       => $user->client_type,
-            'avatar'            => \App\Support\UploadDisk::url($user->avatar),
-            'job_function'      => $user->job_function ?? 'general',
-            'appearance'        => \App\Models\NotificationPreference::appearanceFor((int) $user->user_id),
+            'address' => $user->address,
+            'client_type' => $user->client_type,
+            'avatar' => UploadDisk::url($user->avatar),
+            'job_function' => $user->job_function ?? 'general',
+            'assigned_stage' => $user->assigned_stage ?? null,
+            'appearance' => NotificationPreference::appearanceFor((int) $user->user_id),
         ];
     }
 }

@@ -4,10 +4,13 @@ namespace Tests\Feature;
 
 use App\Models\MaterialRecommendation;
 use App\Models\User;
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -23,6 +26,11 @@ class AiRecommendationTest extends TestCase
     {
         parent::setUp();
         config(['services.gemini.key_1' => 'test-key', 'services.gemini.key_2' => null, 'services.gemini.key_3' => null]);
+
+        // These tests use fabric VFRB buys for direct orders; the reclassification is master data and rolls back.
+        if (Schema::hasColumn('materials', 'ownership')) {
+            DB::table('materials')->where('category', 'Fabric')->update(['ownership' => 'vfrb']);
+        }
     }
 
     private function actAs(int $userId): void
@@ -30,7 +38,7 @@ class AiRecommendationTest extends TestCase
         Sanctum::actingAs(User::findOrFail($userId), ['*']);
     }
 
-    private function gemini(array $payload): \GuzzleHttp\Promise\PromiseInterface
+    private function gemini(array $payload): PromiseInterface
     {
         return Http::response(['candidates' => [['content' => ['parts' => [['text' => is_string($payload) ? $payload : json_encode($payload)]]]]]]);
     }
@@ -86,18 +94,19 @@ class AiRecommendationTest extends TestCase
         $res = $this->recommend()->assertOk();
 
         Http::assertSent(function (Request $r) {
-            $cfg    = $r->data()['generationConfig'];
+            $cfg = $r->data()['generationConfig'];
             $prompt = $r->data()['contents'][0]['parts'][0]['text'];
-            $ids    = $cfg['responseJsonSchema']['properties']['selections']['items']['properties']['material_id']['enum'];
+            $ids = $cfg['responseJsonSchema']['properties']['selections']['items']['properties']['material_id']['enum'];
+
             return $r->hasHeader('x-goog-api-key', 'test-key')
-                && !str_contains($r->url(), 'test-key')
+                && ! str_contains($r->url(), 'test-key')
                 && $cfg['responseMimeType'] === 'application/json'
-                && in_array(2, $ids, true) && !in_array(9999, $ids, true)
+                && in_array(2, $ids, true) && ! in_array(9999, $ids, true)
                 && str_contains($prompt, 'polo_shirt')
                 && str_contains($prompt, '| Cotton-Poly Blend Fabric (Navy) | Fabric |')
                 && str_contains($prompt, 'colour: close to the body colour')
                 && str_contains($prompt, 'stock: in stock')
-                && !in_array(4, $ids, true)
+                && ! in_array(4, $ids, true)
                 && str_contains($prompt, 'Never state or imply a quantity');
         });
         $this->assertStringNotContainsString('test-key', json_encode($res->json()));
@@ -191,7 +200,7 @@ class AiRecommendationTest extends TestCase
     public function test_timeout_is_retried_once_then_falls_back(): void
     {
         config(['services.gemini.retries' => 1]);
-        Http::fake(['*' => fn () => throw new \Illuminate\Http\Client\ConnectionException('cURL error 28: timed out')]);
+        Http::fake(['*' => fn () => throw new ConnectionException('cURL error 28: timed out')]);
         $this->actAs(5);
         $this->assertCatalogFallback($this->recommend());
     }
@@ -312,7 +321,9 @@ class AiRecommendationTest extends TestCase
         $row = ['order_id' => 9, 'material_name' => 'Cotton Fabric', 'material_id' => 12, 'category' => 'Fabric', 'unit' => 'yards',
             'status' => 'pending', 'created_at' => now(), 'updated_at' => now()];
         foreach (['estimated_range' => '150-200 yards', 'total_estimated_range' => '9999 yards', 'actual_qty_issued' => 321.5] as $col => $v) {
-            if (\Illuminate\Support\Facades\Schema::hasColumn('material_recommendations', $col)) { $row[$col] = $v; }
+            if (Schema::hasColumn('material_recommendations', $col)) {
+                $row[$col] = $v;
+            }
         }
         DB::table('material_recommendations')->insert($row);
         $this->actAs(5);
@@ -359,6 +370,7 @@ class AiRecommendationTest extends TestCase
             'textContent' => '<b>RN</b> 12', 'textBold' => true, 'description_summary' => 'Navy scrub top.',
         ])]);
 
+        $this->actAs(5);
         $res = $this->postJson('/api/ai/describe-design', ['description' => 'navy scrub top with RN 12'])->assertOk();
 
         $cfg = $res->json('config');
@@ -373,6 +385,7 @@ class AiRecommendationTest extends TestCase
 
     public function test_describe_design_errors_keep_the_error_key_the_studio_reads(): void
     {
+        $this->actAs(5);
         Http::fake(['*' => Http::sequence()
             ->push('down', 500)
             ->push('down', 500)

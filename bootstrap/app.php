@@ -1,4 +1,5 @@
 <?php
+
 // bootstrap/app.php — VFRB Enterprise
 // ═══════════════════════════════════════════════════════════════════════════
 // SOURCE OF TRUTH: This is the complete bootstrap/app.php for VFRB Enterprise.
@@ -22,28 +23,37 @@
 // DEPLOY: replace C:/laragon/www/vfrb-capstone/bootstrap/app.php
 // ═══════════════════════════════════════════════════════════════════════════
 
+use App\Http\Middleware\ApiThrottle;
+use App\Http\Middleware\JobFunctionMiddleware;
+use App\Http\Middleware\OwnerReadOnly;
+use App\Http\Middleware\RoleMiddleware;
+use App\Http\Middleware\SanitizeInput;
+use App\Http\Middleware\SecurityHeaders;
+use App\Http\Middleware\StationScope;
+use Illuminate\Auth\AuthenticationException;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
-use Illuminate\Auth\AuthenticationException;
+use Illuminate\Validation\ValidationException;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
-        web:      __DIR__.'/../routes/web.php',
-        api:      __DIR__.'/../routes/api.php',
+        web: __DIR__.'/../routes/web.php',
+        api: __DIR__.'/../routes/api.php',
         commands: __DIR__.'/../routes/console.php',
-        health:   '/up',
+        health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
 
         // ── Security headers on ALL responses ────────────────────────────────
         // Adds: X-Content-Type-Options, X-Frame-Options, X-XSS-Protection: 0,
         //       Referrer-Policy, Permissions-Policy, Content-Security-Policy
-        $middleware->append(\App\Http\Middleware\SecurityHeaders::class);
+        $middleware->append(SecurityHeaders::class);
 
         // ── Input sanitization on API group only ─────────────────────────────
         $middleware->appendToGroup('api', [
-            \App\Http\Middleware\SanitizeInput::class,
+            SanitizeInput::class,
         ]);
 
         // -- Trust proxies ----------------------------------------------------
@@ -61,15 +71,17 @@ return Application::configure(basePath: dirname(__DIR__))
         // ── Middleware aliases ────────────────────────────────────────────────
         $middleware->alias([
             // Rate limiting (custom — wraps Laravel throttle with JSON responses)
-            'auth.throttle' => \App\Http\Middleware\ApiThrottle::class,
+            'auth.throttle' => ApiThrottle::class,
 
             // Role gate — reads from model_has_roles (Spatie RBAC) via direct
             // DB query to bypass guard_name='web' vs Sanctum 'api' mismatch.
             // Usage: ->middleware('role:manager') or ->middleware('role:staff,manager')
-            'role' => \App\Http\Middleware\RoleMiddleware::class,
-            'jobfn' => \App\Http\Middleware\JobFunctionMiddleware::class,
+            'role' => RoleMiddleware::class,
+            'jobfn' => JobFunctionMiddleware::class,
             // Read-only owner role: GET on the listed admin areas, 403 on any write.
-            'owner.readonly' => \App\Http\Middleware\OwnerReadOnly::class,
+            'owner.readonly' => OwnerReadOnly::class,
+            // Station staff: allow-listed routes, own-stage writes, money keys stripped.
+            'station' => StationScope::class,
         ]);
 
         // ── Never redirect unauthenticated guests to a 'login' route ──────────
@@ -105,7 +117,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // Without this, 404s and 500s on /api/* return HTML (Vite error overlay,
         // or a proxy's 502 page) which React JSON.parse() crashes on.
         // In production: 500 messages are sanitized to prevent info leak.
-        $exceptions->render(function (\Throwable $e, $request) {
+        $exceptions->render(function (Throwable $e, $request) {
 
             // AuthenticationException already handled above — skip
             if ($e instanceof AuthenticationException) {
@@ -124,15 +136,15 @@ return Application::configure(basePath: dirname(__DIR__))
                     : $e->getMessage();
 
                 // Validation errors get their errors bag
-                if ($e instanceof \Illuminate\Validation\ValidationException) {
+                if ($e instanceof ValidationException) {
                     return response()->json([
                         'message' => 'Validation failed.',
-                        'errors'  => $e->errors(),
+                        'errors' => $e->errors(),
                     ], 422);
                 }
 
                 // Model not found → clean 404
-                if ($e instanceof \Illuminate\Database\Eloquent\ModelNotFoundException) {
+                if ($e instanceof ModelNotFoundException) {
                     return response()->json([
                         'message' => 'Resource not found.',
                     ], 404);
@@ -140,7 +152,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
                 return response()->json([
                     'message' => $message,
-                    'status'  => $status,
+                    'status' => $status,
                 ], $status);
             }
         });
