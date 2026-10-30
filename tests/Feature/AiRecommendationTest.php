@@ -392,10 +392,10 @@ class AiRecommendationTest extends TestCase
             ->push(['candidates' => [['content' => ['parts' => [['text' => json_encode(['category' => 'PE/Sports'])]]]]]])]);
 
         $this->postJson('/api/ai/describe-design', ['description' => 'navy scrub top'])
-            ->assertStatus(503)->assertJsonPath('error', 'AI unavailable');
+            ->assertStatus(503)->assertJsonPath('message', 'AI unavailable');
 
         $this->postJson('/api/ai/describe-design', ['description' => 'navy scrub top'])
-            ->assertStatus(502)->assertJsonStructure(['error']);
+            ->assertStatus(502)->assertJsonStructure(['message'])->assertJsonMissingPath('error');
 
         $this->postJson('/api/ai/describe-design', [])->assertStatus(422);
     }

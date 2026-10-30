@@ -179,13 +179,7 @@ class ActivityLogController extends Controller
             ];
         });
 
-        return response()->json([
-            'data'         => $items,
-            'current_page' => $page->currentPage(),
-            'last_page'    => $page->lastPage(),
-            'total'        => $page->total(),
-            'per_page'     => $page->perPage(),
-        ]);
+        return response()->json($page->setCollection($items));
     }
 
     // ── GET /api/admin/activity-log/action-types ─────────────────────────────

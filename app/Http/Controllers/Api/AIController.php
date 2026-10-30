@@ -492,12 +492,12 @@ PROMPT;
 
         $text = $this->gemini->call($prompt, 1000);
         if (!$text) {
-            return response()->json(['error' => 'AI unavailable', 'message' => 'AI unavailable'], 503);
+            return response()->json(['message' => 'AI unavailable'], 503);
         }
 
         $config = $this->cleanDesignConfig(json_decode(trim(preg_replace('/```json|```/i', '', $text)), true));
         if (!$config) {
-            return response()->json(['error' => 'AI returned an unusable design. Try rephrasing.', 'message' => 'AI returned an unusable design. Try rephrasing.'], 502);
+            return response()->json(['message' => 'AI returned an unusable design. Try rephrasing.'], 502);
         }
 
         return response()->json([

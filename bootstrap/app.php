@@ -130,8 +130,8 @@ return Application::configure(basePath: dirname(__DIR__))
                     ? $e->getStatusCode()
                     : 500;
 
-                // Sanitize 500 messages in production — never leak stack traces
-                $message = (app()->environment('production') && $status >= 500)
+                // 5xx text is fixed unless APP_DEBUG, so exception messages never leak
+                $message = (! config('app.debug') && $status >= 500)
                     ? 'An internal server error occurred. Please try again.'
                     : $e->getMessage();
 
@@ -150,10 +150,7 @@ return Application::configure(basePath: dirname(__DIR__))
                     ], 404);
                 }
 
-                return response()->json([
-                    'message' => $message,
-                    'status' => $status,
-                ], $status);
+                return response()->json(['message' => $message], $status);
             }
         });
 
