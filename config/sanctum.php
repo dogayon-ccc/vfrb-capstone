@@ -21,7 +21,8 @@ return [
 
     'guard' => ['web'],
 
-    'expiration' => null,
+    // Minutes; the frontend sends a 401 from an expired token back to /login.
+    'expiration' => (int) env('SANCTUM_EXPIRATION', 60 * 24 * 7),
 
     'token_prefix' => env('SANCTUM_TOKEN_PREFIX', ''),
 

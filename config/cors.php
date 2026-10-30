@@ -10,12 +10,11 @@ return [
     'allowed_methods' => ['*'],
 
     'allowed_origins' => array_values(array_filter(array_merge(
-        [
-            'http://localhost:5173',
-            'http://localhost:3000',
-            'http://127.0.0.1:5173',
-            env('FRONTEND_URL'),
-        ],
+        [env('FRONTEND_URL')],
+        // Local dev servers only when CORS_ALLOW_LOCALHOST is true (defaults to APP_ENV=local), so production never accepts them.
+        env('CORS_ALLOW_LOCALHOST', env('APP_ENV') === 'local')
+            ? ['http://localhost:5173', 'http://localhost:3000', 'http://127.0.0.1:5173']
+            : [],
         // Extra production origins, comma-separated (e.g. https://vfrb.example.com,https://www.vfrb.example.com)
         array_map('trim', explode(',', (string) env('CORS_ALLOWED_ORIGINS', '')))
     ))),
