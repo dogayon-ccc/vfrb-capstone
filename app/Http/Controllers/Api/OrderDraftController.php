@@ -78,7 +78,9 @@ class OrderDraftController extends Controller
             ]
         );
 
-        return response()->json(['message' => 'Draft saved.'], 200);
+        $saved = DB::table('order_drafts')->where('user_id', $userId)->first(['draft_id', 'updated_at']);
+
+        return response()->json(['message' => 'Draft saved.', 'draft_id' => $saved->draft_id, 'updated_at' => $saved->updated_at], 200);
     }
 
     // ── DELETE /api/customer/drafts/latest ───────────────────────────────────

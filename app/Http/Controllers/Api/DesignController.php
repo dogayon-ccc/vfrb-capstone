@@ -143,9 +143,9 @@ class DesignController extends Controller
         if (isset($validated['custom_builder_config'])) {
             $fields['custom_builder_config'] = json_encode($validated['custom_builder_config']);
         }
-        $design->update($fields);
+        $design->fill($fields)->touch(); // touch: an unchanged re-save still confirms with a fresh updated_at
 
-        return response()->json(['id' => $design->design_id, 'label' => $design->design_name]);
+        return response()->json(['id' => $design->design_id, 'label' => $design->design_name, 'updated_at' => $design->updated_at]);
     }
 
     // POST /api/customer/designs/{id}/copy — an editable copy of an own design (the original stays as ordered).
