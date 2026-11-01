@@ -169,7 +169,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // AIMaterials.jsx: POST /api/customer/ai/recommend-materials  { order_id: selId }
     // (frontend sends body param, not route param — aliased here)
     // FIX: controller method is recommendMaterials() — recommendByBody() never existed.
-    Route::post('/ai/recommend-materials', [AIController::class, 'recommendMaterials']);
+    Route::post('/ai/recommend-materials', [AIController::class, 'recommendMaterials'])->middleware('throttle:10,1'); // Gemini cost cap, per user
 
     // ── Accept AI recommendation (order-level, bulk — used by AIMaterials.jsx) ──
     // AIMaterials.jsx: POST /api/customer/orders/{id}/accept-materials  { notes }

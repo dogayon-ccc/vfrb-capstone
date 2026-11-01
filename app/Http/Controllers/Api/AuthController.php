@@ -282,6 +282,11 @@ class AuthController extends Controller
                         'remember_token' => Str::random(60),
                         'updated_at' => now(),
                     ]);
+                // A reset signs out every device, so a stolen token does not survive it.
+                DB::table('personal_access_tokens')
+                    ->where('tokenable_type', 'App\\Models\\User')
+                    ->where('tokenable_id', $user->user_id)
+                    ->delete();
             }
         );
 

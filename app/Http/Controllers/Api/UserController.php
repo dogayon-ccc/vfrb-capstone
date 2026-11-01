@@ -405,6 +405,12 @@ class UserController extends Controller
                 'password' => Hash::make($request->input('password')),
                 'updated_at' => now(),
             ]);
+        // Sign out every other device; the session that changed the password stays signed in.
+        DB::table('personal_access_tokens')
+            ->where('tokenable_type', 'App\\Models\\User')
+            ->where('tokenable_id', Auth::id())
+            ->when($request->user()->currentAccessToken()->id ?? null, fn ($q, $keepId) => $q->where('id', '!=', $keepId))
+            ->delete();
 
         return response()->json(['message' => 'Password changed successfully.']);
     }

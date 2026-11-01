@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\User;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Password;
 use Illuminate\Support\Facades\URL;
 use Tests\TestCase;
 
@@ -35,6 +36,50 @@ class AuthHardeningTest extends TestCase
         $known->assertOk();
         $unknown->assertOk();
         $this->assertSame($known->json(), $unknown->json());
+    }
+
+    public function test_password_reset_revokes_every_token(): void
+    {
+        $user = User::findOrFail(5);
+        $user->createToken('vfrb-token');
+        $user->createToken('vfrb-token');
+        $resetToken = Password::createToken($user);
+
+        $this->postJson('/api/password/reset', [
+            'token' => $resetToken,
+            'email' => $user->email,
+            'password' => 'N3w-Passw0rd!',
+            'password_confirmation' => 'N3w-Passw0rd!',
+        ])->assertOk();
+
+        $this->assertSame(0, $user->tokens()->count());
+    }
+
+    public function test_password_change_keeps_this_session_and_revokes_the_others(): void
+    {
+        $user = User::findOrFail(5);
+        $user->forceFill(['password' => bcrypt('Old-Passw0rd!')])->save();
+        $user->createToken('vfrb-token');
+        $current = $user->createToken('vfrb-token');
+
+        $this->withToken($current->plainTextToken)->putJson('/api/customer/profile/password', [
+            'current_password' => 'Old-Passw0rd!',
+            'password' => 'N3w-Passw0rd!',
+            'password_confirmation' => 'N3w-Passw0rd!',
+        ])->assertOk();
+
+        $this->assertSame([$current->accessToken->id], $user->tokens()->pluck('id')->all());
+    }
+
+    public function test_recommend_materials_is_limited_to_ten_per_minute(): void
+    {
+        // Missing order_id fails validation, so no Gemini call is made; the throttle runs before it.
+        $this->actingAs(User::findOrFail(5), 'sanctum');
+
+        for ($i = 0; $i < 10; $i++) {
+            $this->postJson('/api/customer/ai/recommend-materials', [])->assertStatus(422);
+        }
+        $this->postJson('/api/customer/ai/recommend-materials', [])->assertStatus(429);
     }
 
     public function test_localhost_origins_are_not_allowed_outside_local(): void

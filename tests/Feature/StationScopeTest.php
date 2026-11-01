@@ -54,6 +54,30 @@ class StationScopeTest extends TestCase
         $this->assertSame([$station->user_id, 'pattern'], [(int) $row->logged_by, $row->stage]);
     }
 
+    public function test_station_cannot_log_its_stage_on_an_order_at_another_stage(): void
+    {
+        $this->actingAs($this->makeUser('staff', 'cutting'), 'sanctum');
+        $order = $this->order('pattern');
+
+        $this->log($order, 'cutting')->assertStatus(422)->assertJson(['message' => "Order is at stage 'pattern', not 'cutting'."]);
+        $this->assertSame(0, DB::table('daily_output_logs')->where('order_id', $order)->count());
+    }
+
+    public function test_qc_is_rejected_unless_the_order_is_at_qc(): void
+    {
+        $this->actingAs($this->makeUser('staff', 'qc'), 'sanctum');
+        $pass = ['items_checked' => 10, 'items_passed' => 10, 'items_failed' => 0, 'stitching_ok' => true,
+                 'color_ok' => true, 'size_ok' => true, 'label_ok' => true, 'finish_ok' => true];
+
+        $early = $this->order('cutting');
+        $this->postJson("/api/admin/orders/{$early}/qc", $pass)
+            ->assertStatus(422)->assertJson(['message' => "Order is at stage 'cutting', not 'qc'."]);
+        $this->assertSame(0, DB::table('qc_checklists')->where('order_id', $early)->count());
+        $this->assertNull(DB::table('orders')->where('order_id', $early)->value('qc_passed_at'));
+
+        $this->postJson('/api/admin/orders/'.$this->order('qc').'/qc', $pass)->assertCreated()->assertJson(['passed' => true]);
+    }
+
     public function test_station_cannot_write_another_stage_qc_or_defects(): void
     {
         $this->actingAs($this->makeUser('staff', 'pattern'), 'sanctum');

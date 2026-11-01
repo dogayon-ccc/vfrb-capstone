@@ -89,11 +89,6 @@ class QCChecklistController extends Controller
             'notes'          => 'nullable|string|max:1000',
         ]);
 
-        $order = DB::table('orders')->where('order_id', $orderId)->first();
-        if (!$order) {
-            return response()->json(['message' => 'Order not found.'], 404);
-        }
-
         $itemsChecked = (int) $request->input('items_checked');
         $itemsPassed  = (int) $request->input('items_passed',  0);
         $itemsFailed  = (int) $request->input('items_failed',  0);
@@ -120,36 +115,53 @@ class QCChecklistController extends Controller
 
         $passed = ($passRate >= self::QC_PASS_THRESHOLD && $allBoolsPassed) ? 1 : 0;
 
-        $id = DB::table('qc_checklists')->insertGetId([
-            'order_id'     => $orderId,
-            'checked_by'   => Auth::id(),
-            'chest_cm'     => $request->input('chest_cm'),
-            'length_cm'    => $request->input('length_cm'),
-            'sleeve_cm'    => $request->input('sleeve_cm'),
-            'waist_cm'     => $request->input('waist_cm'),
-            'shoulder_cm'  => $request->input('shoulder_cm'),
-            'stitching_ok' => $request->boolean('stitching_ok', false) ? 1 : 0,
-            'color_ok'     => $request->boolean('color_ok',     false) ? 1 : 0,
-            'size_ok'      => $request->boolean('size_ok',      false) ? 1 : 0,
-            'label_ok'     => $request->boolean('label_ok',     false) ? 1 : 0,
-            'finish_ok'    => $request->boolean('finish_ok',    false) ? 1 : 0,
-            'button_ok'    => $request->input('button_ok') === null ? null : ($request->boolean('button_ok') ? 1 : 0),
-            'passed'       => $passed,
-            'items_checked'=> $itemsChecked,
-            'items_passed' => $itemsPassed,
-            'items_failed' => $itemsFailed,
-            'notes'        => $request->input('notes'),
-            'checked_at'   => now(),
-            'created_at'   => now(),
-            'updated_at'   => now(),
-        ], 'check_id');
+        // Stage check, insert and qc_passed_at under one order-row lock, so a stage change cannot slip between them.
+        // Only at the QC stage; an early pass would otherwise release the QC hold later (qcBlocked reads the latest checklist).
+        $saved = DB::transaction(function () use ($request, $orderId, $passed, $itemsChecked, $itemsPassed, $itemsFailed) {
+            $order = DB::table('orders')->where('order_id', $orderId)->lockForUpdate()->first();
+            if (!$order) {
+                return response()->json(['message' => 'Order not found.'], 404);
+            }
+            if ($order->status !== 'qc') {
+                return response()->json(['message' => "Order is at stage '{$order->status}', not 'qc'."], 422);
+            }
 
-        // If passed, update qc_passed_at on the order
-        if ($passed) {
-            DB::table('orders')
-                ->where('order_id', $orderId)
-                ->update(['qc_passed_at' => now(), 'updated_at' => now()]);
+            $id = DB::table('qc_checklists')->insertGetId([
+                'order_id'     => $orderId,
+                'checked_by'   => Auth::id(),
+                'chest_cm'     => $request->input('chest_cm'),
+                'length_cm'    => $request->input('length_cm'),
+                'sleeve_cm'    => $request->input('sleeve_cm'),
+                'waist_cm'     => $request->input('waist_cm'),
+                'shoulder_cm'  => $request->input('shoulder_cm'),
+                'stitching_ok' => $request->boolean('stitching_ok', false) ? 1 : 0,
+                'color_ok'     => $request->boolean('color_ok',     false) ? 1 : 0,
+                'size_ok'      => $request->boolean('size_ok',      false) ? 1 : 0,
+                'label_ok'     => $request->boolean('label_ok',     false) ? 1 : 0,
+                'finish_ok'    => $request->boolean('finish_ok',    false) ? 1 : 0,
+                'button_ok'    => $request->input('button_ok') === null ? null : ($request->boolean('button_ok') ? 1 : 0),
+                'passed'       => $passed,
+                'items_checked'=> $itemsChecked,
+                'items_passed' => $itemsPassed,
+                'items_failed' => $itemsFailed,
+                'notes'        => $request->input('notes'),
+                'checked_at'   => now(),
+                'created_at'   => now(),
+                'updated_at'   => now(),
+            ], 'check_id');
+
+            if ($passed) {
+                DB::table('orders')
+                    ->where('order_id', $orderId)
+                    ->update(['qc_passed_at' => now(), 'updated_at' => now()]);
+            }
+
+            return [$order, $id];
+        });
+        if ($saved instanceof \Illuminate\Http\JsonResponse) {
+            return $saved;
         }
+        [$order, $id] = $saved;
 
         $checklist = DB::table('qc_checklists')->where('check_id', $id)->first();
 
