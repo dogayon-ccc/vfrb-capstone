@@ -310,6 +310,26 @@ class DemoDataSeeder extends Seeder
             DB::table('purchase_order_items')->insert(['po_id' => $poId, 'material_id' => $m->material_id,
                 'qty' => $m->reorder_threshold * 2, 'unit_cost' => $m->unit_cost, 'created_at' => now(), 'updated_at' => now()]);
         }
+        $this->fabricPurchaseOrder($managerId);
+    }
+
+    // A sent fabric PO with an order colour, so the receipt swatch match (and its mismatch path) can be shown.
+    private function fabricPurchaseOrder(int $managerId): void
+    {
+        $supplierId = DB::table('suppliers')->where('email', 'sales@luzonweave.example.test')->value('supplier_id');
+        $fabric = DB::table('materials')->where('material_code', 'MAT-FAB-002')->first(['material_id', 'unit_cost']);
+        if (! $supplierId || ! $fabric) {
+            return;
+        }
+        $qty = 120;
+        DB::table('purchase_orders')->updateOrInsert(['po_number' => 'PO-DEMO-0002'], ['supplier_id' => $supplierId, 'created_by' => $managerId,
+            'status' => 'sent', 'total_amount' => $qty * $fabric->unit_cost, 'expected_delivery_date' => now()->addDays(5)->toDateString(),
+            'notes' => 'Navy cotton-poly for scrub and polo orders.', 'order_color_hex' => '#1B2A4A',
+            'received_color_hex' => null, 'color_mismatch' => 0, 'color_confirmed' => 0, 'color_notes' => null, 'created_at' => now()->subDay(), 'updated_at' => now()]);
+        $poId = DB::table('purchase_orders')->where('po_number', 'PO-DEMO-0002')->value('po_id');
+        DB::table('purchase_order_items')->where('po_id', $poId)->delete();
+        DB::table('purchase_order_items')->insert(['po_id' => $poId, 'material_id' => $fabric->material_id,
+            'qty' => $qty, 'unit_cost' => $fabric->unit_cost, 'created_at' => now(), 'updated_at' => now()]);
     }
 
     // Unlinked and not created by an admin: this is how the Requests list identifies a pending "Request access".
