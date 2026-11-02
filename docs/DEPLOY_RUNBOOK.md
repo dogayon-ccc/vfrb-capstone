@@ -31,6 +31,8 @@ Must be set in the Vercel project (dashboard, UNVERIFIED which are present):
 | APP_RELEASE, APP_DEPLOY_ID | optional | services.release (GET /api/version) | set per deploy |
 | VFRB_LEAD_DAYS_PER_100 | optional | vfrb.lead_days_per_100 | none |
 | LOG_LEVEL | optional | logging | `error` or `warning` suggested |
+| CRON_SECRET | yes for automations | services.cron.secret | none; unset = `/api/cron/run` always 401 (§9) |
+| APP_TIMEZONE | optional (default UTC) | app.timezone | none; decides the cron UTC times in §9 |
 
 Full list of names read by `config/*.php` (env() calls; none outside config/, CODE-VERIFIED) also includes framework defaults not used in this stack (AWS_*, REDIS_*, MEMCACHED_*, SQS_*, BEANSTALKD_*, DYNAMODB_*, PAPERTRAIL_*, LOG_SLACK_*, SLACK_*).
 
@@ -59,11 +61,14 @@ Duplicate index on `public.orders` (idx_orders_design_id vs orders_design_id_for
 
 | File:line | Issue | Status |
 |---|---|---|
-| database/migrations/2026_08_25_000001_fix_order_production_tracking_stage_enum.php:58,89 | `ALTER TABLE ... MODIFY COLUMN`, no driver guard | MySQL-only; already ran or skipped on live (UNVERIFIED) — fails on fresh PG |
-| database/migrations/2026_09_07_000001_make_estimated_range_nullable_on_material_recommendations.php:46-60 | backticks + MODIFY, no guard | same |
-| database/migrations/2026_10_05_000001_add_b2b_client_types_to_users.php:11,17 | `MODIFY ... ENUM(...)`, no guard | same |
-| app/Http/Controllers/Api/MessageController.php:47,172 | `is_read = 0` in raw SQL; fails if PG column is boolean | UNVERIFIED column type (comment line 7 says tinyint) |
-| app/Http/Controllers/Api/MessageController.php:69 | `where('is_read', 0)` bound int | same risk |
+| 2026_04_21_000001, 2026_08_25_000001, 2026_09_07_000001, 2026_10_05_000001 | MySQL-only `MODIFY` | Driver-guarded 2026-11-02: skip on pgsql, MySQL unchanged. CODE-VERIFIED |
+| 2026_04_21_000002 `fixForeignKeyIfNeeded()` | MySQL-only `DATABASE()` lookup | Helper skips on pgsql; table create still runs. CODE-VERIFIED |
+| app/Http/Controllers/Api/MessageController.php:47,69,151,172,203,234 | `is_read = 0` reads | Live `order_messages.is_read` is smallint (confirmed 2026-11-02), so plain `= 0` is valid on PG. No change. CODE-VERIFIED |
+| idx_om_read_order (`is_read`,`order_id`), migration 2026_10_30_000001 | Unread counts filter on plain `is_read = 0`, so PG can use this index | Index use on live UNVERIFIED (check with `EXPLAIN`) |
+| `update(['is_read' => 1])` and `'is_read' => 0` inserts app-wide (`order_messages`, `notifications`) | Int values into smallint columns | Live type smallint for both, confirmed 2026-11-02 (information_schema). Type match |
+| `purchase_orders.color_mismatch`, `color_confirmed` (reads ProductionStageService.php:639, AdminDashboardController.php:99-100) | Migration 2026_06_08_000001 declares `boolean()` (PG `boolean`), code binds 0/1 | Live type smallint default 0, confirmed 2026-11-02 (information_schema). Type match; do not re-run that migration on a fresh PG without checking |
+| 21 other 0/1 flags (qc_checklists.*, orders.qc_required/deadline_negotiated, physical_count_logs.*, materials.ai_eligible, suppliers/designs.is_active, *.is_default, etc.) | Raw `CASE WHEN passed=1` / `stock_adjusted=1` at ActivityLogController.php:76,86; model `boolean` casts | Live type smallint for all 21, confirmed 2026-11-02. Type match |
+| `recommendation_guidance.is_active` (Model RecommendationGuidance.php:22, controller :25,34,45) | Only live `boolean` flag (migration 2026_10_13_000001 `boolean()`); code uses `where(..., true)`, model cast, no raw 0/1 | No change. PG UNVERIFIED: smoke test create/retire a guidance rule, then AI recommend |
 | app/Http/Controllers/Api/MessageController.php:172 | `$userId` concatenated into SQL (int, low risk) | CODE-VERIFIED |
 | app/Support/Sql.php:16-44 | DATE_FORMAT / JSON_OBJECT / CAST UNSIGNED / LIKE have PG branches | CODE-VERIFIED safe |
 | 2026_10_14, 2026_10_16, 2026_10_17_000003, 2026_10_22_000002 | driver-guarded | CODE-VERIFIED |
@@ -110,9 +115,27 @@ Tests run on MySQL only; PG behaviour of all queries is UNVERIFIED.
 Rollback triggers: login fails for any role, CORS errors in browser, 5xx on order create or draft save, previews 404, AI returns quantities/prices.
 Rollback: Vercel "promote" previous deployment for backend and frontend (UNVERIFIED, check docs); restore old FRONTEND_URL/APP_URL/VITE_API_URL; point DNS back or leave `*.vercel.app` live; DB restore only if a migration damaged data (all listed migrations are additive, so `migrate:rollback --path` of one file is preferred over a full restore).
 
+## 9. Scheduled automations on Vercel (added 2026-11-02)
+
+Vercel runs no `schedule:run`, so both daily jobs in `app/Support/ScheduledJobs.php` need an HTTP trigger: `vfrb:daily-digest` (07:00: low-stock digest, auto RFQs, deadline reminders, overdue flags, client supply/return, weekly count) and `vfrb:kpi-snapshot` (23:55; Dashboard also captures it lazily). Times are in APP_TIMEZONE.
+
+`GET|POST /api/cron/run` with `Authorization: Bearer <CRON_SECRET>` (constant-time compare, else 401) runs every job whose time today has passed; a cron run already in progress returns 409. Both jobs dedupe, so a repeat call adds nothing. The digest holds a cache lock (`vfrb:daily-digest`, 300 s TTL) shared by Run Now, cron, `schedule:run` and the CLI: a second run is skipped (Run Now: 200 `skipped: true`; cron: listed in `skipped`; CLI: exit 75). Locks use CACHE_STORE (`database` needs the `cache_locks` table on live: UNVERIFIED). Tests: `tests/Feature/AutomationCronTest.php`. CODE-VERIFIED.
+
+Proposed backend `vercel.json` entry (NOT applied). Vercel cron is UTC and, per its docs, sends CRON_SECRET as the Bearer header (UNVERIFIED, check docs). Times below assume APP_TIMEZONE=Asia/Manila (UTC+8, UNVERIFIED on live); with UTC use `5 7 * * *` and `57 23 * * *`.
+
+```json
+"crons": [
+  { "path": "/api/cron/run", "schedule": "5 23 * * *" },
+  { "path": "/api/cron/run", "schedule": "57 15 * * *" }
+]
+```
+
+UNVERIFIED, check docs: cron count and frequency limits on the current Vercel plan (Hobby may allow only daily runs with loose timing; the endpoint tolerates late runs, but a run before 07:00 local skips the digest), and whether cron hits the production deployment only. `/api/cron/run` reaches `api/index.php` via the catch-all route (`vercel.json:16`, CODE-VERIFIED). Smoke after deploy: call it once with the secret, expect 200 and `ran` listing the due jobs; call again, no new notifications.
+
+Automation decisions (2026-11-02): pending orders past the customer's preferred date flag managers as `order_review_overdue` and get no customer 7-day reminder until an agreed date exists; the dashboard shows a lasting Overdue count (`App\Support\Overdue`); Cutting sends the instant low-stock alert. Customer reminder for an overdue invoice: recommended, pending VFRB confirmation (not built). Late orders: no automatic customer message.
+
 ## Open risks
 
 - Live migration state conflicts between task brief and repo docs (§2).
 - Duplicate orders index origin unknown (§2).
-- PG `is_read` type and unguarded MySQL migrations (§3).
 - CLOUDINARY_CLOUD_NAME on Vercel (§4). Display_errors and body limits on Vercel (§5, §6).

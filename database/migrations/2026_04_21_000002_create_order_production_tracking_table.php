@@ -90,6 +90,10 @@ return new class extends Migration
     // ── Helper: fix the FK on a table that already exists without the FK ──
     private function fixForeignKeyIfNeeded(): void
     {
+        if (\Illuminate\Support\Facades\DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only DATABASE() lookup; Postgres schema is managed separately.
+        }
+
         // Check if updated_by FK already exists
         $hasFK = \Illuminate\Support\Facades\DB::select("
             SELECT CONSTRAINT_NAME

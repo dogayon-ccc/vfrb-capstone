@@ -43,6 +43,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         // Guard: if the table doesn't exist yet on some environment (e.g.
         // a fresh database that hasn't run the original migration), skip
         // silently — the ORIGINAL migration file should be fixed
@@ -65,6 +69,10 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         // Reverting to the original 5-value enum would be actively unsafe
         // if any 'segregation' or 'pressing' rows exist by the time someone
         // rolls back — MySQL would truncate them. Refuse to roll back

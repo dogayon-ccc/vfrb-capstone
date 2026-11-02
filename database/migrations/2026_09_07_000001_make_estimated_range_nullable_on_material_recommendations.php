@@ -43,6 +43,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         DB::statement(
             "ALTER TABLE `material_recommendations` " .
             "MODIFY `estimated_range` VARCHAR(120) NULL " .
@@ -52,6 +56,10 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         // Reversible only if every existing row already has a non-null
         // value — true immediately after this migration runs, but not
         // guaranteed later if new NULL rows have since been inserted.

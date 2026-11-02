@@ -10,6 +10,10 @@ return new class extends Migration
 {
     public function up(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         DB::statement("
             ALTER TABLE orders
             MODIFY COLUMN status
@@ -31,6 +35,10 @@ return new class extends Migration
 
     public function down(): void
     {
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            return; // MySQL-only MODIFY; Postgres schema is managed separately.
+        }
+
         DB::statement("UPDATE orders SET status = 'confirmed' WHERE status IN ('pattern','packing')");
         DB::statement("
             ALTER TABLE orders
