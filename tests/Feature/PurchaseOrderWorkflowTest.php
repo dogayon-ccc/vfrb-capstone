@@ -48,6 +48,7 @@ class PurchaseOrderWorkflowTest extends TestCase
         $this->patchJson("/api/admin/purchase-orders/{$id}/receive")->assertStatus(422);
 
         $this->assertEquals(25, (float) $m->fresh()->quantity_in_stock);
+        $this->assertSame(1, DB::table('inventory_logs')->where(['material_id' => $m->material_id, 'type' => 'stock_in'])->count());
     }
 
     public function test_a_colour_mismatch_holds_cutting_until_a_manager_confirms(): void

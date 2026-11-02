@@ -30,6 +30,11 @@ return [
     // Used for post-login redirects. Read via config() so it survives `php artisan config:cache`.
     'frontend_url' => env('FRONTEND_URL', 'http://localhost:5173'),
 
+    // Shared secret for GET|POST /api/cron/run (sent as Authorization: Bearer). Unset = endpoint always 401.
+    'cron' => [
+        'secret' => env('CRON_SECRET'),
+    ],
+
     // Set at deploy time; shown by GET /api/version.
     'release' => [
         'sha'       => env('APP_RELEASE'),

@@ -831,7 +831,7 @@ class OrderController extends Controller
         if (isset($fields['status'])) {
             $statusMessage = $fields['status'] === 'cancelled' && $request->filled('notes')
                 ? "Your order #{$id} was cancelled. Reason: {$request->input('notes')}"
-                : "Your order #{$id} status has been updated to ".ucfirst($fields['status']).'.'
+                : "Your order #{$id} status has been updated to ".OrderStatusLabel::for($fields['status']).'.'
                     .($fields['status'] === 'confirmed' && $request->filled('notes') ? " Note from VFRB: {$request->input('notes')}" : '');
             // Production stages (pattern ... packing) are never sent to the client.
             if (in_array($fields['status'], ['confirmed', 'completed', 'cancelled'], true)) {

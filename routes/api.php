@@ -78,6 +78,9 @@ use Illuminate\Support\Facades\Route;
 // confirm the system is up and talking to its database.
 Route::get('/version', [VersionController::class, 'show']);
 
+// ── Cron (serverless has no schedule:run) — CRON_SECRET bearer, runs the due daily jobs ──
+Route::match(['get', 'post'], '/cron/run', [AutomationController::class, 'cron'])->middleware('throttle:10,1');
+
 // ── Customer auth ─────────────────────────────────────────────
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:10,1');
 // Self-registration is disabled: an Administrator creates customer accounts (POST /api/admin/users).

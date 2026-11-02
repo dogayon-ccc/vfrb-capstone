@@ -833,6 +833,10 @@ class ProductionStageService
             if ($item['low_stock'] || $item['over_issued']) {
                 $lowStock[] = $item;
             }
+            // Same instant alert as an inventory stock-out (client-supplied material never reaches here).
+            if ($item['low_stock']) {
+                (new LowStockAlert)->notify($material->material_name, $after, (float) $material->reorder_threshold, $material->unit);
+            }
         }
 
         Log::info("Deduction complete — Order #{$orderId} — ".count($log).' materials deducted');

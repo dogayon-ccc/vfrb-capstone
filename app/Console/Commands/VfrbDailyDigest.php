@@ -29,9 +29,12 @@ namespace App\Console\Commands;
 
 use App\Http\Controllers\Api\PhysicalCountController;
 use App\Services\ClientMaterialService;
+use App\Services\ProductionStageService;
 use App\Support\OrderStatusLabel;
+use App\Support\Overdue;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class VfrbDailyDigest extends Command
@@ -40,21 +43,54 @@ class VfrbDailyDigest extends Command
 
     protected $description = 'Low-stock digest, auto-suggested RFQs, deadline reminders, overdue flags, client supply alerts and the weekly count reminder';
 
+    // One run at a time across Run Now, the cron endpoint, schedule:run and the CLI; the TTL frees a lock left by a killed run.
+    public const LOCK = 'vfrb:daily-digest';
+
+    public const LOCK_SECONDS = 300;
+
+    public const BUSY = 75; // sysexits EX_TEMPFAIL; 1 and 2 are Symfony's FAILURE and INVALID
+
     public function handle(): int
     {
-        $summary = [
-            'low_stock_digest' => $this->lowStockDigest(),
-            'rfqs_auto_created' => $this->autoSuggestRfqs(),
-            'deadline_reminders' => $this->deadlineReminders(),
-            'overdue_flags' => $this->overdueAlerts(),
-            'client_supply_orders' => $this->clientSupplyAlert(),
-            'client_returns_due' => $this->clientReturnAlert(),
-            'weekly_count_due' => $this->weeklyCountReminder(),
-        ];
+        $lock = Cache::lock(self::LOCK, self::LOCK_SECONDS);
+        if (! $lock->get()) {
+            $this->warn('VFRB daily digest skipped: another run is in progress.');
 
-        $this->info('VFRB daily digest complete: '.json_encode($summary));
+            return self::BUSY;
+        }
+
+        try {
+            $summary = [
+                'low_stock_digest' => $this->lowStockDigest(),
+                'rfqs_auto_created' => $this->autoSuggestRfqs(),
+                'deadline_reminders' => $this->deadlineReminders(),
+                'overdue_flags' => $this->overdueAlerts(),
+                'client_supply_orders' => $this->clientSupplyAlert(),
+                'client_returns_due' => $this->clientReturnAlert(),
+                'weekly_count_due' => $this->weeklyCountReminder(),
+            ];
+        } finally {
+            $lock->release();
+        }
+
+        $this->info(self::SUMMARY_PREFIX.json_encode($summary));
 
         return self::SUCCESS;
+    }
+
+    // What one run sent, each a count of new items (0 = nothing new, often because today's alert already went out).
+    public const SUMMARY_KEYS = ['low_stock_digest', 'rfqs_auto_created', 'deadline_reminders', 'overdue_flags',
+        'client_supply_orders', 'client_returns_due', 'weekly_count_due'];
+
+    private const SUMMARY_PREFIX = 'VFRB daily digest complete: ';
+
+    /** @return array<string,int>|null the summary line of this command's output, every key present; null if absent */
+    public static function parseSummary(string $output): ?array
+    {
+        $at = strrpos($output, self::SUMMARY_PREFIX);
+        $data = $at === false ? null : json_decode(strtok(substr($output, $at + strlen(self::SUMMARY_PREFIX)), "\n"), true);
+
+        return is_array($data) ? array_map(fn ($k) => (int) ($data[$k] ?? 0), array_combine(self::SUMMARY_KEYS, self::SUMMARY_KEYS)) : null;
     }
 
     // ── 1. Low-stock digest — one notification per manager per day ─────────
@@ -183,17 +219,7 @@ class VfrbDailyDigest extends Command
     // ── 3. Deadline reminders — once per order, not daily nagging ──────────
     private function deadlineReminders(): int
     {
-        $activeStages = [
-            'pending', 'confirmed', 'pattern', 'segregation',
-            'cutting', 'sewing', 'qc', 'pressing', 'packing', 'for_delivery',
-        ];
-
-        // The agreed date wins; the customer's preferred date is only a fallback.
-        $nearDeadline = DB::table('orders')
-            ->selectRaw('orders.*, COALESCE(promised_date, target_delivery_date) as due_on')
-            ->whereIn('status', $activeStages)
-            ->whereRaw('COALESCE(promised_date, target_delivery_date) BETWEEN ? AND ?', [now()->toDateString(), now()->addDays(7)->toDateString()])
-            ->get();
+        $nearDeadline = Overdue::dueSoon(7)->get();
 
         if ($nearDeadline->isEmpty()) {
             return 0;
@@ -208,12 +234,13 @@ class VfrbDailyDigest extends Command
         $now = now();
 
         foreach ($nearDeadline as $order) {
-            // Only once per order — check no reminder was ever sent for it.
-            $alreadyNotified = DB::table('notifications')
-                ->where('type', 'deadline_reminder')
-                ->where('order_id', $order->order_id)
-                ->exists();
-            if ($alreadyNotified) {
+            // Once per order for each audience. The customer is told only once an agreed date exists (never while pending),
+            // so a reminder staff got on a pending order does not block the customer's later one.
+            $sent = DB::table('notifications')->where('type', 'deadline_reminder')->where('order_id', $order->order_id);
+            $customerDue = $order->status !== 'pending' && $order->promised_date !== null
+                && ! (clone $sent)->where('user_id', $order->user_id)->exists();
+            $staffDue = ! (clone $sent)->where('user_id', '!=', $order->user_id)->exists();
+            if (! $customerDue && ! $staffDue) {
                 continue;
             }
 
@@ -224,8 +251,7 @@ class VfrbDailyDigest extends Command
 
             $rows = [];
 
-            // Notify the customer who placed the order
-            $rows[] = [
+            if ($customerDue) $rows[] = [
                 'user_id' => $order->user_id,
                 'order_id' => $order->order_id,
                 'message' => "Your order #{$order->order_id} ({$order->garment_type}) is due {$label}. Status: ".OrderStatusLabel::for($order->status).'.',
@@ -237,12 +263,11 @@ class VfrbDailyDigest extends Command
                 'updated_at' => $now,
             ];
 
-            // Notify staff/managers
-            foreach ($managers as $userId) {
+            foreach ($staffDue ? $managers : [] as $userId) {
                 $rows[] = [
                     'user_id' => $userId,
                     'order_id' => $order->order_id,
-                    'message' => "Order #{$order->order_id} ({$order->garment_type}, {$order->quantity_ordered} pcs) is due {$label} and still in ".ucfirst($order->status).'.',
+                    'message' => "Order #{$order->order_id} ({$order->garment_type}, {$order->quantity_ordered} pcs) is due {$label} and still in ".ProductionStageService::stageLabel($order->status).'.',
                     'type' => 'deadline_reminder',
                     'title' => 'Order Deadline Approaching',
                     'is_read' => 0,
@@ -252,30 +277,32 @@ class VfrbDailyDigest extends Command
                 ];
             }
 
-            DB::table('notifications')->insert($rows);
-            $notified++;
+            if ($rows) {
+                DB::table('notifications')->insert($rows);
+                $notified++;
+            }
         }
 
         return $notified;
     }
 
-    // ── 3b. Overdue: managers are flagged once per late order and once per unpaid invoice past its due date ──
+    // ── 3b. Overdue (App\Support\Overdue): managers are flagged once per late order and once per unpaid invoice ──
+    // Pending orders get their own type, so a later "agreed date passed" flag on the same order still goes out.
     private function overdueAlerts(): int
     {
-        $today = now()->toDateString();
         $managers = DB::table('model_has_roles')->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
             ->where('roles.name', 'manager')->pluck('model_has_roles.model_id');
         $flagged = 0;
 
-        $lateOrders = DB::table('orders')->whereNotIn('status', ['completed', 'cancelled'])
-            ->whereRaw('COALESCE(promised_date, target_delivery_date) < ?', [$today])->get(['order_id', 'status', 'garment_type']);
-        foreach ($lateOrders as $o) {
-            $flagged += $this->flagOnce($managers, 'order_overdue', (int) $o->order_id, "Order #{$o->order_id} is overdue",
-                "Order #{$o->order_id} ({$o->garment_type}) passed its agreed date and is still at ".str_replace('_', ' ', $o->status).'.');
+        foreach (Overdue::orders()->get(['order_id', 'status', 'garment_type']) as $o) {
+            $flagged += $o->status === 'pending'
+                ? $this->flagOnce($managers, 'order_review_overdue', (int) $o->order_id, "Order #{$o->order_id} not reviewed yet",
+                    "Order #{$o->order_id} ({$o->garment_type}) has not been reviewed yet and the customer's preferred date has passed.")
+                : $this->flagOnce($managers, 'order_overdue', (int) $o->order_id, "Order #{$o->order_id} is overdue",
+                    "Order #{$o->order_id} ({$o->garment_type}) passed its agreed date and is still at ".ProductionStageService::stageLabel($o->status).'.');
         }
 
-        $lateInvoices = DB::table('invoices')->where('status', 'issued')->whereNotNull('due_date')->where('due_date', '<', $today)
-            ->get(['order_id', 'invoice_number', 'due_date']);
+        $lateInvoices = Overdue::invoices()->get(['order_id', 'invoice_number', 'due_date']);
         foreach ($lateInvoices as $i) {
             $flagged += $this->flagOnce($managers, 'invoice_overdue', (int) $i->order_id, "{$i->invoice_number} is overdue",
                 "{$i->invoice_number} for order #{$i->order_id} was due ".Carbon::parse($i->due_date)->toDateString().' and is still unpaid.');

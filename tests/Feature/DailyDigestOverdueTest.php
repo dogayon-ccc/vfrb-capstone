@@ -75,4 +75,40 @@ class DailyDigestOverdueTest extends TestCase
         $this->assertStringContainsString("#{$id}", $message);
         $this->assertStringContainsString('40 yard', $message);
     }
+
+    public function test_orders_up_to_cutting_missing_client_material_get_one_supply_alert_a_day(): void
+    {
+        if (! ClientMaterialService::ready()) {
+            $this->markTestSkipped('Run 2026_10_21_000001_add_client_material_ledger on vfrb_test first.');
+        }
+        $material = Material::create([
+            'material_code' => Material::nextCode('Fabric'), 'material_name' => 'Client Twill '.uniqid(), 'category' => 'Fabric',
+            'unit' => 'yard', 'quantity_in_stock' => 0, 'reorder_threshold' => 0, 'unit_cost' => 0,
+        ]);
+        DB::table('materials')->where('material_id', $material->material_id)->update(['ownership' => 'client']);
+        $accept = fn (int $orderId, ?float $required) => DB::table('material_recommendations')->insert([
+            'order_id' => $orderId, 'material_id' => $material->material_id, 'material_name' => $material->material_name, 'category' => 'Fabric',
+            'unit' => 'yard', 'status' => 'accepted', 'customer_accepted' => 1, 'actual_qty_issued' => $required, 'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $short = $this->order('cutting', now()->addDays(30)->toDateString());
+        $accept($short, 50);
+        (new ClientMaterialService)->insert($short, $material->material_id, 'received', 20, null, 1);
+        $nothing = $this->order('pattern', now()->addDays(30)->toDateString());
+        $accept($nothing, null);
+        $pastCutting = $this->order('sewing', now()->addDays(30)->toDateString());
+        $accept($pastCutting, 50);
+
+        $this->artisan('vfrb:daily-digest')->assertSuccessful();
+        $this->artisan('vfrb:daily-digest')->assertSuccessful();
+
+        $rows = DB::table('notifications')->where('type', 'client_supply')->where('user_id', 1)->whereDate('date_sent', today())->get();
+        $this->assertCount(1, $rows);
+        $this->assertSame('Client Materials Missing', $rows[0]->title);
+        $this->assertStringContainsString("#{$short} ", $rows[0]->message);
+        $this->assertStringContainsString('(30 yard) short', $rows[0]->message);
+        $this->assertStringContainsString("#{$nothing} ", $rows[0]->message);
+        $this->assertStringContainsString('nothing delivered yet', $rows[0]->message);
+        $this->assertStringNotContainsString("#{$pastCutting} ", $rows[0]->message);
+    }
 }

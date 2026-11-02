@@ -309,6 +309,12 @@ class AdminDashboardController extends Controller
                     'low_stock_count'     => $lowStockCount,
                     'low_stock_materials' => $lowStockMaterials,
                 ],
+                // Needs attention: stays until the order is completed/cancelled or the invoice is paid (App\Support\Overdue).
+                // No total: StationScope strips `invoices` for station staff, and a total would still reveal it.
+                'overdue' => [
+                    'orders'   => \App\Support\Overdue::orders()->count(),
+                    'invoices' => \App\Support\Overdue::invoices()->count(),
+                ],
                 'production' => [
                     'output_today'   => $outputToday,
                     'qc_blocked'     => $qcBlockedCount,

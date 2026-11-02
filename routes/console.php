@@ -22,9 +22,9 @@ Artisan::command('inspire', function () {
 //   Linux/Railway cron:  * * * * * php artisan schedule:run >> /dev/null 2>&1
 //   Windows (Laragon):   Task Scheduler → run every minute:
 //                         php C:/laragon/www/vfrb-capstone/artisan schedule:run
-Schedule::command('vfrb:daily-digest')->dailyAt('07:00');
+// Times live in App\Support\ScheduledJobs, shared with the HTTP cron endpoint (Vercel has no schedule:run).
+foreach (\App\Support\ScheduledJobs::DAILY as $command => $at) {
+    Schedule::command($command)->dailyAt($at);
+}
 
-// KPI snapshot for Dashboard sparklines — also fires lazily on dashboard
-// load, so this is a backstop, not the only trigger. Runs late so the
-// day's revenue/production figures are settled.
-Schedule::command('vfrb:kpi-snapshot')->dailyAt('23:55');
+// vfrb:kpi-snapshot (23:55) is a backstop: the Dashboard also captures it lazily on load.

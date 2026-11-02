@@ -68,4 +68,13 @@ class InventoryStockOutTest extends TestCase
         $this->assertSame(1, $this->logCount());
         $this->assertEquals(-5, DB::table('inventory_logs')->where('material_id', $this->materialId)->value('change_qty'));
     }
+
+    public function test_raising_the_reorder_level_above_the_stock_saves_and_sends_the_low_stock_alert(): void
+    {
+        $this->putJson("/api/admin/materials/{$this->materialId}", ['reorder_threshold' => 10])
+            ->assertOk()
+            ->assertJson(['reorder_threshold' => 10]);
+
+        $this->assertTrue(DB::table('notifications')->where('type', 'low_stock')->where('message', 'like', 'Test Thread stock (%')->exists());
+    }
 }

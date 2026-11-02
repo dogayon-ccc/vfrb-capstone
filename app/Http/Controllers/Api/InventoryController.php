@@ -258,7 +258,7 @@ class InventoryController extends Controller
         $updated = DB::table('materials')->where('material_id', $id)->first();
 
         if (!\App\Services\ClientMaterialService::isClientOwned($updated) && $updated->quantity_in_stock <= $updated->reorder_threshold) {
-            $this->notifyLowStock($updated->material_id, $updated->material_name, $updated->quantity_in_stock, $updated->reorder_threshold, $updated->unit);
+            (new \App\Services\LowStockAlert)->notify($updated->material_name, (float) $updated->quantity_in_stock, (float) $updated->reorder_threshold, $updated->unit);
         }
 
         return response()->json($updated);
@@ -481,7 +481,7 @@ class InventoryController extends Controller
 
         $isLowStock = $newStock <= $material->reorder_threshold;
         if ($isLowStock) {
-            $this->notifyLowStock($material->material_id, $material->material_name, $newStock, $material->reorder_threshold, $material->unit);
+            (new \App\Services\LowStockAlert)->notify($material->material_name, $newStock, $material->reorder_threshold, $material->unit);
         }
 
         return response()->json([
@@ -490,48 +490,6 @@ class InventoryController extends Controller
             'quantity_in_stock' => $newStock,
             'low_stock'         => $isLowStock,
         ]);
-    }
-
-    // ── Private: low-stock notification (deduped) ─────────────────────────────
-    // Fires whenever a stock movement leaves a material at/below reorder_threshold.
-    // Deduped per material within a 24h window so every stock-out on an already-low
-    // item doesn't spam a fresh notification row.
-    private function notifyLowStock(int $materialId, string $materialName, float $stock, float $threshold, string $unit): void
-    {
-        $recentlyNotified = DB::table('notifications')
-            ->where('type', 'low_stock')
-            ->where('message', 'like', "{$materialName}%")
-            ->where('date_sent', '>=', now()->subDay())
-            ->exists();
-
-        if ($recentlyNotified) {
-            return;
-        }
-
-        $managers = DB::table('model_has_roles')
-            ->join('roles', 'model_has_roles.role_id', '=', 'roles.id')
-            ->whereIn('roles.name', ['manager', 'staff'])
-            ->pluck('model_has_roles.model_id');
-
-        $message = "{$materialName} stock ({$stock} {$unit}) is below reorder threshold ({$threshold} {$unit}).";
-        $now     = now();
-
-        foreach ($managers as $userId) {
-            DB::table('notifications')->insert([
-                'user_id'    => $userId,
-                'order_id'   => null,
-                'message'    => $message,
-                'type'       => 'low_stock',
-                'title'      => 'Low Stock Alert',
-                'is_read'    => 0,
-                'date_sent'  => $now,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-        }
-        // Same 24-hour dedupe as the in-app alert above.
-        \App\Support\EmailNotify::users($managers, new \App\Notifications\PortalMailNotification(
-            "Low stock: {$materialName}", [$message, 'Reorder or record incoming stock to clear this alert.'], 'Open inventory', '/admin/inventory'));
     }
 
     // ratesIndex()/ratesUpsert()/ratesDestroy() removed Aug 28 2026 — no

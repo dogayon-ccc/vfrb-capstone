@@ -257,15 +257,8 @@ class AdminReportController extends Controller
                 ];
             });
 
-        // Near-deadline orders still in production
-        $nearDeadline = DB::table('orders')
-            ->whereIn('status', [
-                'pending', 'confirmed', 'pattern', 'segregation',
-                'cutting', 'sewing', 'qc', 'pressing', 'packing',
-            ])
-            ->whereNotNull('target_delivery_date')
-            ->where('target_delivery_date', '<=', now()->addDays(7)->toDateString())
-            ->pluck('order_id');
+        // Same 7-day window as the digest's deadline reminders; past-due orders are the dashboard's Overdue count.
+        $nearDeadline = \App\Support\Overdue::dueSoon(7)->orderBy('order_id')->pluck('order_id');
 
         if ($nearDeadline->isNotEmpty()) {
             $alerts[] = [
@@ -274,8 +267,7 @@ class AdminReportController extends Controller
                 'material_name'     => null,
                 'category'          => null,
                 'unit'              => null,
-                'message'           => "{$nearDeadline->count()} order(s) have delivery deadlines within 7 days "
-                                       . "and are still in production.",
+                'message'           => "{$nearDeadline->count()} order(s) are due within 7 days and not delivered yet.",
                 'action'            => 'Review Orders and prioritize production.',
                 'current_stock'     => 0,
                 'total_required'    => 0,
