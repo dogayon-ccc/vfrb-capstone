@@ -10,6 +10,9 @@
       "maxDuration": 60
     }
   },
+  "crons": [
+    { "path": "/api/cron/run", "schedule": "0 23 * * *" }
+  ],
   "routes": [
     { "src": "/favicon.ico", "dest": "/public/favicon.ico" },
     { "src": "/robots.txt", "dest": "/public/robots.txt" },

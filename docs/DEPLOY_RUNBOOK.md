@@ -1,6 +1,6 @@
-# VFRB backend deploy runbook (2026-11-01)
+# VFRB backend deploy runbook (2026-11-02)
 
-Read-only audit of branch `wip/oct21-overhaul` at `85dd57c`. Statuses: CODE-VERIFIED (read in this repo), UNVERIFIED (not checked here; for Vercel/Supabase/Cloudflare dashboards, check docs), BLOCKED. Nothing here is DEPLOYMENT-VERIFIED.
+Read-only audit of branch `wip/oct21-overhaul` at `0e33808`. Statuses: CODE-VERIFIED (read in this repo), UNVERIFIED (not checked here; for Vercel/Supabase/Cloudflare dashboards, check docs), BLOCKED. Nothing here is DEPLOYMENT-VERIFIED.
 
 ## 1. Environment variables (names only)
 
@@ -33,6 +33,18 @@ Must be set in the Vercel project (dashboard, UNVERIFIED which are present):
 | LOG_LEVEL | optional | logging | `error` or `warning` suggested |
 | CRON_SECRET | yes for automations | services.cron.secret | none; unset = `/api/cron/run` always 401 (§9) |
 | APP_TIMEZONE | optional (default UTC) | app.timezone | none; decides the cron UTC times in §9 |
+
+Release checklist (tick in the Vercel dashboard; names only, never paste values here):
+- [ ] APP_DEBUG=false (also pinned in `vercel.json` env; with true, 5xx JSON exposes exception text)
+- [ ] CRON_SECRET set, random, ≥16 chars (Vercel's recommendation)
+- [ ] GEMINI_MODEL=gemini-3.8-flash (VERIFIED: listed as stable on ai.google.dev/gemini-api/docs/models; gemini-3.6-flash also stable)
+- [ ] GEMINI_KEY_1 (+ _2, _3) and GEMINI_KEY_COUNT matching the number of keys set
+- [ ] CACHE_STORE=database (pinned in `vercel.json`; locks need `cache_locks`, query below)
+- [ ] FRONTEND_URL=`https://app.<domain>` (no trailing slash)
+- [ ] CLOUDINARY_CLOUD_NAME set (with CLOUDINARY_KEY/SECRET or CLOUDINARY_URL)
+- [ ] APP_TIMEZONE: check the CURRENT live value first; do not change it blindly. Laravel writes created_at in app timezone into timestamp-without-tz columns, so changing it mixes old and new rows. (The §9 cron time assumes Asia/Manila.)
+
+`cache_locks` check (Supabase SQL editor, read-only): `select to_regclass('public.cache_locks') is not null as has_table, (select count(*) from public.cache_locks) as rows;` — expect `has_table = true`. A missing table makes every cron run and Run Now fail with 500.
 
 Full list of names read by `config/*.php` (env() calls; none outside config/, CODE-VERIFIED) also includes framework defaults not used in this stack (AWS_*, REDIS_*, MEMCACHED_*, SQS_*, BEANSTALKD_*, DYNAMODB_*, PAPERTRAIL_*, LOG_SLACK_*, SLACK_*).
 
@@ -102,8 +114,8 @@ Tests run on MySQL only; PG behaviour of all queries is UNVERIFIED.
 ## 7. Gemini
 
 - Keys: `config/services.php:45-48` (GEMINI_KEY_1..3, GEMINI_KEY_COUNT), read in `app/Services/GeminiClient.php:37-39`. CODE-VERIFIED.
-- Model: already env-driven — GEMINI_MODEL (`config/services.php:49`, default `gemini-3.8-flash`) and GEMINI_FALLBACK_MODEL (`:50`). Note `GeminiClient.php:17` second-argument default is `gemini-3.6-flash`, which differs from the config default (harmless; config wins). No code change needed.
-- Guard: prompt forbids quantity/length/yardage/price (`AIController.php:812`, `:551`); customer output is whitelisted to category/unit + catalog facts via `array_intersect_key` (`AIController.php:433-446`); Studio edits are schema-validated enums (`app/Services/DesignEditValidator.php:67-73`). A server-side scan rejecting numbers/prices in free-text `ai_note` was not found here: UNVERIFIED.
+- Model: already env-driven — GEMINI_MODEL (`config/services.php:49`, default `gemini-3.8-flash`) and GEMINI_FALLBACK_MODEL (`:50`). Both gemini-3.8-flash and gemini-3.6-flash are VERIFIED stable on ai.google.dev/gemini-api/docs/models. Note `GeminiClient.php:17` second-argument default is `gemini-3.6-flash`, which differs from the config default (harmless; config wins). No code change needed.
+- Guard: prompt forbids quantity/length/yardage/price (`AIController.php:812`, `:551`); customer output is whitelisted to category/unit + catalog facts via `array_intersect_key` (`AIController.php:433-446`); Studio edits are schema-validated enums (`app/Services/DesignEditValidator.php:67-73`). Server-side scan: the strict `MaterialCatalogMatcher::isUnsafeAiText` (`:346`) rejects quantities/prices in per-material notes (`MaterialCatalogMatcher.php:165`, `MaterialRecommender.php:161`), the overall narration (`MaterialCatalogMatcher.php:173`), design-edit summaries (`AIController.php:556`) and stored notes on read (`MaterialRecommendation.php:22`). CODE-VERIFIED, covered by tests.
 
 ## 8. Deploy steps, smoke, rollback
 
@@ -113,10 +125,28 @@ Tests run on MySQL only; PG behaviour of all queries is UNVERIFIED.
 4. SSL: wait for Vercel certificates on both hosts (UNVERIFIED).
 5. Env: backend APP_URL, FRONTEND_URL, CORS_ALLOWED_ORIGINS (old origin), GOOGLE_REDIRECT_URI, MAIL_FROM_ADDRESS; frontend VITE_API_URL (Vite inlines it at build, so the frontend must be rebuilt).
 6. Redeploy backend first, then frontend (frontend needs new endpoints; SYSTEM_RECAP §10).
-7. Smoke: `GET /api/version`; login customer, manager, station, owner; owner POST → 403; station write on other stage → 403; Studio save (draft ~200 KB); file upload (≤5 MB png/pdf); customer submits order; manager sees it in admin orders; preview image loads from the new host; Google login; password-reset email link host.
+7. Smoke (tick each; use a test customer and a test order, note IDs here):
+   - [ ] `GET /api/version` shows the new APP_RELEASE/APP_DEPLOY_ID.
+   - [ ] Login works for customer, manager, staff, each station, owner (and Google login if enabled).
+   - [ ] Owner write → 403 (e.g. `POST /api/admin/recommendation-guidance`); station write on another stage → 403.
+   - [ ] Customer saves a design in Studio (draft ~200 KB) and reopens it; preview image loads from the new host.
+   - [ ] Customer submits an order; manager sees it in `GET /api/admin/orders`.
+   - [ ] AI recommend: `POST /api/customer/ai/recommend-materials {order_id}` returns raw-material types only (no quantity/price).
+   - [ ] Guidance: manager creates via `POST /api/admin/recommendation-guidance`, retires via `PUT /api/admin/recommendation-guidance/{id}` (inactive); list reflects both.
+   - [ ] `GET /api/admin/orders/{id}/ai-context` and `GET /api/admin/ai/recommendation-metrics` return 200 JSON.
+   - [ ] `GET /api/admin/activity-log` lists the order submit and guidance changes above.
+   - [ ] `GET /api/admin/dashboard` shows the Overdue count (≥ 0, never negative).
+   - [ ] Forced error returns clean JSON: `GET /api/does-not-exist` → 404 JSON, an invalid POST body → 422 JSON with `errors`; no HTML, no stack trace. A real 500 has no safe trigger route; confirm in logs that any 500 body is the fixed message (`bootstrap/app.php:120-135`, CODE-VERIFIED).
+   - [ ] File upload (≤5 MB png/pdf); password-reset email link uses the new host.
+   - [ ] Cron smoke per §9.
 
-Rollback triggers: login fails for any role, CORS errors in browser, 5xx on order create or draft save, previews 404, AI returns quantities/prices.
-Rollback: Vercel "promote" previous deployment for backend and frontend (UNVERIFIED, check docs); restore old FRONTEND_URL/APP_URL/VITE_API_URL; point DNS back or leave `*.vercel.app` live; DB restore only if a migration damaged data (all listed migrations are additive, so `migrate:rollback --path` of one file is preferred over a full restore).
+Rollback triggers: login fails for any role, CORS errors in browser, 5xx on order create or draft save, previews 404, AI returns quantities/prices, cron 401/500.
+Rollback steps:
+1. Vercel → Deployments → previous production deployment → Instant Rollback, backend first, then frontend (IDs recorded in step 1). Per Vercel docs, rollback restores that deployment's cron definitions; keep the project's "Disable Cron Jobs" off unless the cron itself is the fault.
+2. Restore the old env values (FRONTEND_URL, APP_URL, CORS_ALLOWED_ORIGINS, GOOGLE_REDIRECT_URI, VITE_API_URL); env changes need a redeploy to take effect (UNVERIFIED for Instant Rollback, check docs).
+3. DNS: point `api`/`app` back or leave `*.vercel.app` live as the working origin.
+4. DB: no restore unless a migration damaged data; all listed migrations are additive, so `migrate:rollback --path=<one file>` (user runs it) beats a full Supabase restore.
+5. Record what failed and the time in this file.
 
 ## 9. Scheduled automations on Vercel (added 2026-11-02)
 
@@ -124,16 +154,17 @@ Vercel runs no `schedule:run`, so both daily jobs in `app/Support/ScheduledJobs.
 
 `GET|POST /api/cron/run` with `Authorization: Bearer <CRON_SECRET>` (constant-time compare, else 401) runs every job whose time today has passed; a cron run already in progress returns 409. Both jobs dedupe, so a repeat call adds nothing. The digest holds a cache lock (`vfrb:daily-digest`, 300 s TTL) shared by Run Now, cron, `schedule:run` and the CLI: a second run is skipped (Run Now: 200 `skipped: true`; cron: listed in `skipped`; CLI: exit 75). Locks use CACHE_STORE (`database` needs the `cache_locks` table on live: UNVERIFIED). Tests: `tests/Feature/AutomationCronTest.php`. CODE-VERIFIED.
 
-Proposed backend `vercel.json` entry (NOT applied). Vercel cron is UTC and, per its docs, sends CRON_SECRET as the Bearer header (UNVERIFIED, check docs). Times below assume APP_TIMEZONE=Asia/Manila (UTC+8, UNVERIFIED on live); with UTC use `5 7 * * *` and `57 23 * * *`.
+Backend `vercel.json` entry (added 2026-11-02, takes effect on the next production deploy): one daily call, `{ "path": "/api/cron/run", "schedule": "0 23 * * *" }` = 07:00 Asia/Manila (UTC+8, no DST).
 
-```json
-"crons": [
-  { "path": "/api/cron/run", "schedule": "5 23 * * *" },
-  { "path": "/api/cron/run", "schedule": "57 15 * * *" }
-]
-```
+Vercel facts (docs read 2026-11-02: cron-jobs/usage-and-pricing, updated 2026-07-15; manage-cron-jobs, updated 2026-08-11):
+- Hobby: 100 cron jobs per project, at most once per day (more frequent expressions fail the deploy), fired anytime within the hour (±59 min). So the call lands 07:00–07:59 Manila, never before 07:00. VERIFIED (docs).
+- CRON_SECRET is sent automatically as `Authorization: Bearer <CRON_SECRET>`, matching `AutomationController::cron` (`bearerToken()` + `hash_equals`). VERIFIED (docs) + CODE-VERIFIED.
+- No retries on failure; delivery is best effort and may duplicate. Cron does not follow redirects. Both jobs dedupe and the run lock covers overlap. VERIFIED (docs).
+- Schedule is UTC; HTTP method is GET; cron targets the production deployment only: UNVERIFIED (not stated on the pages read). Endpoint accepts GET and POST either way.
 
-UNVERIFIED, check docs: cron count and frequency limits on the current Vercel plan (Hobby may allow only daily runs with loose timing; the endpoint tolerates late runs, but a run before 07:00 local skips the digest), and whether cron hits the production deployment only. `/api/cron/run` reaches `api/index.php` via the catch-all route (`vercel.json:16`, CODE-VERIFIED). Smoke after deploy: call it once with the secret, expect 200 and `ran` listing the due jobs; call again, no new notifications.
+Timezone (CODE-VERIFIED): `ScheduledJobs::due()` compares `now()->format('H:i')` with the job times; `now()` uses `app.timezone` (= APP_TIMEZONE, default UTC, `config/app.php:21`). With APP_TIMEZONE=Asia/Manila the 23:00 UTC call is 07:xx local → digest runs, dated the Manila day. If live APP_TIMEZONE is UTC, the call is 23:xx UTC → digest still runs but dated the previous Manila day; live value UNVERIFIED, set it per §1. `vfrb:kpi-snapshot` (23:55) is never due at 07:xx, so on Hobby it relies on the Dashboard's lazy capture; a second daily cron at `55 15 * * *` would fire 23:55–00:54 Manila and could miss the day, so it is not added.
+
+`/api/cron/run` reaches `api/index.php` via the catch-all route (CODE-VERIFIED). Smoke after deploy: `curl -H "Authorization: Bearer $CRON_SECRET" https://api.<domain>/api/cron/run` → 200 with `ran` listing `vfrb:daily-digest` (if after 07:00 local); call again → 200, no new notifications; without the header → 401. Next morning: Vercel → Settings → Cron Jobs → View Logs shows one 200.
 
 Automation decisions (2026-11-02): pending orders past the customer's preferred date flag managers as `order_review_overdue` and get no customer 7-day reminder until an agreed date exists; the dashboard shows a lasting Overdue count (`App\Support\Overdue`); Cutting sends the instant low-stock alert. Customer reminder for an overdue invoice: recommended, pending VFRB confirmation (not built). Late orders: no automatic customer message.
 
