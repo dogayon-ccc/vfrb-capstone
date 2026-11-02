@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Console\Commands\VfrbDailyDigest;
 use App\Models\User;
+use App\Support\BusinessDay;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -63,13 +64,13 @@ class AutomationCronTest extends TestCase
 
     public function test_only_jobs_whose_time_has_passed_run(): void
     {
-        $this->travelTo(Carbon::parse('2026-11-10 06:30'));
+        $this->travelTo(Carbon::parse('2026-11-10 06:30', BusinessDay::TIMEZONE));
         $this->cron()->assertOk()->assertExactJson(['message' => 'Cron run complete.', 'ran' => [], 'skipped' => []]);
 
-        $this->travelTo(Carbon::parse('2026-11-10 08:00'));
+        $this->travelTo(Carbon::parse('2026-11-10 08:00', BusinessDay::TIMEZONE));
         $this->assertSame(['vfrb:daily-digest'], array_keys($this->cron()->assertOk()->json('ran')));
 
-        $this->travelTo(Carbon::parse('2026-11-10 23:58'));
+        $this->travelTo(Carbon::parse('2026-11-10 23:58', BusinessDay::TIMEZONE));
         $this->assertSame(['vfrb:daily-digest', 'vfrb:kpi-snapshot'], array_keys($this->cron()->assertOk()->json('ran')));
         $this->assertSame(1, DB::table('kpi_daily_snapshots')->whereDate('snapshot_date', '2026-11-10')->count());
     }
@@ -77,7 +78,7 @@ class AutomationCronTest extends TestCase
     public function test_running_twice_adds_no_notifications_rfqs_or_snapshots(): void
     {
         // Monday late evening: every digest section and the KPI snapshot are due.
-        $this->travelTo(Carbon::parse('2026-11-09 23:58'));
+        $this->travelTo(Carbon::parse('2026-11-09 23:58', BusinessDay::TIMEZONE));
         DB::table('materials')->insert([
             'material_code' => uniqid('TST-'), 'material_name' => 'Cron Test Thread', 'category' => 'Thread', 'unit' => 'cone',
             'quantity_in_stock' => 1, 'reorder_threshold' => 10, 'unit_cost' => 10, 'created_at' => now(), 'updated_at' => now(),
@@ -101,7 +102,7 @@ class AutomationCronTest extends TestCase
 
     public function test_an_overlapping_run_is_refused(): void
     {
-        $this->travelTo(Carbon::parse('2026-11-10 08:00'));
+        $this->travelTo(Carbon::parse('2026-11-10 08:00', BusinessDay::TIMEZONE));
         $lock = Cache::lock('vfrb:cron-run', 300);
         $lock->get();
         $before = $this->automationRows();
@@ -138,7 +139,7 @@ class AutomationCronTest extends TestCase
     public function test_run_now_releases_the_lock_so_the_next_click_and_cron_still_run(): void
     {
         Sanctum::actingAs(User::findOrFail(1), ['*']);
-        $this->travelTo(Carbon::parse('2026-11-10 08:00'));
+        $this->travelTo(Carbon::parse('2026-11-10 08:00', BusinessDay::TIMEZONE));
 
         $this->postJson('/api/admin/automation/run-digest')->assertOk()->assertJson(['skipped' => false]);
         $this->postJson('/api/admin/automation/run-digest')->assertOk()->assertJson(['skipped' => false]);
@@ -149,7 +150,7 @@ class AutomationCronTest extends TestCase
     public function test_run_now_reports_what_it_sent_and_zero_on_a_repeat(): void
     {
         Sanctum::actingAs(User::findOrFail(1), ['*']);
-        $this->travelTo(Carbon::parse('2026-11-10 08:00'));
+        $this->travelTo(Carbon::parse('2026-11-10 08:00', BusinessDay::TIMEZONE));
         DB::table('materials')->insert([
             'material_code' => uniqid('TST-'), 'material_name' => 'Run Now Thread', 'category' => 'Thread', 'unit' => 'cone',
             'quantity_in_stock' => 1, 'reorder_threshold' => 10, 'unit_cost' => 10, 'created_at' => now(), 'updated_at' => now(),
@@ -166,7 +167,7 @@ class AutomationCronTest extends TestCase
 
     public function test_cron_skips_a_digest_that_run_now_is_running_but_still_runs_the_other_jobs(): void
     {
-        $this->travelTo(Carbon::parse('2026-11-10 23:58'));
+        $this->travelTo(Carbon::parse('2026-11-10 23:58', BusinessDay::TIMEZONE));
         $lock = $this->holdDigestLock();
 
         $response = $this->cron()->assertOk()->assertJson(['skipped' => ['vfrb:daily-digest']]);
@@ -188,7 +189,7 @@ class AutomationCronTest extends TestCase
 
     public function test_kpi_snapshot_command_writes_one_row_per_day(): void
     {
-        $this->travelTo(Carbon::parse('2026-11-10 23:55'));
+        $this->travelTo(Carbon::parse('2026-11-10 23:55', BusinessDay::TIMEZONE));
 
         $this->artisan('vfrb:kpi-snapshot')->assertSuccessful();
         $this->artisan('vfrb:kpi-snapshot')->assertSuccessful();

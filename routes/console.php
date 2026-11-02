@@ -24,7 +24,7 @@ Artisan::command('inspire', function () {
 //                         php C:/laragon/www/vfrb-capstone/artisan schedule:run
 // Times live in App\Support\ScheduledJobs, shared with the HTTP cron endpoint (Vercel has no schedule:run).
 foreach (\App\Support\ScheduledJobs::DAILY as $command => $at) {
-    Schedule::command($command)->dailyAt($at);
+    Schedule::command($command)->dailyAt($at)->timezone(\App\Support\BusinessDay::TIMEZONE);
 }
 
 // vfrb:kpi-snapshot (23:55) is a backstop: the Dashboard also captures it lazily on load.

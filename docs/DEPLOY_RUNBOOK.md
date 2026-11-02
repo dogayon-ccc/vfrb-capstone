@@ -32,7 +32,7 @@ Must be set in the Vercel project (dashboard, UNVERIFIED which are present):
 | VFRB_LEAD_DAYS_PER_100 | optional | vfrb.lead_days_per_100 | none |
 | LOG_LEVEL | optional | logging | `error` or `warning` suggested |
 | CRON_SECRET | yes for automations | services.cron.secret | none; unset = `/api/cron/run` always 401 (§9) |
-| APP_TIMEZONE | optional (default UTC) | app.timezone | none; decides the cron UTC times in §9 |
+| APP_TIMEZONE | optional (default UTC) | app.timezone | none; no longer affects §9 cron times (Manila is fixed in code); still sets the zone of written timestamps |
 
 Release checklist (tick in the Vercel dashboard; names only, never paste values here):
 - [ ] APP_DEBUG=false (also pinned in `vercel.json` env; with true, 5xx JSON exposes exception text)
@@ -42,7 +42,7 @@ Release checklist (tick in the Vercel dashboard; names only, never paste values 
 - [ ] CACHE_STORE=database (pinned in `vercel.json`; locks need `cache_locks`, query below)
 - [ ] FRONTEND_URL=`https://app.<domain>` (no trailing slash)
 - [ ] CLOUDINARY_CLOUD_NAME set (with CLOUDINARY_KEY/SECRET or CLOUDINARY_URL)
-- [ ] APP_TIMEZONE: check the CURRENT live value first; do not change it blindly. Laravel writes created_at in app timezone into timestamp-without-tz columns, so changing it mixes old and new rows. (The §9 cron time assumes Asia/Manila.)
+- [ ] APP_TIMEZONE: check the CURRENT live value first; do not change it blindly. Laravel writes created_at in app timezone into timestamp-without-tz columns, so changing it mixes old and new rows.
 
 `cache_locks` check (Supabase SQL editor, read-only): `select to_regclass('public.cache_locks') is not null as has_table, (select count(*) from public.cache_locks) as rows;` — expect `has_table = true`. A missing table makes every cron run and Run Now fail with 500.
 
@@ -150,7 +150,7 @@ Rollback steps:
 
 ## 9. Scheduled automations on Vercel (added 2026-11-02)
 
-Vercel runs no `schedule:run`, so both daily jobs in `app/Support/ScheduledJobs.php` need an HTTP trigger: `vfrb:daily-digest` (07:00: low-stock digest, auto RFQs, deadline reminders, overdue flags, client supply/return, weekly count) and `vfrb:kpi-snapshot` (23:55; Dashboard also captures it lazily). Times are in APP_TIMEZONE.
+Vercel runs no `schedule:run`, so both daily jobs in `app/Support/ScheduledJobs.php` need an HTTP trigger: `vfrb:daily-digest` (07:00: low-stock digest, auto RFQs, deadline reminders, overdue flags, client supply/return, weekly count) and `vfrb:kpi-snapshot` (23:55; Dashboard also captures it lazily). Times are Manila time (`App\Support\BusinessDay`), independent of APP_TIMEZONE.
 
 `GET|POST /api/cron/run` with `Authorization: Bearer <CRON_SECRET>` (constant-time compare, else 401) runs every job whose time today has passed; a cron run already in progress returns 409. Both jobs dedupe, so a repeat call adds nothing. The digest holds a cache lock (`vfrb:daily-digest`, 300 s TTL) shared by Run Now, cron, `schedule:run` and the CLI: a second run is skipped (Run Now: 200 `skipped: true`; cron: listed in `skipped`; CLI: exit 75). Locks use CACHE_STORE (`database` needs the `cache_locks` table on live: UNVERIFIED). Tests: `tests/Feature/AutomationCronTest.php`. CODE-VERIFIED.
 
@@ -162,7 +162,7 @@ Vercel facts (docs read 2026-11-02: cron-jobs/usage-and-pricing, updated 2026-07
 - No retries on failure; delivery is best effort and may duplicate. Cron does not follow redirects. Both jobs dedupe and the run lock covers overlap. VERIFIED (docs).
 - Schedule is UTC; HTTP method is GET; cron targets the production deployment only: UNVERIFIED (not stated on the pages read). Endpoint accepts GET and POST either way.
 
-Timezone (CODE-VERIFIED): `ScheduledJobs::due()` compares `now()->format('H:i')` with the job times; `now()` uses `app.timezone` (= APP_TIMEZONE, default UTC, `config/app.php:21`). With APP_TIMEZONE=Asia/Manila the 23:00 UTC call is 07:xx local → digest runs, dated the Manila day. If live APP_TIMEZONE is UTC, the call is 23:xx UTC → digest still runs but dated the previous Manila day; live value UNVERIFIED, set it per §1. `vfrb:kpi-snapshot` (23:55) is never due at 07:xx, so on Hobby it relies on the Dashboard's lazy capture; a second daily cron at `55 15 * * *` would fire 23:55–00:54 Manila and could miss the day, so it is not added.
+Timezone (CODE-VERIFIED): `ScheduledJobs::due()` compares `BusinessDay::now()` (Asia/Manila) with the job times, and `routes/console.php` pins `dailyAt()` to the same zone, so the 23:00 UTC call is always 07:xx Manila and the digest runs dated the Manila day whatever APP_TIMEZONE is. Overdue checks, deadline days-left and the Monday count reminder also use the Manila date; timestamps written to rows still use app.timezone. `vfrb:kpi-snapshot` (23:55) is never due at 07:xx, so on Hobby it relies on the Dashboard's lazy capture; a second daily cron at `55 15 * * *` would fire 23:55–00:54 Manila and could miss the day, so it is not added.
 
 `/api/cron/run` reaches `api/index.php` via the catch-all route (CODE-VERIFIED). Smoke after deploy: `curl -H "Authorization: Bearer $CRON_SECRET" https://api.<domain>/api/cron/run` → 200 with `ran` listing `vfrb:daily-digest` (if after 07:00 local); call again → 200, no new notifications; without the header → 401. Next morning: Vercel → Settings → Cron Jobs → View Logs shows one 200.
 

@@ -11,7 +11,7 @@ final class Overdue
     // Open orders past their date. Pending orders have no agreed date yet, so they use the customer's preferred date.
     public static function orders(): Builder
     {
-        $today = now()->toDateString();
+        $today = BusinessDay::now()->toDateString();
 
         return DB::table('orders')
             ->whereNotIn('status', ['completed', 'cancelled'])
@@ -28,12 +28,12 @@ final class Overdue
         return DB::table('orders')
             ->selectRaw('orders.*, COALESCE(promised_date, target_delivery_date) as due_on')
             ->whereIn('status', self::OPEN_STATUSES)
-            ->whereRaw('COALESCE(promised_date, target_delivery_date) BETWEEN ? AND ?', [now()->toDateString(), now()->addDays($days)->toDateString()]);
+            ->whereRaw('COALESCE(promised_date, target_delivery_date) BETWEEN ? AND ?', [BusinessDay::now()->toDateString(), BusinessDay::now()->addDays($days)->toDateString()]);
     }
 
     // Issued, unpaid invoices past their due date.
     public static function invoices(): Builder
     {
-        return DB::table('invoices')->where('status', 'issued')->whereNotNull('due_date')->where('due_date', '<', now()->toDateString());
+        return DB::table('invoices')->where('status', 'issued')->whereNotNull('due_date')->where('due_date', '<', BusinessDay::now()->toDateString());
     }
 }

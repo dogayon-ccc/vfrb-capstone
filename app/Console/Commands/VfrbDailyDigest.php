@@ -31,6 +31,7 @@ use App\Http\Controllers\Api\PhysicalCountController;
 use App\Services\ClientMaterialService;
 use App\Services\ProductionStageService;
 use App\Support\OrderStatusLabel;
+use App\Support\BusinessDay;
 use App\Support\Overdue;
 use Carbon\Carbon;
 use Illuminate\Console\Command;
@@ -244,7 +245,7 @@ class VfrbDailyDigest extends Command
                 continue;
             }
 
-            $daysLeft = (int) now()->startOfDay()
+            $daysLeft = (int) BusinessDay::now()->startOfDay()
                 ->diffInDays(Carbon::parse($order->due_on), false);
             $daysLeft = max(0, $daysLeft);
             $label = $daysLeft === 0 ? 'today' : "in {$daysLeft} day".($daysLeft === 1 ? '' : 's');
@@ -373,15 +374,15 @@ class VfrbDailyDigest extends Command
                 ->whereColumn('physical_count_logs.material_id', 'materials.material_id')
                 ->where('physical_count_logs.count_date', '>=', $weekStart))
             ->count();
-        if ($due === 0 || (! now()->isMonday() && now()->isWeekend())) {
+        if ($due === 0 || (! BusinessDay::now()->isMonday() && BusinessDay::now()->isWeekend())) {
             return 0;
         }
 
-        $message = now()->isMonday()
+        $message = BusinessDay::now()->isMonday()
             ? "Weekly stock count is today: {$due} VFRB-owned material(s) to count. Open Physical Count and print the count sheet."
             : "{$due} VFRB-owned material(s) are still not counted this week (count day was Monday).";
 
-        return $this->notifyStaffOnce('weekly_count', now()->isMonday() ? 'Weekly Stock Count Today' : 'Weekly Count Not Finished', $message) ? $due : 0;
+        return $this->notifyStaffOnce('weekly_count', BusinessDay::now()->isMonday() ? 'Weekly Stock Count Today' : 'Weekly Count Not Finished', $message) ? $due : 0;
     }
 
     // One notification per manager/staff per day for this type; false if it was already sent today.
