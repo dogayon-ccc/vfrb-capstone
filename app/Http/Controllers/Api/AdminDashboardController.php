@@ -214,7 +214,7 @@ class AdminDashboardController extends Controller
                 ->limit(10)
                 ->get()
                 ->map(function ($o) use ($now) {
-                    $o->days_stalled = (int) $now->diffInDays($o->stage_updated_at);
+                    $o->days_stalled = (int) abs($now->diffInDays($o->stage_updated_at)); // Carbon 3 returns a signed diff
                     return $o;
                 });
 
