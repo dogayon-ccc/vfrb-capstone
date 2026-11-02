@@ -30,6 +30,10 @@ class SecurityHeaders
         $response->headers->set('X-XSS-Protection',        '0');
         $response->headers->set('Referrer-Policy',         'strict-origin-when-cross-origin');
         $response->headers->set('Permissions-Policy',      'camera=(), microphone=(), geolocation=()');
+        // HTTPS only (proxy-aware via trustProxies), so local http dev is unaffected; no includeSubDomains.
+        if ($request->isSecure()) {
+            $response->headers->set('Strict-Transport-Security', 'max-age=31536000');
+        }
 
         // API responses are JSON — not HTML/JS — so block all content sources
         // A response that sets its own (narrower) policy keeps it — e.g. billing HTML documents.

@@ -109,6 +109,20 @@ class OrderWorkflowIntegrityTest extends TestCase
         $this->assertSame(60, (int) DB::table('order_production_tracking')->where(['order_id' => $id, 'stage' => 'cutting'])->value('qty_completed'));
     }
 
+    public function test_negative_quantities_are_rejected_and_nothing_is_logged(): void
+    {
+        $this->actAs(1);
+        $id = $this->order('cutting');
+        $this->complete($id, ['pattern', 'segregation']);
+
+        $this->log($id, 'cutting', -5)->assertStatus(422)->assertJsonValidationErrors('qty_m');
+        $this->log($id, 'cutting', 10, ['qty_s' => -10])->assertStatus(422)->assertJsonValidationErrors('qty_s');
+        $this->postJson("/api/admin/orders/{$id}/defects", ['size' => 'M', 'qty' => -1, 'reason' => 'x'])->assertStatus(422);
+
+        $this->assertSame(0, DB::table('daily_output_logs')->where(['order_id' => $id, 'stage' => 'cutting'])->count());
+        $this->assertNull(DB::table('order_production_tracking')->where(['order_id' => $id, 'stage' => 'cutting'])->value('qty_completed'));
+    }
+
     // (2) ─────────────────────────────────────────────────────────────────────
 
     public function test_manager_override_cannot_advance_past_an_unfinished_stage(): void

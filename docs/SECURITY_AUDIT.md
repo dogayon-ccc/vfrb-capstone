@@ -107,3 +107,25 @@ Laravel `mimes` checks the detected content type, not only the extension. No SVG
 | 13 | Dropped: deactivation already deletes tokens | — |
 | 14 | Confirm OutputLogController rejects an order that is not at the station's stage: VERIFIED 2026-11-02 (test added) | S |
 | 15 | Reject a QC checklist unless the order is at `qc` (422), so an early pass cannot release QC later: DONE 2026-11-02 | S |
+
+## 6. Closing pass (2026-11-02, branch `wip/oct21-overhaul` at `0eefd26`; tests on vfrb_test, 236 passing)
+| §4/§5 item | Status | Evidence |
+|---|---|---|
+| 4: customer payload sweep | DONE | `CustomerPayloadSweepTest` calls every `GET api/customer/*` route as customer 5 (with a seeded invoice, receipt, message, delivery row and recommendation) and fails on any forbidden key at any depth, or a non-empty `production_stages`. Forbidden = `StationScope::MONEY_KEYS` + `clientMoney()` keys + billing amounts (`total_amount`, `amount`, `balance_after`) + recommendation quantities + stage keys. Allowed by owner decision: `down_payment_received_at`, `payment_method`, `reference_no`, `paid_at` (the customer's own payment record, no amounts). No leaks found. Non-JSON documents (invoice/receipt HTML/PDF) are only checked for status < 500 |
+| 5.5: per-account lockout | DONE | `AuthController` login + admin login: 5 failed tries per login name + IP → 429 for 60 s; success clears the count; per-IP `throttle:10,1` kept. Tests `AuthHardeningTest::test_five_failed_logins_lock_that_account_on_this_ip_only`, `test_successful_login_clears_the_failure_count` |
+| 6: forgot-password same reply | ALREADY DONE | `AuthController::forgotPassword`; test `test_forgot_password_reply_is_identical_for_known_and_unknown_email` |
+| 7: signed email verify | ALREADY DONE | `routes/web.php` `->middleware('signed')`; test `test_email_verify_link_requires_a_valid_signature`. §2 note is outdated |
+| 8a: HSTS | DONE | `SecurityHeaders`: `Strict-Transport-Security: max-age=31536000` on HTTPS requests only (no `includeSubDomains`, so http dev and other subdomains are unaffected). Test `test_hsts_is_sent_on_https_only` |
+| 8b: localhost CORS off in production | ALREADY DONE | `config/cors.php:15`; test `test_localhost_origins_are_not_allowed_outside_local` |
+| 3: RLS on the remaining tables | DONE ON LIVE (already); migration WRITTEN, NOT APPLIED | Live check 2026-11-02 (`pg_class`): all 49 public tables owned by `postgres`, `relrowsecurity` true, `relforcerowsecurity` false; Laravel's `current_user` is `postgres`, so the app bypasses RLS and the anon/authenticated roles get no rows. RLS was enabled outside migrations, so `2026_11_02_000001_enable_rls_on_remaining_tables.php` (pgsql only, skips missing tables, no policies, no-op `down()`) only records it for fresh installs; running it on live changes nothing. It lists 45 tables; `material_usage_rates` and `sessions` do not exist on live and are skipped |
+| 9: admin `{id}` record scope | LISTED, NOT CHANGED | see below |
+
+### 6.1 Admin `{id}` routes with no per-record scope (read-only, 55 routes scanned)
+- Manager: every admin `{id}` route reaches any record. By design.
+- Owner (GET only, `OwnerReadOnly::AREAS`): any record on `orders/{id}` and its sub-routes (`billing`, `client-materials`, `production`, `production-summary`, `spec-sheet`, `suggested-date`, `invoice-pdf`, `{orderId}/qc`), `invoices/{id}/document`, `materials/{id}`, `materials/{id}/logs`, `transactions/{id}`, `transactions/{id}/receipt-pdf`. By design (global read-only view).
+- Station, reads with no record scope (any id): `GET orders/{id}`, `orders/{id}/production`, `orders/{id}/production-summary`, `orders/{orderId}/qc`, `output-logs/{id}`, `output-logs/summary/{orderId}`, `materials/{id}`, `messages/{id}`.
+- Station, scoped: `PATCH notifications/{id}/read` (own `user_id`), `POST orders/{orderId}/qc` (order must be at `qc`), `POST orders/{id}/defects` (own sewn pieces, `sewing` stations).
+- Not reachable by station (blocked by `StationScope::ALLOWED`) though in the shared M+O+S group: `delivery/{id}*`, `materials/{id}` writes, `orders/{id}` PATCH, `orders/{id}/billing`, `client-materials`, `invoices|receipts/{id}/document`, `purchase-orders/{id}*`, `rfq/{id}*`, `transactions/{id}*`, `material-recommendations/{recId}/feedback`.
+
+### 6.2 Cleanup
+- Removed dead code (owner approved): `app/Providers/RouteServiceProvider.php` (never registered, so its named limiters never ran) and `app/Models/Measurement.php` (no references).

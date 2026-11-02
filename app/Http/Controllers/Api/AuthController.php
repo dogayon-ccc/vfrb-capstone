@@ -38,18 +38,25 @@ use App\Models\User;
 use App\Notifications\CustomVerifyEmailNotification;
 use App\Support\UploadDisk;
 use Illuminate\Auth\Events\Registered;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rules\Password as PasswordRule;
 use Laravel\Socialite\Facades\Socialite;
 
 class AuthController extends Controller
 {
+    // Per-account lockout (login name + IP), on top of the per-IP route throttle: 5 failed tries, then 60 s.
+    private const LOGIN_MAX_FAILS = 5;
+
+    private const LOGIN_LOCK_SECONDS = 60;
+
     // ── POST /api/login — one sign-in for customer, staff and manager ─────────
     // auth/Login.jsx expects: { token, user: { ...fields, role } } and routes by role.
     public function login(Request $request)
@@ -61,9 +68,15 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
+        $lockKey = $this->loginLockKey($request);
+        if ($locked = $this->lockedOut($lockKey)) {
+            return $locked;
+        }
+
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (! $user || ! Hash::check($request->input('password'), $user->password)) {
+            RateLimiter::hit($lockKey, self::LOGIN_LOCK_SECONDS);
             // The typed login name is never stored: an unknown name is logged as user_id null + IP.
             AuditLog::record('login_failed', userId: $user?->user_id);
 
@@ -79,6 +92,7 @@ class AuthController extends Controller
             return response()->json(['message' => 'This account has been deactivated.'], 403);
         }
 
+        RateLimiter::clear($lockKey);
         $token = $this->createToken($user->user_id);
         AuditLog::record('login', userId: $user->user_id);
 
@@ -98,9 +112,15 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
+        $lockKey = $this->loginLockKey($request);
+        if ($locked = $this->lockedOut($lockKey)) {
+            return $locked;
+        }
+
         $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (! $user || ! Hash::check($request->input('password'), $user->password)) {
+            RateLimiter::hit($lockKey, self::LOGIN_LOCK_SECONDS);
             // The typed login name is never stored: an unknown name is logged as user_id null + IP.
             AuditLog::record('login_failed', userId: $user?->user_id);
 
@@ -125,6 +145,7 @@ class AuthController extends Controller
             ], 403);
         }
 
+        RateLimiter::clear($lockKey);
         $token = $this->createToken($user->user_id);
         AuditLog::record('login', userId: $user->user_id);
 
@@ -363,6 +384,22 @@ class AuthController extends Controller
         CustomerContact::linkVerifiedUser($user->user_id, $user->email);
 
         return redirect($frontendUrl.'/verify-email?status=verified');
+    }
+
+    private function loginLockKey(Request $request): string
+    {
+        return 'login-lock:'.strtolower(trim((string) ($request->input('login') ?? $request->input('email')))).'|'.$request->ip();
+    }
+
+    private function lockedOut(string $key): ?JsonResponse
+    {
+        if (! RateLimiter::tooManyAttempts($key, self::LOGIN_MAX_FAILS)) {
+            return null;
+        }
+        $wait = RateLimiter::availableIn($key);
+
+        return response()->json(['message' => "Too many failed sign-in attempts. Try again in {$wait} seconds.", 'retry_after' => $wait], 429)
+            ->header('Retry-After', (string) $wait);
     }
 
     // ── Private: getRoleName ──────────────────────────────────────────────────

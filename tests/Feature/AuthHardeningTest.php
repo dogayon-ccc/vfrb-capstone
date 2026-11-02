@@ -106,4 +106,37 @@ class AuthHardeningTest extends TestCase
             ->assertRedirectContains('status=verified');
         $this->assertNotNull($user->fresh()->email_verified_at);
     }
+
+    public function test_five_failed_logins_lock_that_account_on_this_ip_only(): void
+    {
+        $user = User::findOrFail(5);
+        $user->forceFill(['password' => bcrypt('Right-Passw0rd!')])->save();
+
+        for ($i = 0; $i < 5; $i++) {
+            $this->postJson('/api/login', ['login' => $user->email, 'password' => 'wrong'])->assertUnauthorized();
+        }
+        $this->postJson('/api/login', ['login' => $user->email, 'password' => 'Right-Passw0rd!'])->assertStatus(429);
+        // Same account through the admin alias shares the lock; a different IP does not.
+        $this->postJson('/api/admin/login', ['login' => strtoupper($user->email), 'password' => 'Right-Passw0rd!'])->assertStatus(429);
+        $this->withServerVariables(['REMOTE_ADDR' => '10.9.9.9'])
+            ->postJson('/api/login', ['login' => $user->email, 'password' => 'Right-Passw0rd!'])->assertOk();
+    }
+
+    public function test_successful_login_clears_the_failure_count(): void
+    {
+        $user = User::findOrFail(5);
+        $user->forceFill(['password' => bcrypt('Right-Passw0rd!')])->save();
+
+        for ($i = 0; $i < 4; $i++) {
+            $this->postJson('/api/login', ['login' => $user->email, 'password' => 'wrong'])->assertUnauthorized();
+        }
+        $this->postJson('/api/login', ['login' => $user->email, 'password' => 'Right-Passw0rd!'])->assertOk();
+        $this->postJson('/api/login', ['login' => $user->email, 'password' => 'wrong'])->assertUnauthorized();
+    }
+
+    public function test_hsts_is_sent_on_https_only(): void
+    {
+        $this->get('https://localhost/up')->assertHeader('Strict-Transport-Security', 'max-age=31536000');
+        $this->get('http://localhost/up')->assertHeaderMissing('Strict-Transport-Security');
+    }
 }
