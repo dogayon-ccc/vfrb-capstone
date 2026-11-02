@@ -43,17 +43,20 @@ Frontend (`C:\Users\Dave\Desktop\threejs`, read only, CODE-VERIFIED): VITE_API_U
 | Migration | vfrb_demo | Live (Supabase) | Source |
 |---|---|---|---|
 | 2026_10_29_000001_add_delivery_method_to_orders | UNVERIFIED (not queried) | Ran, batch 50 | SYSTEM_RECAP §4, memory |
-| 2026_10_30_000001_add_hot_path_indexes | UNVERIFIED | Ran, batch 51 (2026-10-31) | SYSTEM_RECAP §4 |
-| 2026_10_30_000002_add_tracking_updated_index | UNVERIFIED | Ran, batch 52 (2026-10-31) | SYSTEM_RECAP §4 |
+| 2026_10_30_000001_add_hot_path_indexes | UNVERIFIED | Ran, batch 51 (2026-10-31) | SYSTEM_RECAP §4; user `migrate:status` 2026-10-31 |
+| 2026_10_30_000002_add_tracking_updated_index | UNVERIFIED | Ran, batch 52 (2026-10-31) | SYSTEM_RECAP §4; user `migrate:status` 2026-10-31 |
 | 2026_10_12_000001_remove_estimate_columns_and_usage_rates | — | FORBIDDEN to run; already Ran batch 38 | RELEASE_AUDIT §5 |
+| 2026_11_02_000001_enable_rls_on_remaining_tables | UNVERIFIED | NOT applied (pending) | SECURITY_AUDIT §6 |
 
-CONFLICT: the task brief says these three are "not on live"; repo docs say all are Ran. Re-run `php artisan migrate:status` on live (the user runs it) before deciding. UNVERIFIED either way here.
+Resolved 2026-11-02: the earlier "not on live" note was wrong. The user applied both 2026_10_30 migrations with `--path` on 2026-10-31 and `migrate:status` showed them Ran (batches 51, 52).
 
-Safe order if any are pending:
+Only pending migration: 2026_11_02_000001. Live already has RLS on all 49 public tables (`pg_class` check 2026-11-02, SECURITY_AUDIT §6), so it changes nothing on live and exists for fresh installs; it has no policies and is a no-op on MySQL. Applying it is optional and the user's call; the deploy does not depend on it.
+
+If it is applied:
 1. Supabase backup / PITR snapshot (dashboard, UNVERIFIED, check docs). Record the time.
-2. `migrate:status` on live; confirm 2026_10_12 shows Ran.
-3. One file at a time with `--path`: 2026_10_29_000001 → 2026_10_30_000001 → 2026_10_30_000002. Never plain `migrate`.
-4. `migrate:status` again; deploy code only after.
+2. `migrate:status` on live; confirm everything above shows Ran, including 2026_10_12.
+3. Run that one file with `--path=database/migrations/2026_11_02_000001_enable_rls_on_remaining_tables.php`. Never plain `migrate`.
+4. `migrate:status` again; then deploy code.
 
 Duplicate index on `public.orders` (idx_orders_design_id vs orders_design_id_foreign): no repo migration creates either name; `orders` has no `Schema::create` here (base table predates the repo migrations). Origin UNVERIFIED (likely manual SQL or Supabase advisor). Do not drop orders_design_id_foreign (FK-backed). If anything, review idx_orders_design_id later; no change in this release.
 
@@ -136,6 +139,6 @@ Automation decisions (2026-11-02): pending orders past the customer's preferred 
 
 ## Open risks
 
-- Live migration state conflicts between task brief and repo docs (§2).
+- RLS migration 2026_11_02_000001 not applied on live; optional, user's call (§2).
 - Duplicate orders index origin unknown (§2).
 - CLOUDINARY_CLOUD_NAME on Vercel (§4). Display_errors and body limits on Vercel (§5, §6).
