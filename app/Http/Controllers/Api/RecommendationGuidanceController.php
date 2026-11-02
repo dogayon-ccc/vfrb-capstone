@@ -8,15 +8,89 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\MaterialRecommendation;
+use App\Models\Order;
 use App\Models\RecommendationGuidance;
 use App\Services\MaterialCatalogMatcher;
+use App\Services\MaterialRecommender;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 
 class RecommendationGuidanceController extends Controller
 {
     public function __construct(private MaterialCatalogMatcher $matcher) {}
+
+    // GET /api/admin/ai/recommendation-metrics?months=6 (manager; owner read-only)
+    // How often staff and customers accept AI-recommended lines, overall, per garment and per month. Customer self-picks excluded.
+    public function metrics(Request $request)
+    {
+        $months = (int) ($request->validate(['months' => 'nullable|integer|min:1|max:24'])['months'] ?? 6);
+        $since  = now()->subMonths($months - 1)->startOfMonth();
+        $rows   = DB::table('material_recommendations as r')
+            ->join('orders as o', 'o.order_id', '=', 'r.order_id')
+            ->where('r.created_at', '>=', $since)
+            ->where(fn ($q) => $q->whereNull('r.ai_note')->orWhere('r.ai_note', '!=', MaterialRecommendation::CUSTOMER_PICK_NOTE))
+            ->get(['r.staff_feedback', 'r.status', 'r.created_at', 'o.garment_type']);
+
+        $norm = fn ($s) => trim(preg_replace('/[^a-z0-9]+/', ' ', mb_strtolower((string) $s)));
+        $rate = fn (int $yes, int $all) => $all ? round($yes / $all, 3) : null;
+        $stat = function ($set) use ($rate) {
+            $accept = $set->where('staff_feedback', 'accept')->count();
+            $reject = $set->where('staff_feedback', 'reject')->count();
+            // The customer's answer is the line status: customer_accepted is NOT NULL, so 0 cannot tell "rejected" from "not yet".
+            $decided = $set->whereIn('status', ['accepted', 'rejected']);
+            $custYes = $decided->where('status', 'accepted')->count();
+            return [
+                'lines'                    => $set->count(),
+                'staff_accepted'           => $accept,
+                'staff_rejected'           => $reject,
+                'staff_acceptance_rate'    => $rate($accept, $accept + $reject),
+                'customer_accepted'        => $custYes,
+                'customer_rejected'        => $decided->count() - $custYes,
+                'customer_acceptance_rate' => $rate($custYes, $decided->count()),
+            ];
+        };
+
+        return response()->json([
+            'window_months' => $months,
+            'since'         => $since->toDateString(),
+            'overall'       => $stat($rows),
+            'by_garment'    => $rows->groupBy(fn ($r) => $norm($r->garment_type) ?: 'unspecified')
+                ->map(fn ($set, $g) => ['garment' => ucwords($g)] + $stat($set))->sortByDesc('lines')->values(),
+            'by_month'      => $rows->groupBy(fn ($r) => substr((string) $r->created_at, 0, 7))->sortKeys()
+                ->map(fn ($set, $m) => ['month' => $m] + $stat($set))->values(),
+            'note'          => 'Covers current recommendation lines; regenerating a list replaces its earlier lines.',
+        ]);
+    }
+
+    // GET /api/admin/orders/{id}/ai-context (manager; owner read-only)
+    // What the AI would see for this order if asked now: guidance, staff verdicts and reasons, preferences, eligible catalog.
+    public function aiContext(int $id, MaterialRecommender $recommender)
+    {
+        $order = Order::findOrFail($id);
+        $prep  = $recommender->prepare($order);
+        if (is_string($prep)) {
+            return response()->json(['message' => $prep], 422);
+        }
+        $ctx  = $recommender->context($order, $prep['eligible'], $prep['profile']);
+        $keep = array_flip(['material_id', 'material_code', 'material_name', 'category', 'unit', 'in_stock', 'colour_match']);
+
+        return response()->json(['data' => [
+            'as_of'                => now()->toIso8601String(),
+            'scope'                => 'What the AI would see if asked now. Past requests are not recorded.',
+            'garment'              => $ctx['garment'],
+            'kind'                 => $ctx['kind'],
+            'category'             => $ctx['category'],
+            'needs'                => $ctx['needs'],
+            'guidance'             => $ctx['guidance'],
+            'staff_approved'       => $ctx['approved'],
+            'staff_rejected'       => $ctx['avoid'],
+            'staff_reasons'        => $ctx['feedback_notes'],
+            'customer_preferences' => $ctx['preferences'],
+            'catalog'              => array_map(fn ($m) => array_intersect_key($m, $keep), $ctx['catalog']),
+        ]]);
+    }
 
     // GET /api/admin/recommendation-guidance (manager)
     public function index()

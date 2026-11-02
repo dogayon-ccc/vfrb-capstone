@@ -187,7 +187,8 @@ class OrderController extends Controller
         $recommendations = DB::table('material_recommendations')
             ->where('order_id', $id)
             ->orderBy('display_order')
-            ->get(MaterialRecommendation::CUSTOMER_COLUMNS);
+            ->get(MaterialRecommendation::CUSTOMER_COLUMNS)
+            ->each(fn ($r) => $r->ai_note = MaterialRecommendation::customerNote($r->ai_note, $r->category));
 
         return response()->json([
             'order' => $order,

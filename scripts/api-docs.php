@@ -15,6 +15,7 @@ const CORE = [
     'GET /api/customer/orders/{id}/billing', 'GET /api/admin/orders/{id}/billing', 'POST /api/admin/orders/{id}/invoice', 'PATCH /api/admin/invoices/{id}/mark-paid',
     'GET /api/customer/delivery/{orderId}', 'POST /api/admin/delivery', 'PATCH /api/admin/delivery/{id}/status',
     'GET /api/admin/orders/{id}/production', 'POST /api/admin/output-logs',
+    'GET /api/admin/ai/recommendation-metrics', 'GET /api/admin/orders/{id}/ai-context',
 ];
 
 function methodSource(string $action): ?string
@@ -91,7 +92,7 @@ $out[] = '| Method | URI | Action | Middleware |';
 $out[] = '|---|---|---|---|';
 foreach ($routes as $r) {
     $mw = implode(', ', array_filter($r->gatherMiddleware(), fn ($m) => $m !== 'api')) ?: 'public';
-    $out[] = sprintf('| %s | /%s | %s | %s |', implode('|', array_diff($r->methods(), ['HEAD'])),
+    $out[] = sprintf('| %s | /%s | %s | %s |', implode(', ', array_diff($r->methods(), ['HEAD'])), // a bare | would split the table cell
         $r->uri(), str_replace('App\\Http\\Controllers\\', '', $r->getActionName()), $mw);
 }
 

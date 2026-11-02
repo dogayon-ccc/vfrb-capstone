@@ -557,6 +557,9 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::get('/recommendation-guidance', [RecommendationGuidanceController::class, 'index']);
     Route::post('/recommendation-guidance', [RecommendationGuidanceController::class, 'store']);
     Route::put('/recommendation-guidance/{id}', [RecommendationGuidanceController::class, 'update'])->whereNumber('id');
+    // AI quality (Nov 2 2026): acceptance rates, and what the AI would see for one order. Read-only.
+    Route::get('/ai/recommendation-metrics', [RecommendationGuidanceController::class, 'metrics']);
+    Route::get('/orders/{id}/ai-context', [RecommendationGuidanceController::class, 'aiContext'])->whereNumber('id');
 
     Route::get('/designs/showcase-queue', [DesignController::class, 'adminShowcaseQueue']);
     Route::post('/designs/{id}/showcase-approve', [DesignController::class, 'adminShowcaseApprove']);

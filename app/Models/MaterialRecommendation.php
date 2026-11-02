@@ -7,6 +7,23 @@ class MaterialRecommendation extends Model
 {
     protected $primaryKey = 'rec_id';
 
+    // Note on lines the customer picked themselves; AI quality metrics leave these out.
+    public const CUSTOMER_PICK_NOTE = 'Selected directly by customer, not AI-recommended.';
+
+    /**
+     * The note as a customer may read it. A stored note that fails today's AI text guard (written before the guard existed)
+     * reads as the generic line instead. Every catalog name and code is ignored, so a swap note naming the old material survives.
+     */
+    public static function customerNote(?string $note, ?string $category): ?string
+    {
+        if ($note === null || trim($note) === '') { return $note; }
+        $terms = once(fn () => Material::query()->get(['material_name', 'material_code'])
+            ->flatMap(fn ($m) => [(string) $m->material_name, (string) $m->material_code])->filter()->values()->all());
+        return app(\App\Services\MaterialCatalogMatcher::class)->isUnsafeAiText($note, $terms)
+            ? 'Suitable ' . mb_strtolower($category ?: 'material') . ' for this design.'
+            : $note;
+    }
+
     public const CUSTOMER_COLUMNS = [
         'rec_id','order_id','material_id','material_name','category','unit','ai_note',
         'display_order','status','customer_accepted','accepted_at','customer_note','created_at','updated_at',

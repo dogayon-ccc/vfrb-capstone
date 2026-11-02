@@ -142,7 +142,7 @@ final class MaterialCatalogMatcher
         $dropped    = ['unknown' => 0, 'duplicate' => 0, 'sanitized' => 0, 'forbidden_field' => 0];
         $selections = [];
         $seen       = [];
-        $names      = array_column($eligible, 'material_name');
+        $names      = [...array_column($eligible, 'material_name'), ...array_column($eligible, 'material_code')];
 
         // A quantity/price field anywhere at the top level voids the whole reply.
         if (is_array($parsed) && $this->forbiddenKeys($parsed)) {
@@ -162,7 +162,7 @@ final class MaterialCatalogMatcher
 
             $seen[$id] = true;
             $reason    = $this->cleanText($sel['reason'] ?? '');
-            if ($reason === '' || $this->hasForbiddenTerms($reason, $names)) {
+            if ($reason === '' || $this->isUnsafeAiText($reason, $names)) {
                 $reason = 'Suitable ' . strtolower($eligible[$id]['category']) . ' for this design.';
                 $dropped['sanitized']++;
             }
@@ -170,7 +170,7 @@ final class MaterialCatalogMatcher
         }
 
         $narration = $this->cleanText($parsed['narration'] ?? '');
-        if ($narration === '' || mb_strlen($narration) > self::MAX_NARRATION || $this->hasForbiddenTerms($narration, $names)) {
+        if ($narration === '' || mb_strlen($narration) > self::MAX_NARRATION || $this->isUnsafeAiText($narration, $names)) {
             $narration = $selections
                 ? 'Recommended materials for this design: ' . $this->joinNames(array_map(fn ($s) => $eligible[$s['material_id']]['material_name'], $selections)) . '.'
                 : '';
@@ -323,6 +323,34 @@ final class MaterialCatalogMatcher
             '/\b(?:yardage|quota|formula|bill of materials|bom|per piece|per unit|per garment|total of|quantit(?:y|ies)|how (?:many|much))\b/iu',
         ];
         foreach ($patterns as $p) {
+            if (preg_match($p, $text)) { return true; }
+        }
+        return false;
+    }
+
+    // Extra rules for AI text a customer reads; staff-written guidance keeps the looser hasForbiddenTerms().
+    private const UNSAFE_AI_TEXT = [
+        '/\d|%|\bpercent(?:age)?\b/u',
+        '/\b(?:yards?|yds?|meters?|metres?|centimet(?:er|re)s?|inch(?:es)?|kilos?|kgs?|grams?|lbs?|pounds?|pcs|pieces|rolls|cones?|dozens?|ratio|allowance|wastage|consumption)\b/iu',
+        '/\b(?:sizes?|sizing|measurements?|xs|xl|xxl|xxxl)\b/iu',
+        '/\b(?:pesos?|expensive|inexpensive|affordable|pricey|fee|fees|rates?)\b/iu',
+        '/\b(?:ignore|disregard|override|forget)\b.{0,60}\b(?:instructions?|rules?|prompts?|above|previous)\b/iu',
+        '/\b(?:system prompt|developer mode|jailbreak|api[ _-]?keys?|as an ai)\b/iu',
+        '/https?:|www\.|[<>{}`]/iu',
+    ];
+
+    /**
+     * True when AI free text shown to a customer (a reason or the narration) must not be shown: anything hasForbiddenTerms() catches,
+     * plus any digit, percent, ratio, unit word, sizing, price word, link or instruction-like text. Catalog names and codes are ignored.
+     */
+    public function isUnsafeAiText(string $text, array $catalogTerms = []): bool
+    {
+        if ($this->hasForbiddenTerms($text, $catalogTerms)) { return true; }
+        usort($catalogTerms, fn ($a, $b) => mb_strlen((string) $b) <=> mb_strlen((string) $a));
+        foreach ($catalogTerms as $n) {
+            if ((string) $n !== '') { $text = str_ireplace((string) $n, ' ', $text); }
+        }
+        foreach (self::UNSAFE_AI_TEXT as $p) {
             if (preg_match($p, $text)) { return true; }
         }
         return false;

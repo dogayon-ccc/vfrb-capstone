@@ -156,4 +156,14 @@ class GeminiClientTest extends TestCase
         $this->assertNull((new GeminiClient())->call('hi'));
         Http::assertNothingSent();
     }
+
+    public function test_model_comes_only_from_config(): void
+    {
+        $this->keys();
+        config(['services.gemini.model' => 'model-from-env']);
+        Http::fake(['*' => $this->ok([['text' => 'ok']])]);
+
+        (new GeminiClient())->call('hi');
+        Http::assertSent(fn (Request $r) => str_contains($r->url(), '/models/model-from-env:generateContent'));
+    }
 }

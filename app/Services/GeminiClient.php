@@ -14,8 +14,9 @@ class GeminiClient
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
     public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null): ?string
     {
-        $primary  = (string) config('services.gemini.model', 'gemini-3.6-flash');
-        $fallback = (string) config('services.gemini.fallback_model', 'gemini-3.6-flash');
+        // The one default lives in config/services.php (GEMINI_MODEL); no second literal here.
+        $primary  = (string) config('services.gemini.model');
+        $fallback = (string) config('services.gemini.fallback_model', '');
         $started  = microtime(true);
 
         $text = $this->callModel($primary, $prompt, $maxTokens, $jsonSchema);
@@ -114,7 +115,8 @@ class GeminiClient
                 // like 429; a genuine 4xx request-shape error (400) or a
                 // 5xx on Google's end would fail identically on every key,
                 // so those still stop the loop rather than retry pointlessly.
-                $reason = mb_substr((string) $response->json('error.message', ''), 0, 200);
+                // Quoted values are blanked: a 400 can echo part of the request (customer text) back.
+                $reason = mb_substr(preg_replace('/"[^"]*"|\'[^\']*\'/u', '"…"', (string) $response->json('error.message', '')), 0, 200);
 
                 if (in_array($response->status(), [429, 401, 403])) {
                     Log::warning("Gemini key #{$keyNum} failed ({$response->status()}), trying next", [
