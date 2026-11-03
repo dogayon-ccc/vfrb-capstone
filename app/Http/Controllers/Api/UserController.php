@@ -56,13 +56,14 @@ class UserController extends Controller
             ->join('model_has_roles as mr', 'mr.model_id', '=', 'users.user_id')
             ->join('roles as r', 'r.id', '=', 'mr.role_id')
             ->whereIn('r.name', ['staff', 'manager', 'owner'])
-            ->select('users.user_id', 'users.name', 'users.email', 'users.contact_number', 'users.job_function', 'users.assigned_stage',
+            ->select('users.user_id', 'users.name', 'users.email', 'users.username', 'users.contact_number', 'users.job_function', 'users.assigned_stage',
                 'users.organization_name', 'users.email_verified_at', 'users.created_at', 'users.updated_at', 'r.name as role');
 
         if ($search) {
             $query->where(function ($q) use ($search) {
                 $q->where('users.name', Sql::like(), "%{$search}%")
-                    ->orWhere('users.email', Sql::like(), "%{$search}%");
+                    ->orWhere('users.email', Sql::like(), "%{$search}%")
+                    ->orWhere('users.username', Sql::like(), "%{$search}%");
             });
         }
 
@@ -149,12 +150,11 @@ class UserController extends Controller
     public function adminCreate(Request $request)
     {
         $isCustomer = $request->input('role') === 'customer';
-        if ($isCustomer) {
-            $request->merge(['username' => strtolower(trim((string) $request->input('username'))) ?: null]);
-        }
+        $this->normalizeLoginFields($request);
         $request->validate([
             'name' => 'required|string|max:100',
-            'email' => ['required', 'email:rfc,dns', 'max:100', 'unique:users,email'],
+            // Customers need a real email; station, Administrator and Owner accounts may sign in by username only.
+            'email' => [$isCustomer ? 'required' : 'required_without:username', 'nullable', 'email:rfc,dns', 'max:100', 'unique:users,email'],
             'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
             'role' => 'required|in:customer,staff,manager,owner|exists:roles,name',
             'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
@@ -163,11 +163,8 @@ class UserController extends Controller
             'username' => ['nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username'],
             'client_type' => ($isCustomer ? 'required' : 'nullable').'|in:corporate,school,government,medical,organization',
         ], [
-            'email.unique' => 'An account with this email already exists.',
-            'email.email' => 'Please enter a real, valid email address.',
-            'username.unique' => 'That username is taken.',
-            'username.regex' => 'Use 3-30 letters, numbers, dots or underscores.',
-        ]);
+            'email.required_without' => 'Enter an email or a username so this person can sign in.',
+        ] + self::LOGIN_FIELD_MESSAGES);
 
         if (! $this->canManageRole($request, $request->input('role'))) {
             return response()->json(['message' => 'Only an Administrator (Manager) can create Administrator or Owner accounts.'], 403);
@@ -179,7 +176,7 @@ class UserController extends Controller
             'password' => Hash::make($request->input('password')),
             'contact_number' => $request->input('contact_number'),
             'organization_name' => $request->input('organization_name'),
-            'username' => $isCustomer ? $request->input('username') : null,
+            'username' => $request->input('username'),
             'client_type' => $isCustomer ? $request->input('client_type') : null,
             'job_function' => 'general',
             'assigned_stage' => $request->input('role') === 'staff' ? $request->input('assigned_stage') : null,
@@ -241,10 +238,18 @@ class UserController extends Controller
         if (! $this->canManageRole($request, $oldRole)) {
             return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
         }
+        $this->normalizeLoginFields($request);
+        // Email and username are optional on edit; when sent, the account must keep at least one way to sign in.
+        $email = $request->exists('email') ? $request->input('email') : $user->email;
+        $username = $request->exists('username') ? $request->input('username') : $user->username;
+        $request->merge(['_login_check' => $email ?? $username]);
         $request->validate([
             'role' => 'required|in:staff,manager,owner|exists:roles,name',
             'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
-        ]);
+            'email' => ['sometimes', 'nullable', 'email:rfc,dns', 'max:100', 'unique:users,email,'.$id.',user_id'],
+            'username' => ['sometimes', 'nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username,'.$id.',user_id'],
+            '_login_check' => 'required',
+        ], ['_login_check.required' => 'Keep an email or a username so this person can sign in.'] + self::LOGIN_FIELD_MESSAGES);
 
         $newRole = $request->input('role');
         if (! $this->canManageRole($request, $newRole)) {
@@ -253,8 +258,13 @@ class UserController extends Controller
         DB::table('users')->where('user_id', $id)->update([
             'job_function' => 'general',
             'assigned_stage' => $newRole === 'staff' ? $request->input('assigned_stage') : null,
+            'email' => $email,
+            'username' => $username,
             'updated_at' => now(),
         ]);
+        if ($email !== $user->email || $username !== $user->username) {
+            AuditLog::record('user_login_changed', 'users', $id);
+        }
 
         $roleId = DB::table('roles')->where('name', $newRole)->value('id');
         if ($roleId) {
@@ -413,6 +423,55 @@ class UserController extends Controller
             ->delete();
 
         return response()->json(['message' => 'Password changed successfully.']);
+    }
+
+    // ── PUT /api/admin/users/{id}/password ────────────────────────────────────
+    // An Administrator sets a new password for a station, Administrator or Owner account (the only reset for one without email).
+    public function adminSetPassword(Request $request, int $id)
+    {
+        if (! DB::table('users')->where('user_id', $id)->exists()) {
+            return response()->json(['message' => 'User not found.'], 404);
+        }
+        if (! $this->isAdminAccount($id)) {
+            return response()->json(['message' => 'Customers reset their own password by email.'], 422);
+        }
+        if (! $this->canManageRole($request, $this->roleName($id))) {
+            return response()->json(['message' => 'Only an Administrator (Manager) can set another account\'s password.'], 403);
+        }
+        $request->validate([
+            'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
+        ]);
+
+        DB::table('users')->where('user_id', $id)->update([
+            'password' => Hash::make($request->input('password')),
+            'updated_at' => now(),
+        ]);
+        // Every session of that account signs out, including the Administrator's own when they reset themselves here.
+        DB::table('personal_access_tokens')
+            ->where('tokenable_type', 'App\\Models\\User')
+            ->where('tokenable_id', $id)
+            ->delete();
+        AuditLog::record('user_password_set', 'users', $id);
+
+        return response()->json(['message' => 'Password updated. That account has been signed out everywhere.']);
+    }
+
+    private const LOGIN_FIELD_MESSAGES = [
+        'email.unique' => 'An account with this email already exists.',
+        'email.email' => 'Please enter a real, valid email address.',
+        'username.unique' => 'That username is taken.',
+        'username.regex' => 'Use 3-30 letters, numbers, dots or underscores.',
+    ];
+
+    // Blank email/username become null; usernames are stored lowercase (login lowercases what is typed).
+    private function normalizeLoginFields(Request $request): void
+    {
+        foreach (['email', 'username'] as $field) {
+            if ($request->exists($field)) {
+                $value = trim((string) $request->input($field));
+                $request->merge([$field => $value === '' ? null : ($field === 'username' ? strtolower($value) : $value)]);
+            }
+        }
     }
 
     private function roleName(int $id): ?string

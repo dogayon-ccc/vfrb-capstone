@@ -19,7 +19,7 @@ final class EmailNotify
             return;
         }
         defer(function () use ($ids, $notification) {
-            foreach (User::whereIn('user_id', $ids)->get() as $user) {
+            foreach (User::whereIn('user_id', $ids)->whereNotNull('email')->get() as $user) {
                 try {
                     $user->notify($notification);
                 } catch (\Throwable $e) {
