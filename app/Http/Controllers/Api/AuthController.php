@@ -68,12 +68,11 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $lockKey = $this->loginLockKey($request);
+        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
+        $lockKey = $this->loginLockKey($request, $user);
         if ($locked = $this->lockedOut($lockKey)) {
             return $locked;
         }
-
-        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (! $user || ! Hash::check($request->input('password'), $user->password)) {
             RateLimiter::hit($lockKey, self::LOGIN_LOCK_SECONDS);
@@ -112,12 +111,11 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $lockKey = $this->loginLockKey($request);
+        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
+        $lockKey = $this->loginLockKey($request, $user);
         if ($locked = $this->lockedOut($lockKey)) {
             return $locked;
         }
-
-        $user = $this->findByLogin($request->input('login') ?? $request->input('email'));
 
         if (! $user || ! Hash::check($request->input('password'), $user->password)) {
             RateLimiter::hit($lockKey, self::LOGIN_LOCK_SECONDS);
@@ -386,9 +384,12 @@ class AuthController extends Controller
         return redirect($frontendUrl.'/verify-email?status=verified');
     }
 
-    private function loginLockKey(Request $request): string
+    // Keyed by account when the login resolves, so username and email share one lockout.
+    private function loginLockKey(Request $request, ?object $user): string
     {
-        return 'login-lock:'.strtolower(trim((string) ($request->input('login') ?? $request->input('email')))).'|'.$request->ip();
+        $who = $user ? 'uid:'.$user->user_id : strtolower(trim((string) ($request->input('login') ?? $request->input('email'))));
+
+        return 'login-lock:'.$who.'|'.$request->ip();
     }
 
     private function lockedOut(string $key): ?JsonResponse

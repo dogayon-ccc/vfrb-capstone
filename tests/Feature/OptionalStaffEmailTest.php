@@ -88,21 +88,72 @@ class OptionalStaffEmailTest extends TestCase
         $this->putJson($url, ['role' => 'owner'])->assertOk()->assertJson(['username' => 'zz_owner_edit']);
     }
 
-    public function test_manager_sets_password_and_signs_the_account_out(): void
+    private function setPassword(User $target)
+    {
+        return $this->putJson("/api/admin/users/{$target->user_id}/password", ['password' => self::PASS, 'password_confirmation' => self::PASS]);
+    }
+
+    private function withoutEmail(User $user): User
+    {
+        DB::table('users')->where('user_id', $user->user_id)->update(['email' => null, 'username' => uniqid('u_')]);
+
+        return $user->fresh();
+    }
+
+    public function test_manager_sets_password_on_emailless_account_signs_it_out_and_audits(): void
     {
         $manager = $this->makeUser('manager');
-        $target = $this->makeUser('staff');
+        $target = $this->withoutEmail($this->makeUser('staff'));
         $target->createToken('old');
         $this->actingAs($manager, 'sanctum');
 
-        $this->putJson("/api/admin/users/{$target->user_id}/password", ['password' => self::PASS, 'password_confirmation' => self::PASS])->assertOk();
+        $this->setPassword($target)->assertOk();
         $this->assertSame(0, $target->tokens()->count());
         $this->assertTrue(password_verify(self::PASS, $target->fresh()->password));
-
-        $customer = $this->makeUser('customer');
-        $this->putJson("/api/admin/users/{$customer->user_id}/password", ['password' => self::PASS, 'password_confirmation' => self::PASS])->assertUnprocessable();
+        $this->assertDatabaseHas('audit_logs', ['action' => 'user_password_set', 'entity_id' => $target->user_id, 'user_id' => $manager->user_id]);
 
         $this->actingAs($this->makeUser('owner'), 'sanctum');
-        $this->putJson("/api/admin/users/{$target->user_id}/password", ['password' => self::PASS, 'password_confirmation' => self::PASS])->assertForbidden();
+        $this->setPassword($target)->assertForbidden();
+    }
+
+    public function test_set_password_refuses_customers_own_account_and_accounts_with_email(): void
+    {
+        $manager = $this->withoutEmail($this->makeUser('manager'));
+        $this->actingAs($manager, 'sanctum');
+
+        $this->setPassword($this->withoutEmail($this->makeUser('customer')))->assertUnprocessable();
+        $this->setPassword($manager)->assertUnprocessable();
+        $this->setPassword($this->makeUser('staff'))->assertUnprocessable();
+        $this->setPassword($this->makeUser('manager'))->assertUnprocessable();
+    }
+
+    public function test_username_is_unique_case_insensitively_across_roles(): void
+    {
+        $this->actingAs($this->makeUser('manager'), 'sanctum');
+        $taken = $this->withoutEmail($this->makeUser('customer'))->username;
+
+        $this->create(['role' => 'owner', 'username' => strtoupper($taken)])->assertUnprocessable()->assertJsonValidationErrors('username');
+        $this->create(['role' => 'owner', 'username' => 'a@b.c'])->assertUnprocessable()->assertJsonValidationErrors('username');
+    }
+
+    public function test_login_finds_a_mixed_case_stored_email(): void
+    {
+        $user = $this->makeUser('staff');
+        DB::table('users')->where('user_id', $user->user_id)->update(['email' => $email = 'Mixed.'.uniqid().'@Example.Test']);
+
+        $this->postJson('/api/login', ['login' => strtolower($email), 'password' => 'secret-pass'])->assertOk();
+        $this->postJson('/api/login', ['login' => $email, 'password' => 'secret-pass'])->assertOk();
+    }
+
+    public function test_username_and_email_share_one_lockout_per_account(): void
+    {
+        $user = $this->makeUser('staff');
+        DB::table('users')->where('user_id', $user->user_id)->update(['username' => $name = uniqid('lk_')]);
+
+        foreach (range(1, 5) as $i) {
+            $this->postJson('/api/login', ['login' => $i % 2 ? $name : strtoupper($user->email), 'password' => 'wrong'])->assertUnauthorized();
+        }
+        $this->postJson('/api/login', ['login' => $name, 'password' => 'secret-pass'])->assertStatus(429);
+        $this->postJson('/api/login', ['login' => $user->email, 'password' => 'secret-pass'])->assertStatus(429);
     }
 }

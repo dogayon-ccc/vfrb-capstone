@@ -429,11 +429,18 @@ class UserController extends Controller
     // An Administrator sets a new password for a station, Administrator or Owner account (the only reset for one without email).
     public function adminSetPassword(Request $request, int $id)
     {
-        if (! DB::table('users')->where('user_id', $id)->exists()) {
+        $target = DB::table('users')->where('user_id', $id)->first(['user_id', 'email']);
+        if (! $target) {
             return response()->json(['message' => 'User not found.'], 404);
         }
         if (! $this->isAdminAccount($id)) {
             return response()->json(['message' => 'Customers reset their own password by email.'], 422);
+        }
+        if ($id === (int) $request->user()->user_id) {
+            return response()->json(['message' => 'Change your own password in Settings.'], 422);
+        }
+        if ($target->email !== null) {
+            return response()->json(['message' => 'This account has an email; use the password reset link instead.'], 422);
         }
         if (! $this->canManageRole($request, $this->roleName($id))) {
             return response()->json(['message' => 'Only an Administrator (Manager) can set another account\'s password.'], 403);
@@ -446,7 +453,7 @@ class UserController extends Controller
             'password' => Hash::make($request->input('password')),
             'updated_at' => now(),
         ]);
-        // Every session of that account signs out, including the Administrator's own when they reset themselves here.
+        // Every session of that account signs out.
         DB::table('personal_access_tokens')
             ->where('tokenable_type', 'App\\Models\\User')
             ->where('tokenable_id', $id)
@@ -463,13 +470,13 @@ class UserController extends Controller
         'username.regex' => 'Use 3-30 letters, numbers, dots or underscores.',
     ];
 
-    // Blank email/username become null; usernames are stored lowercase (login lowercases what is typed).
+    // Blank email/username become null; both are stored lowercase so uniqueness is case-insensitive on MySQL and Postgres.
     private function normalizeLoginFields(Request $request): void
     {
         foreach (['email', 'username'] as $field) {
             if ($request->exists($field)) {
                 $value = trim((string) $request->input($field));
-                $request->merge([$field => $value === '' ? null : ($field === 'username' ? strtolower($value) : $value)]);
+                $request->merge([$field => $value === '' ? null : strtolower($value)]);
             }
         }
     }

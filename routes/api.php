@@ -628,7 +628,7 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     Route::post('/users/create', [UserController::class, 'adminCreate']);
     Route::post('/users', [UserController::class, 'adminCreate']);
     Route::put('/users/{id}', [UserController::class, 'adminUpdate']);
-    Route::put('/users/{id}/password', [UserController::class, 'adminSetPassword']);
+    Route::put('/users/{id}/password', [UserController::class, 'adminSetPassword'])->middleware('throttle:10,1');
     Route::patch('/users/{id}/toggle', [UserController::class, 'adminToggle']);
 
     // ── Automation — manual "Run Now" trigger (manager only) ──────
