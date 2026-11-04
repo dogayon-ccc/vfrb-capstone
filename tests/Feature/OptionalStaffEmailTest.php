@@ -55,6 +55,37 @@ class OptionalStaffEmailTest extends TestCase
         $this->postJson('/api/login', ['login' => $username, 'password' => self::PASS])->assertOk();
     }
 
+    public function test_every_admin_role_adds_their_own_email_and_changes_their_password(): void
+    {
+        foreach (['staff', 'owner', 'manager'] as $role) {
+            $user = $this->makeUser($role);
+            DB::table('users')->where('user_id', $user->user_id)->update(['assigned_stage' => $role === 'staff' ? ProductionStageService::productionStages()[0] : null]);
+            $this->actingAs($user, 'sanctum');
+            $mail = uniqid($role).'@not-a-real-domain.invalid';
+
+            $this->putJson('/api/account/login', ['email' => $mail, 'current_password' => 'wrong'])->assertStatus(422);
+            $this->putJson('/api/account/login', ['email' => $mail, 'current_password' => 'secret-pass'])->assertOk()->assertJson(['email' => $mail]);
+            $this->assertSame($mail, DB::table('users')->where('user_id', $user->user_id)->value('email'));
+            $this->putJson('/api/account/password', ['current_password' => 'secret-pass', 'password' => self::PASS, 'password_confirmation' => self::PASS])->assertOk();
+        }
+    }
+
+    public function test_own_login_keeps_one_way_in_and_is_closed_to_customers(): void
+    {
+        $user = $this->makeUser('owner');
+        $this->actingAs($user, 'sanctum');
+        $this->putJson('/api/account/login', ['email' => null, 'username' => null, 'current_password' => 'secret-pass'])->assertStatus(422);
+
+        $taken = $this->makeUser('owner')->email;
+        $this->putJson('/api/account/login', ['email' => $taken, 'current_password' => 'wrong'])->assertStatus(422)->assertJson(['message' => 'Current password is incorrect.']);
+        $this->putJson('/api/account/login', ['email' => $taken, 'current_password' => 'secret-pass'])->assertStatus(422)->assertJsonValidationErrors('email');
+        $this->actingAs($user, 'sanctum');
+        $this->putJson('/api/account/login', ['username' => 'keeps_mail', 'current_password' => 'secret-pass'])->assertOk()->assertJson(['email' => $user->email, 'username' => 'keeps_mail']);
+
+        $this->actingAs($this->makeUser('customer'), 'sanctum');
+        $this->putJson('/api/account/login', ['email' => null, 'current_password' => 'secret-pass'])->assertForbidden();
+    }
+
     public function test_staff_account_needs_an_email_or_a_username(): void
     {
         $this->actingAs($this->makeUser('manager'), 'sanctum');

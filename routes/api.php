@@ -137,6 +137,9 @@ Route::middleware(['auth:sanctum', 'auth.throttle:shared,60'])->group(function (
     Route::patch('/settings/appearance', [SettingsController::class, 'appearanceUpdate']);
     Route::post('/profile/photo', [ProfilePhotoController::class, 'store'])->middleware('auth.throttle:avatar-upload,10');
     Route::delete('/profile/photo', [ProfilePhotoController::class, 'destroy']);
+    // Own sign-in details, open to every admin role (owner and station included) so nobody gets locked out.
+    Route::put('/account/login', [UserController::class, 'updateOwnLogin'])->middleware('throttle:10,1');
+    Route::put('/account/password', [UserController::class, 'adminUpdatePassword'])->middleware('throttle:10,1');
 
 });
 

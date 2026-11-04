@@ -425,6 +425,38 @@ class UserController extends Controller
         return response()->json(['message' => 'Password changed successfully.']);
     }
 
+    // ── PUT /api/account/login ────────────────────────────────────────────────
+    // A station, Administrator or Owner adds or changes their own email and username; needs their current password.
+    public function updateOwnLogin(Request $request)
+    {
+        $id = (int) Auth::id();
+        if (! $this->isAdminAccount($id)) {
+            return response()->json(['message' => 'Customers update their email in Account settings.'], 403);
+        }
+        $user = DB::table('users')->where('user_id', $id)->first();
+        $this->normalizeLoginFields($request);
+        $email = $request->exists('email') ? $request->input('email') : $user->email;
+        $username = $request->exists('username') ? $request->input('username') : $user->username;
+        // Password first, so a wrong one learns nothing about which emails and usernames are taken.
+        $request->validate(['current_password' => 'required|string']);
+        if (! Hash::check($request->input('current_password'), $user->password)) {
+            return response()->json(['message' => 'Current password is incorrect.'], 422);
+        }
+        $request->merge(['_login_check' => $email ?? $username]);
+        $request->validate([
+            'email' => ['sometimes', 'nullable', 'email:rfc', 'max:100', 'unique:users,email,'.$id.',user_id'],
+            'username' => ['sometimes', 'nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username,'.$id.',user_id'],
+            '_login_check' => 'required',
+        ], ['_login_check.required' => 'Keep an email or a username so you can sign in.'] + self::LOGIN_FIELD_MESSAGES);
+
+        DB::table('users')->where('user_id', $id)->update(['email' => $email, 'username' => $username, 'updated_at' => now()]);
+        if ($email !== $user->email || $username !== $user->username) {
+            AuditLog::record('user_login_changed', 'users', $id);
+        }
+
+        return response()->json(['email' => $email, 'username' => $username]);
+    }
+
     // ── PUT /api/admin/users/{id}/password ────────────────────────────────────
     // An Administrator sets a new password for a station, Administrator or Owner account (the only reset for one without email).
     public function adminSetPassword(Request $request, int $id)
