@@ -154,7 +154,7 @@ class UserController extends Controller
         $request->validate([
             'name' => 'required|string|max:100',
             // Customers need a real email; station, Administrator and Owner accounts may sign in by username only.
-            'email' => [$isCustomer ? 'required' : 'required_without:username', 'nullable', 'email:rfc,dns', 'max:100', 'unique:users,email'],
+            'email' => [$isCustomer ? 'required' : 'required_without:username', 'nullable', 'email:rfc', 'max:100', 'unique:users,email'],
             'password' => ['required', 'confirmed', PasswordRule::min(8)->mixedCase()->numbers()->symbols()],
             'role' => 'required|in:customer,staff,manager,owner|exists:roles,name',
             'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
@@ -246,7 +246,7 @@ class UserController extends Controller
         $request->validate([
             'role' => 'required|in:staff,manager,owner|exists:roles,name',
             'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
-            'email' => ['sometimes', 'nullable', 'email:rfc,dns', 'max:100', 'unique:users,email,'.$id.',user_id'],
+            'email' => ['sometimes', 'nullable', 'email:rfc', 'max:100', 'unique:users,email,'.$id.',user_id'],
             'username' => ['sometimes', 'nullable', 'string', 'min:3', 'max:30', 'regex:/^[a-z0-9._]+$/', 'unique:users,username,'.$id.',user_id'],
             '_login_check' => 'required',
         ], ['_login_check.required' => 'Keep an email or a username so this person can sign in.'] + self::LOGIN_FIELD_MESSAGES);
