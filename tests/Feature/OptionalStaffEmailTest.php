@@ -70,6 +70,19 @@ class OptionalStaffEmailTest extends TestCase
         }
     }
 
+    public function test_manager_renames_an_account_and_a_blank_name_is_refused(): void
+    {
+        $this->actingAs($this->makeUser('manager'), 'sanctum');
+        $target = $this->makeUser('owner');
+
+        $this->putJson('/api/admin/users/'.$target->user_id, ['role' => 'owner', 'name' => ''])->assertStatus(422)->assertJsonValidationErrors('name');
+        $this->putJson('/api/admin/users/'.$target->user_id, ['role' => 'owner', 'name' => 'Roxanne B. Baddiri'])->assertOk();
+        $this->assertSame('Roxanne B. Baddiri', DB::table('users')->where('user_id', $target->user_id)->value('name'));
+
+        $this->putJson('/api/admin/users/'.$target->user_id, ['role' => 'owner'])->assertOk();
+        $this->assertSame('Roxanne B. Baddiri', DB::table('users')->where('user_id', $target->user_id)->value('name'));
+    }
+
     public function test_own_login_keeps_one_way_in_and_is_closed_to_customers(): void
     {
         $user = $this->makeUser('owner');

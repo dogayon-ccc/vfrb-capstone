@@ -244,6 +244,7 @@ class UserController extends Controller
         $username = $request->exists('username') ? $request->input('username') : $user->username;
         $request->merge(['_login_check' => $email ?? $username]);
         $request->validate([
+            'name' => 'sometimes|required|string|max:100',
             'role' => 'required|in:staff,manager,owner|exists:roles,name',
             'assigned_stage' => ($request->input('role') === 'staff' ? 'required' : 'prohibited').'|nullable|in:'.implode(',', ProductionStageService::productionStages()),
             'email' => ['sometimes', 'nullable', 'email:rfc', 'max:100', 'unique:users,email,'.$id.',user_id'],
@@ -255,7 +256,9 @@ class UserController extends Controller
         if (! $this->canManageRole($request, $newRole)) {
             return response()->json(['message' => 'Only an Administrator (Manager) can change Administrator or Owner accounts.'], 403);
         }
+        $name = $request->input('name', $user->name);
         DB::table('users')->where('user_id', $id)->update([
+            'name' => $name,
             'job_function' => 'general',
             'assigned_stage' => $newRole === 'staff' ? $request->input('assigned_stage') : null,
             'email' => $email,
@@ -264,6 +267,9 @@ class UserController extends Controller
         ]);
         if ($email !== $user->email || $username !== $user->username) {
             AuditLog::record('user_login_changed', 'users', $id);
+        }
+        if ($name !== $user->name) {
+            AuditLog::record('user_name_changed', 'users', $id);
         }
 
         $roleId = DB::table('roles')->where('name', $newRole)->value('id');
