@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use App\Support\BusinessDay;
 use App\Support\Overdue;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\DB;
@@ -27,8 +28,8 @@ class AutomationGapsTest extends TestCase
     {
         return DB::table('orders')->insertGetId(array_merge([
             'user_id' => 5, 'garment_type' => 'Polo Shirt', 'color' => 'Navy', 'quantity_ordered' => 100, 'order_type' => 'direct',
-            'status' => $status, 'qc_required' => 0, 'agreed_total' => 50000, 'promised_date' => now()->addDays(14)->toDateString(),
-            'target_delivery_date' => now()->addDays(14)->toDateString(), 'down_payment_received_at' => now(),
+            'status' => $status, 'qc_required' => 0, 'agreed_total' => 50000, 'promised_date' => BusinessDay::now()->addDays(14)->toDateString(),
+            'target_delivery_date' => BusinessDay::now()->addDays(14)->toDateString(), 'down_payment_received_at' => now(),
             'created_at' => now(), 'updated_at' => now(),
         ], $over), 'order_id');
     }
@@ -42,7 +43,7 @@ class AutomationGapsTest extends TestCase
 
     public function test_pending_order_past_the_preferred_date_gets_the_review_flag_not_the_agreed_date_flag(): void
     {
-        $id = $this->order('pending', ['promised_date' => null, 'target_delivery_date' => now()->subDays(2)->toDateString()]);
+        $id = $this->order('pending', ['promised_date' => null, 'target_delivery_date' => BusinessDay::now()->subDays(2)->toDateString()]);
 
         $this->artisan('vfrb:daily-digest')->assertSuccessful();
         $this->artisan('vfrb:daily-digest')->assertSuccessful();
@@ -55,13 +56,13 @@ class AutomationGapsTest extends TestCase
 
     public function test_customer_gets_the_7_day_reminder_only_once_an_agreed_date_exists(): void
     {
-        $id = $this->order('pending', ['promised_date' => null, 'target_delivery_date' => now()->addDays(3)->toDateString()]);
+        $id = $this->order('pending', ['promised_date' => null, 'target_delivery_date' => BusinessDay::now()->addDays(3)->toDateString()]);
 
         $this->artisan('vfrb:daily-digest')->assertSuccessful();
         $this->assertSame(1, $this->notes('deadline_reminder', $id, 1)->count());
         $this->assertFalse($this->notes('deadline_reminder', $id, 5)->exists());
 
-        DB::table('orders')->where('order_id', $id)->update(['status' => 'confirmed', 'promised_date' => now()->addDays(5)->toDateString()]);
+        DB::table('orders')->where('order_id', $id)->update(['status' => 'confirmed', 'promised_date' => BusinessDay::now()->addDays(5)->toDateString()]);
         $this->artisan('vfrb:daily-digest')->assertSuccessful();
         $this->artisan('vfrb:daily-digest')->assertSuccessful();
 
@@ -72,10 +73,10 @@ class AutomationGapsTest extends TestCase
 
     public function test_reports_7_day_alert_uses_the_agreed_date_and_the_digest_window(): void
     {
-        $agreedSoon = $this->order('sewing', ['promised_date' => now()->addDays(3)->toDateString(), 'target_delivery_date' => now()->addDays(30)->toDateString()]);
-        $packed = $this->order('for_delivery', ['promised_date' => now()->addDays(2)->toDateString()]);
-        $agreedLater = $this->order('sewing', ['promised_date' => now()->addDays(30)->toDateString(), 'target_delivery_date' => now()->addDays(3)->toDateString()]);
-        $pastDue = $this->order('sewing', ['promised_date' => now()->subDays(2)->toDateString()]);
+        $agreedSoon = $this->order('sewing', ['promised_date' => BusinessDay::now()->addDays(3)->toDateString(), 'target_delivery_date' => BusinessDay::now()->addDays(30)->toDateString()]);
+        $packed = $this->order('for_delivery', ['promised_date' => BusinessDay::now()->addDays(2)->toDateString()]);
+        $agreedLater = $this->order('sewing', ['promised_date' => BusinessDay::now()->addDays(30)->toDateString(), 'target_delivery_date' => BusinessDay::now()->addDays(3)->toDateString()]);
+        $pastDue = $this->order('sewing', ['promised_date' => BusinessDay::now()->subDays(2)->toDateString()]);
 
         $alert = collect($this->getJson('/api/admin/reports')->assertOk()->json('prescriptive_alerts'))->firstWhere('type', 'deadline');
         $ids = collect($alert['affected_orders'])->map(fn ($v) => (int) $v);
@@ -90,11 +91,11 @@ class AutomationGapsTest extends TestCase
     public function test_dashboard_counts_overdue_orders_and_invoices_until_resolved(): void
     {
         [$orders, $invoices] = [Overdue::orders()->count(), Overdue::invoices()->count()];
-        $late = $this->order('sewing', ['promised_date' => now()->subDay()->toDateString()]);
+        $late = $this->order('sewing', ['promised_date' => BusinessDay::now()->subDay()->toDateString()]);
         $billed = $this->order('completed');
         DB::table('invoices')->insert([
             'order_id' => $billed, 'invoice_number' => 'INV-T-'.uniqid(), 'status' => 'issued', 'billed_to_name' => 'Test School', 'total_amount' => 1000,
-            'due_date' => now()->subDay()->toDateString(), 'issued_at' => now(), 'issued_by' => 1, 'created_at' => now(), 'updated_at' => now(),
+            'due_date' => BusinessDay::now()->subDay()->toDateString(), 'issued_at' => now(), 'issued_by' => 1, 'created_at' => now(), 'updated_at' => now(),
         ]);
 
         $this->getJson('/api/admin/dashboard')->assertOk()->assertJson(['overdue' => ['orders' => $orders + 1, 'invoices' => $invoices + 1]]);
