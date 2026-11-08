@@ -94,8 +94,8 @@ class AIController extends Controller
             ['eligible' => $eligible, 'profile' => $profile] = $prep;
 
             $context = $this->recommender->context($order, $eligible, $profile);
-            // v2: the context now carries stock flags, colour matches and construction needs, so a stock change re-asks.
-            $cacheKey = 'matrec:v2:' . $this->matcher->designHash($context);
+            // v3: the prompt no longer asks for stock remarks, so v2 replies (which may carry them) are never reused.
+            $cacheKey = 'matrec:v3:' . $this->matcher->designHash($context);
             $started  = microtime(true);
             $source   = 'cache';
             $result   = Cache::get($cacheKey);
@@ -153,7 +153,7 @@ class AIController extends Controller
             ]);
 
             return response()->json([
-                'recommendation' => $result['narration'],
+                'recommendation' => MaterialRecommendation::withoutStockTalk((string) $result['narration']),
                 'source'         => $source,
                 'materials'      => $this->withCatalogFacts(
                     MaterialRecommendation::where('order_id', $order->order_id)->orderBy('display_order')->get(MaterialRecommendation::CUSTOMER_COLUMNS),
@@ -417,7 +417,7 @@ class AIController extends Controller
         }
 
         $facts         = collect($this->withCatalogFacts($rows, $order))->keyBy('material_id')
-            ->map(fn ($r) => array_intersect_key($r, array_flip(['id', 'name', 'note', 'image_url', 'description', 'material_code', 'in_stock', 'colour_match'])))->all();
+            ->map(fn ($r) => array_intersect_key($r, array_flip(['id', 'name', 'note', 'image_url', 'description', 'material_code', 'colour_match'])))->all();
         $materialsJson = [];
         $notesParts    = [];
         foreach ($rows as $row) {
@@ -651,8 +651,8 @@ PROMPT;
     // PRIVATE HELPERS
     // =========================================================================
     /**
-     * Recommendation rows with facts read from the catalog now (never from the model): the material code, whether it is in stock
-     * (true/false, null when stock is not recorded) and how its colour relates to this order's design. No quantity or price.
+     * Recommendation rows with facts read from the catalog now (never from the model): the material code and how its colour relates
+     * to this order's design. Customer responses only: no stock, quantity or price (staff see stock in their own views).
      * @return array<int,array<string,mixed>>
      */
     private function withCatalogFacts($rows, Order $order): array
@@ -675,7 +675,6 @@ PROMPT;
                 'image_url'     => $m?->image_url,
                 'description'   => $m?->description,
                 'material_code' => $m?->material_code,
-                'in_stock'      => $m ? $this->matcher->inStock($m->toArray()) : null,
                 'colour_match'  => $match === false ? 'other' : $match,
             ];
         })->values()->all();

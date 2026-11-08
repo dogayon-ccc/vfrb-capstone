@@ -75,7 +75,7 @@ class AiRecommendationTest extends TestCase
         $this->assertSame([2, 14], collect($res->json('materials'))->pluck('material_id')->all());
         $this->assertSame(['near', null], collect($res->json('materials'))->pluck('colour_match')->all());
         $this->assertSame('MAT-FAB-002', $res->json('materials.0.material_code'));
-        $this->assertIsBool($res->json('materials.0.in_stock'));
+        $this->assertArrayNotHasKey('in_stock', $res->json('materials.0')); // stock is VFRB-internal
         $this->assertSame(['pending', 'pending'], collect($res->json('materials'))->pluck('status')->all());
 
         $body = json_encode($res->json());
@@ -87,6 +87,41 @@ class AiRecommendationTest extends TestCase
         $this->assertSame(['Cotton-Poly Blend Fabric (Navy)', 'Polyester Thread'], $rows->pluck('material_name')->all());
         $this->assertSame([null], $rows->pluck('estimated_range')->unique()->values()->all());
         $this->assertSame('ready', DB::table('orders')->where('order_id', 9)->value('ai_recommendation_status'));
+    }
+
+    public function test_stock_never_reaches_the_customer_but_stays_in_the_stored_note(): void
+    {
+        Http::fake(['*' => $this->gemini([
+            'selections' => [
+                ['material_id' => 2, 'reason' => 'Durable navy fabric for a polo. (Note: Currently out of stock)'],
+                ['material_id' => 14, 'reason' => 'Currently out of stock.'],
+            ],
+            'narration' => 'Fabric and thread suit this polo. The thread is restocked weekly.',
+        ])]);
+        $this->actAs(5);
+
+        $res = $this->recommend()->assertOk();
+        $this->assertSame('Fabric and thread suit this polo.', $res->json('recommendation'));
+        $this->assertSame(['Durable navy fabric for a polo.', 'Suitable thread for this design.'], collect($res->json('materials'))->pluck('note')->all());
+
+        $shown = $this->getJson('/api/customer/orders/9/ai-recommendation')->assertOk();
+        $this->assertSame('Durable navy fabric for a polo. Suitable thread for this design.', $shown->json('recommendation.notes'));
+        foreach ([$res, $shown] as $r) {
+            $this->assertDoesNotMatchRegularExpression('/stock/i', json_encode($r->json()));
+        }
+        // Staff still read what the AI wrote.
+        $this->assertStringContainsString('out of stock', (string) $this->recRows()->first()->ai_note);
+
+        Http::assertSent(fn (Request $r) => str_contains($r->data()['contents'][0]['parts'][0]['text'], 'Never mention stock or availability'));
+    }
+
+    public function test_customer_note_strips_stock_remarks_and_keeps_the_rest(): void
+    {
+        $this->assertSame('Breathable cotton for scrubs.', MaterialRecommendation::withoutStockTalk('Breathable cotton for scrubs (Note: Currently out of stock).'));
+        $this->assertSame('Soft knit. Easy care.', MaterialRecommendation::withoutStockTalk('Soft knit. Low stock right now! Easy care.'));
+        $this->assertSame('', MaterialRecommendation::withoutStockTalk('Note: Currently out of stock.'));
+        $this->assertSame('Stockinette-free plain weave.', MaterialRecommendation::withoutStockTalk('Stockinette-free plain weave.'));
+        $this->assertSame('Suitable lining for this design.', MaterialRecommendation::customerNote('Out of stock at the moment.', 'Lining'));
     }
 
     public function test_request_is_grounded_in_the_catalog_and_design_and_keeps_the_key_server_side(): void

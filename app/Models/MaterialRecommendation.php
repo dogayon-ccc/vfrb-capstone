@@ -13,15 +13,26 @@ class MaterialRecommendation extends Model
     /**
      * The note as a customer may read it. A stored note that fails today's AI text guard (written before the guard existed)
      * reads as the generic line instead. Every catalog name and code is ignored, so a swap note naming the old material survives.
+     * Stock is VFRB-internal: any stock remark is removed here; the stored note (read by staff) keeps it.
      */
     public static function customerNote(?string $note, ?string $category): ?string
     {
         if ($note === null || trim($note) === '') { return $note; }
+        $generic = 'Suitable ' . mb_strtolower($category ?: 'material') . ' for this design.';
+        $note = self::withoutStockTalk($note);
+        if ($note === '') { return $generic; }
         $terms = once(fn () => Material::query()->get(['material_name', 'material_code'])
             ->flatMap(fn ($m) => [(string) $m->material_name, (string) $m->material_code])->filter()->values()->all());
-        return app(\App\Services\MaterialCatalogMatcher::class)->isUnsafeAiText($note, $terms)
-            ? 'Suitable ' . mb_strtolower($category ?: 'material') . ' for this design.'
-            : $note;
+        return app(\App\Services\MaterialCatalogMatcher::class)->isUnsafeAiText($note, $terms) ? $generic : $note;
+    }
+
+    /** Drops every bracketed aside and sentence that mentions stock ("(Note: Currently out of stock)", "It is restocked weekly."). */
+    public static function withoutStockTalk(string $text): string
+    {
+        $stock = '\b(?:re)?stock(?:ed|s)?\b';
+        $text = preg_replace("/\\s*\\([^()]*{$stock}[^()]*\\)/iu", '', $text) ?? $text;
+        $text = preg_replace("/(?:^|(?<=[.!?]))\\s*[^.!?]*{$stock}[^.!?]*(?:[.!?]+|$)/iu", '', $text) ?? $text;
+        return trim(preg_replace('/\s{2,}/u', ' ', $text) ?? $text);
     }
 
     public const CUSTOMER_COLUMNS = [
