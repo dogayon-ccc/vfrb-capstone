@@ -97,4 +97,67 @@ class MaterialSpecMatcherTest extends TestCase
         $picks = (new MaterialCatalogMatcher())->fallback([5 => $row(5), 3 => $row(3)]);
         $this->assertSame(3, $picks['selections'][0]['material_id']); // lowest material_id, as before
     }
+
+    private function fabric(int $id, ?array $spec, string $colour = 'body', ?bool $stock = true, ?string $name = null): array
+    {
+        return ['material_id' => $id, 'material_code' => "C{$id}", 'material_name' => $name ?? "Fabric {$id}", 'category' => 'Fabric',
+            'colour_match' => $colour, 'in_stock' => $stock, 'spec' => $spec];
+    }
+
+    public function test_risk_counts_only_required_attributes_whose_unverified_value_fails(): void
+    {
+        $this->assertSame(1, $this->evaluateWith(['gsm' => 90])['risk']);                                  // recorded, unverified, fails a required spec
+        $this->assertSame(0, $this->evaluateWith(['gsm' => 160])['risk']);                                 // passes
+        $this->assertSame(0, $this->evaluateWith(['material_id' => 1])['risk']);                           // no data is not evidence against
+        $this->assertSame(0, $this->evaluateWith(['stretch_pct' => 2])['risk']);                           // optional requirement
+        $this->assertSame(0, $this->evaluateWith(['gsm' => 90, 'spec_verified_at' => '2026-11-19'])['risk']); // verified mismatch is a hard fail, not a risk
+    }
+
+    public function test_a_recorded_failing_value_ranks_below_a_material_with_no_data_even_when_in_stock(): void
+    {
+        $m = new MaterialSpecMatcher();
+        $risky   = $this->fabric(1, $m->evaluate(['gsm' => 90], self::REQS));
+        $unknown = $this->fabric(2, $m->evaluate(['material_id' => 2], self::REQS), 'body', false);   // no data, and out of stock
+        $this->assertSame($risky['spec']['spec_fit'], $unknown['spec']['spec_fit']);                  // same coverage score, so only risk tells them apart
+        $picks = (new MaterialCatalogMatcher())->fallback([1 => $risky, 2 => $unknown]);
+        $this->assertSame(2, $picks['selections'][0]['material_id']);
+    }
+
+    public function test_ai_pick_with_a_recorded_failing_value_is_swapped_for_a_clean_equal_fit_fabric(): void
+    {
+        $m = new MaterialSpecMatcher();
+        $eligible = [1 => $this->fabric(1, $m->evaluate(['gsm' => 90], self::REQS)), 2 => $this->fabric(2, $m->evaluate(['gsm' => 160], self::REQS))];
+        $out = (new MaterialCatalogMatcher())->enforceSpecPolicy([['material_id' => 1, 'reason' => 'x']], $eligible);
+        $this->assertSame([2, 1], [$out['selections'][0]['material_id'], $out['swapped']]);
+        $this->assertStringNotContainsString('x', $out['selections'][0]['reason']);
+    }
+
+    public function test_the_swap_never_trades_colour_stock_rejections_or_kind_and_never_touches_clean_picks(): void
+    {
+        $m = new MaterialSpecMatcher();
+        $bad  = $m->evaluate(['gsm' => 90], self::REQS);
+        $good = $m->evaluate(['gsm' => 160], self::REQS);
+        $matcher = new MaterialCatalogMatcher();
+        $pick = [['material_id' => 1, 'reason' => 'x']];
+
+        // Worse colour fit, out of stock while the original is in stock, staff-rejected, and a lining for a main fabric: all stay as chosen.
+        foreach ([
+            [1 => $this->fabric(1, $bad), 2 => $this->fabric(2, $good, 'near')],
+            [1 => $this->fabric(1, $bad), 2 => $this->fabric(2, $good, 'body', false)],
+            [1 => $this->fabric(1, $bad), 2 => $this->fabric(2, $good, 'body', true, 'Cotton Lining')],
+        ] as $eligible) {
+            $this->assertSame([1, 0], [$matcher->enforceSpecPolicy($pick, $eligible)['selections'][0]['material_id'], $matcher->enforceSpecPolicy($pick, $eligible)['swapped']]);
+        }
+        $rejected = [1 => $this->fabric(1, $bad), 2 => $this->fabric(2, $good)];
+        $this->assertSame(1, $matcher->enforceSpecPolicy($pick, $rejected, [], [2])['selections'][0]['material_id']);
+
+        // Already-clean picks, picks without spec data, and a swap target already chosen are left alone.
+        $clean = [1 => $this->fabric(1, $good), 2 => $this->fabric(2, $good)];
+        $this->assertSame(0, $matcher->enforceSpecPolicy($pick, $clean)['swapped']);
+        $none = [1 => $this->fabric(1, null), 2 => $this->fabric(2, $good)];
+        $this->assertSame(0, $matcher->enforceSpecPolicy($pick, $none)['swapped']);
+        $both = [1 => $this->fabric(1, $bad), 2 => $this->fabric(2, $good)];
+        $two  = $matcher->enforceSpecPolicy([['material_id' => 1, 'reason' => 'x'], ['material_id' => 2, 'reason' => 'y']], $both);
+        $this->assertSame([[1, 2], 0], [array_column($two['selections'], 'material_id'), $two['swapped']]);
+    }
 }

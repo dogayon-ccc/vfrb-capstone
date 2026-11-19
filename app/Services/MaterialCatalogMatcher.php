@@ -171,13 +171,19 @@ final class MaterialCatalogMatcher
 
         $narration = $this->cleanText($parsed['narration'] ?? '');
         if ($narration === '' || mb_strlen($narration) > self::MAX_NARRATION || $this->isUnsafeAiText($narration, $names)) {
-            $narration = $selections
-                ? 'Recommended materials for this design: ' . $this->joinNames(array_map(fn ($s) => $eligible[$s['material_id']]['material_name'], $selections)) . '.'
-                : '';
+            $narration = $this->listNarration($selections, $eligible);
             if ($narration !== '') { $dropped['sanitized']++; }
         }
 
         return ['selections' => $selections, 'narration' => $narration, 'dropped' => $dropped];
+    }
+
+    /** The plain narration used when the AI's own is missing or unsafe: just the chosen names. */
+    public function listNarration(array $selections, array $eligible): string
+    {
+        return $selections
+            ? 'Recommended materials for this design: ' . $this->joinNames(array_map(fn ($s) => $eligible[$s['material_id']]['material_name'], $selections)) . '.'
+            : '';
     }
 
     // What a construction need looks like in a catalog name or category (garment features -> closures and support materials).
@@ -194,6 +200,54 @@ final class MaterialCatalogMatcher
     private const MAIN_MATCH = ['body', 'any', 'near', null];
 
     /**
+     * The one ordering both the fallback and the AI policy use: staff-rejected last, then a recorded value that fails a required spec,
+     * then out of stock, saved preference, better spec fit, colour fit, lowest id.
+     * @return callable(array):array
+     */
+    private function rankKey(array $preferredIds, array $avoidIds): callable
+    {
+        $rank  = array_flip(array_map('intval', $preferredIds));
+        $avoid = array_flip(array_map('intval', $avoidIds));
+        return fn ($m) => [isset($avoid[$m['material_id']]) ? 1 : 0, (int) (($m['spec']['risk'] ?? 0) > 0), ($m['in_stock'] ?? null) === false ? 1 : 0,
+                           isset($rank[$m['material_id']]) ? 0 : 1, -(int) round(1000 * (float) ($m['spec']['spec_fit'] ?? 0)),
+                           self::MATCH_RANK[$m['colour_match'] ?? ''] ?? 3, $m['material_id']];
+    }
+
+    /**
+     * Holds an AI answer to the same technical rule the fallback follows: a fabric whose recorded (unverified) value fails a required spec
+     * is swapped for the best other fabric with no such failure, but only when that one fits the colour at least as well, is in stock
+     * if the original was, is not staff-rejected, and is the same kind (lining vs main). Nothing else is reordered or removed.
+     * @param array<int,array{material_id:int,reason:string}> $selections
+     * @return array{selections:array,swapped:int}
+     */
+    public function enforceSpecPolicy(array $selections, array $eligible, array $preferredIds = [], array $avoidIds = []): array
+    {
+        $key     = $this->rankKey($preferredIds, $avoidIds);
+        $avoid   = array_flip(array_map('intval', $avoidIds));
+        $fabric  = fn ($m) => str_contains(mb_strtolower($m['category']), 'fabric');
+        $lining  = fn ($m) => (bool) preg_match('/lining|interfac/i', $m['material_name']);
+        $colour  = fn ($m) => self::MATCH_RANK[$m['colour_match'] ?? ''] ?? 3;
+        $taken   = array_flip(array_map(fn ($s) => (int) $s['material_id'], $selections));
+        $swapped = 0;
+
+        foreach ($selections as $i => $s) {
+            $cur = $eligible[$s['material_id']] ?? null;
+            if (!$cur || !$fabric($cur) || (int) (($cur['spec']['risk'] ?? 0) > 0) === 0) { continue; }
+            $options = array_filter($eligible, fn ($m) => $fabric($m) && !isset($taken[$m['material_id']]) && !isset($avoid[$m['material_id']])
+                && (int) (($m['spec']['risk'] ?? 0) > 0) === 0 && $lining($m) === $lining($cur) && $colour($m) <= $colour($cur)
+                && (($cur['in_stock'] ?? null) === false || ($m['in_stock'] ?? null) !== false));
+            if (!$options) { continue; }
+            usort($options, fn ($a, $b) => $key($a) <=> $key($b));
+            $best = $options[0];
+            unset($taken[$cur['material_id']]);
+            $taken[$best['material_id']] = true;
+            $selections[$i] = ['material_id' => (int) $best['material_id'], 'reason' => 'Fabric from the approved list whose recorded details do not conflict with what this garment needs.'];
+            $swapped++;
+        }
+        return ['selections' => $selections, 'swapped' => $swapped];
+    }
+
+    /**
      * Deterministic picks for when Gemini fails: the main fabric (body colour first), a contrast fabric for a trim zone of another
      * colour, a matching thread, and one material per construction need (buttons, zipper, elastic...). Within each: in-stock rows
      * first, then the customer's saved preferences, then colour fit, then lowest material_id. Never a quantity.
@@ -204,10 +258,7 @@ final class MaterialCatalogMatcher
      */
     public function fallback(array $eligible, array $preferredIds = [], array $needs = [], array $avoidIds = []): array
     {
-        $rank  = array_flip(array_map('intval', $preferredIds));
-        $avoid = array_flip(array_map('intval', $avoidIds));
-        $key   = fn ($m) => [isset($avoid[$m['material_id']]) ? 1 : 0, ($m['in_stock'] ?? null) === false ? 1 : 0, isset($rank[$m['material_id']]) ? 0 : 1,
-                            -(int) round(1000 * (float) ($m['spec']['spec_fit'] ?? 0)), self::MATCH_RANK[$m['colour_match'] ?? ''] ?? 3, $m['material_id']];
+        $key   = $this->rankKey($preferredIds, $avoidIds);
         $rows = array_values($eligible);
         usort($rows, fn ($a, $b) => $key($a) <=> $key($b));
         $is     = fn ($m, $kind) => str_contains(mb_strtolower($m['category']), $kind);

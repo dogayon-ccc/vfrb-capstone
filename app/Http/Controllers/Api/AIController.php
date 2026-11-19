@@ -122,7 +122,20 @@ class AIController extends Controller
                 }
             }
 
-            DB::transaction(function () use ($order, $result, $eligible) {
+            // Provenance (only once its migration has run): which engine produced these lines and from what inputs.
+            $prov = MaterialRecommendation::provenanceReady() ? [
+                'rec_source' => $source === 'catalog_default' ? 'catalog_default' : 'ai',
+                'rec_meta'   => [
+                    'context_hash' => $this->matcher->designHash($context),
+                    'served_from'  => ['ai' => 'provider', 'cache' => 'cache', 'catalog_default' => 'fallback'][$source],
+                    'model'        => $source === 'catalog_default' ? null : ($result['model'] ?? null),
+                    'swapped'      => (int) ($result['swapped'] ?? 0),
+                    'engine'       => 'matrec-v3',
+                    'at'           => now()->toIso8601String(),
+                ],
+            ] : [];
+
+            DB::transaction(function () use ($order, $result, $eligible, $prov) {
                 MaterialRecommendation::where('order_id', $order->order_id)->delete();
                 foreach ($result['selections'] as $i => $sel) {
                     $mat = $eligible[$sel['material_id']];
@@ -136,6 +149,7 @@ class AIController extends Controller
                         'display_order' => $i,
                         'status'        => 'pending',
                         // Only written when requirements applied (so only after the spec migration has run).
+                        ...$prov,
                         ...(($mat['spec'] ?? null) ? ['spec_snapshot' => ['at' => now()->toIso8601String(), 'eval' => $mat['spec']]] : []),
                         'created_at'    => now(),
                         'updated_at'    => now(),

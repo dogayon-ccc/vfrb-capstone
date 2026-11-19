@@ -11,6 +11,9 @@ use Illuminate\Support\Facades\Log;
 
 class GeminiClient
 {
+    /** The model that produced the last call()'s text (primary or fallback), null when the call failed. Recorded as provenance. */
+    public ?string $lastModel = null;
+
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
     public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null): ?string
     {
@@ -18,11 +21,14 @@ class GeminiClient
         $primary  = (string) config('services.gemini.model');
         $fallback = (string) config('services.gemini.fallback_model', '');
         $started  = microtime(true);
+        $this->lastModel = null;
 
         $text = $this->callModel($primary, $prompt, $maxTokens, $jsonSchema);
+        if ($text !== null) { $this->lastModel = $primary; }
         if ($text === null && $fallback !== '' && $fallback !== $primary && (microtime(true) - $started) < 30) {
             Log::warning('Gemini: primary model failed, trying fallback', ['primary' => $primary, 'fallback' => $fallback]);
             $text = $this->callModel($fallback, $prompt, $maxTokens, $jsonSchema);
+            if ($text !== null) { $this->lastModel = $fallback; }
         }
         return $text;
     }

@@ -568,4 +568,40 @@ class AiRecommendationTest extends TestCase
             $this->assertStringNotContainsString($secret, $all);
         }
     }
+
+    private function provenance(): array
+    {
+        $row = DB::table('material_recommendations')->where('order_id', 9)->orderBy('display_order')->first();
+        return [$row->rec_source, json_decode($row->rec_meta, true)];
+    }
+
+    public function test_every_stored_line_records_its_source_the_model_that_answered_and_the_input_hash(): void
+    {
+        if (!Schema::hasColumn('material_recommendations', 'rec_source')) { $this->markTestSkipped('Run the provenance migration on vfrb_test first.'); }
+        config(['services.gemini.model' => 'model-under-test']);
+        Http::fake(['*' => $this->gemini(['selections' => [['material_id' => 2, 'reason' => 'ok']], 'narration' => 'ok'])]);
+        $this->actAs(5);
+
+        $this->recommend()->assertOk();
+        [$source, $meta] = $this->provenance();
+        $this->assertSame(['ai', 'provider', 'model-under-test', 'matrec-v3'], [$source, $meta['served_from'], $meta['model'], $meta['engine']]);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{64}$/', $meta['context_hash']);
+
+        // The same design again is a cache hit: same inputs, same model, and it says it came from the cache.
+        $hash = $meta['context_hash'];
+        $this->recommend()->assertOk();
+        [$source, $meta] = $this->provenance();
+        $this->assertSame(['ai', 'cache', 'model-under-test', $hash], [$source, $meta['served_from'], $meta['model'], $meta['context_hash']]);
+    }
+
+    public function test_fallback_lines_are_marked_as_the_catalog_default_with_no_model(): void
+    {
+        if (!Schema::hasColumn('material_recommendations', 'rec_source')) { $this->markTestSkipped('Run the provenance migration on vfrb_test first.'); }
+        Http::fake(['*' => Http::response('boom', 500)]);
+        $this->actAs(5);
+
+        $this->assertCatalogFallback($this->recommend());
+        [$source, $meta] = $this->provenance();
+        $this->assertSame(['catalog_default', 'fallback', null], [$source, $meta['served_from'], $meta['model']]);
+    }
 }

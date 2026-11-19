@@ -6,6 +6,7 @@ use App\Models\MaterialRecommendation;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
 // vfrb:ml-readiness counts only labels vfrb:ai-eval would use. Fixture (vfrb_test): user 1 = manager, orders 8 and 9 = polo orders.
@@ -114,5 +115,17 @@ class MlReadinessTest extends TestCase
         $before = DB::table('material_recommendations')->count();
         $this->report();
         $this->assertSame($before, DB::table('material_recommendations')->count());
+    }
+
+    public function test_genuine_verdicts_are_split_by_the_engine_that_produced_the_line(): void
+    {
+        if (!Schema::hasColumn('material_recommendations', 'rec_source')) { $this->markTestSkipped('Run the provenance migration on vfrb_test first.'); }
+        $this->line(8, $this->mat(0), 'accept');
+        $this->line(8, $this->mat(1), 'reject');
+        $this->line(8, $this->mat(2), 'accept');
+        DB::table('material_recommendations')->where('order_id', 8)->where('material_id', $this->mat(0))->update(['rec_source' => 'ai']);
+        DB::table('material_recommendations')->where('order_id', 8)->where('material_id', $this->mat(1))->update(['rec_source' => 'catalog_default']);
+
+        $this->assertSame(['ai' => 1, 'catalog_default' => 1, 'unrecorded' => 1], $this->report()['feedback']['genuine_by_source']);
     }
 }

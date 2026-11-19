@@ -43,9 +43,12 @@ class VfrbAiReviewRun extends Command
             $res = $recommender->ask($ctx, $eligible);   // never throws; provider failure comes back empty
             $source = 'ai';
             $dropped = $res['dropped'];
+            $answered = $res['model'] ?? null;
+            $swapped  = (int) ($res['swapped'] ?? 0);
             if (!$res['selections']) { $source = 'catalog_default'; $res = $recommender->fallback($ctx, $eligible) + ['dropped' => $dropped, 'empty' => $res['empty']]; }
             $runs[] = $rec + ['source' => $source, 'eligible' => count($eligible), 'ai_empty' => (bool) ($res['empty'] ?? false),
-                              'dropped' => $dropped, 'picked' => array_column($res['selections'], 'material_id')];
+                              'dropped' => $dropped, 'picked' => array_column($res['selections'], 'material_id'),
+                              'answered_by' => $source === 'ai' ? $answered : null, 'spec_swapped' => $swapped];
             foreach ($res['selections'] as $s) {
                 $m = $eligible[$s['material_id']];
                 $sheet[] = [$stamp, $order->order_id, $rec['garment'], $source, $m['material_code'], $m['material_name'], $m['category'], $s['reason'], '', '', ''];
@@ -56,7 +59,7 @@ class VfrbAiReviewRun extends Command
 
         $meta = ['run_id' => $stamp, 'tested_at' => now()->toIso8601String(), 'model' => (string) config('services.gemini.model'),
                  'fallback_model' => (string) config('services.gemini.fallback_model'),
-                 'note' => 'The fallback model answers only if the primary call fails; the run does not record which one answered. Outputs can vary between runs.'];
+                 'note' => 'The fallback model answers only if the primary call fails; answered_by records which model answered each order. Outputs can vary between runs.'];
         File::put("{$dir}/run-{$stamp}.json", json_encode(['meta' => $meta, 'orders' => $runs], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
         $fh = fopen("{$dir}/rating-sheet-{$stamp}.csv", 'w');
         fwrite($fh, "\xEF\xBB\xBF");

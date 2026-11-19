@@ -28,6 +28,10 @@ class VfrbAiEval extends Command
 
     protected $description = 'Score AI material picks against past staff accept/reject verdicts (read-only)';
 
+    /** What these numbers are, printed with them so they are not mistaken for accuracy. */
+    private const BASIS = 'Agreement with staff verdicts on materials that were previously shown; a material never shown cannot be judged. '
+        . 'Eligibility and spec requirements are applied as they are now, not as when each order was answered. Not an accuracy measure.';
+
     public function handle(MaterialRecommender $recommender): int
     {
         if ($model = trim((string) $this->option('model'))) {
@@ -109,6 +113,7 @@ class VfrbAiEval extends Command
             'skipped'     => $skipped,
             'ai_failed'   => $failed,
             'duplicates_collapsed' => $collapsed,
+            'basis'       => self::BASIS,
             'total'       => $score($total),
             'by_garment'  => array_map(fn ($g, $s) => ['garment' => ucwords($g)] + $score($s), array_keys($groups), $groups),
         ];
@@ -119,6 +124,7 @@ class VfrbAiEval extends Command
         }
         $this->info("Mode: {$result['mode']}" . ($result['model'] ? " ({$result['model']})" : '')
             . " | scored {$result['scored']}, skipped {$result['skipped']}, AI failed {$result['ai_failed']}");
+        $this->line('Basis: ' . self::BASIS);
         $row = fn (string $name, array $s) => [$name, $s['orders'], $s['picks'], $s['precision'] ?? '-', $s['recall'] ?? '-', $s['rejected_rate'] ?? '-'];
         $this->table(['Garment', 'Orders', 'Picks', 'Precision', 'Recall', 'Rejected rate'],
             [...array_map(fn ($g) => $row($g['garment'], $g), $result['by_garment']), $row('ALL', $result['total'])]);

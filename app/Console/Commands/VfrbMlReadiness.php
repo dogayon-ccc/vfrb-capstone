@@ -51,6 +51,13 @@ class VfrbMlReadiness extends Command
             'unknown_user'   => $raw()->whereNotNull('staff_feedback_by')->whereNotIn('staff_feedback_by', DB::table('users')->select('user_id'))->count(),
         ];
 
+        // Which engine produced the lines the verdicts judge (null until the provenance migration has run; older lines are "unrecorded").
+        $bySource = null;
+        if (MaterialRecommendation::provenanceReady()) {
+            $t        = AiEvalGuard::genuineVerdicts()->selectRaw('rec_source, COUNT(*) c')->groupBy('rec_source')->pluck('c', 'rec_source')->all();
+            $bySource = ['ai' => (int) ($t['ai'] ?? 0), 'catalog_default' => (int) ($t['catalog_default'] ?? 0), 'unrecorded' => (int) ($t[''] ?? 0)];
+        }
+
         // Independent groups: near-duplicate orders (same customer, garment, category, colours) count once, newest kept.
         $orderIds = AiEvalGuard::genuineVerdicts()->groupBy('order_id')->orderByRaw('MAX(rec_id) DESC')->pluck('order_id')->map(fn ($i) => (int) $i)->all();
         $orders   = Order::whereIn('order_id', $orderIds)->get()->keyBy('order_id');
@@ -81,7 +88,7 @@ class VfrbMlReadiness extends Command
             'materials' => ['total' => $materials->count(), 'fabrics' => $fabrics->count(), 'distinct_names' => $names->unique()->count(),
                             'duplicate_names' => $materials->count() - $names->unique()->count(),
                             'spec_coverage_fabrics' => $specCover, 'spec_verified_fabrics' => $verified, 'gsm_verified_fabrics' => $gsmVerified],
-            'feedback'  => ['raw_observations' => $rawCount, 'genuine_verdicts' => $genuine, 'excluded_total' => $rawCount - $genuine, 'excluded_reasons_may_overlap' => $excluded],
+            'feedback'  => ['raw_observations' => $rawCount, 'genuine_verdicts' => $genuine, 'excluded_total' => $rawCount - $genuine, 'genuine_by_source' => $bySource, 'excluded_reasons_may_overlap' => $excluded],
             'orders'    => ['eligible' => count($orderIds), 'duplicates_collapsed' => $collapsed, 'independent_groups' => count($kept)],
             'labels'    => ['accept' => $accept, 'reject' => $reject, 'both_classes' => min($accept, $reject) > 0,
                             'conflicting_same_order_material' => $conflicts, 'per_garment' => $perGarment],

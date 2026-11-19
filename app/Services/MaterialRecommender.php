@@ -75,7 +75,8 @@ final class MaterialRecommender
     /**
      * Asks Gemini and re-validates the reply. Any provider failure (no key, timeout, throw, bad JSON) gives empty selections, never
      * an exception; the caller then uses fallback().
-     * @return array{selections:array,narration:string,dropped:array,empty:bool}
+     * Valid picks are then held to the fallback's technical rule (enforceSpecPolicy); `swapped` counts replacements and `model` is the model that answered.
+     * @return array{selections:array,narration:string,dropped:array,empty:bool,swapped:int,model:?string}
      */
     public function ask(array $context, array $eligible): array
     {
@@ -86,7 +87,11 @@ final class MaterialRecommender
             $aiText = null;
         }
         $decoded = $aiText ? json_decode(trim(preg_replace('/```json|```/i', '', $aiText)), true) : null;
-        return $this->matcher->normalize(is_array($decoded) ? $decoded : null, $eligible) + ['empty' => !$aiText];
+        $out     = $this->matcher->normalize(is_array($decoded) ? $decoded : null, $eligible) + ['empty' => !$aiText];
+        $policy  = $this->matcher->enforceSpecPolicy($out['selections'], $eligible, [...$context['approved_material_ids'], ...$context['preferred_material_ids']], $context['avoid_material_ids']);
+        // A swapped-in material makes the AI's narration describe the wrong list, so it is rebuilt from the final names.
+        if ($policy['swapped']) { $out['narration'] = $this->matcher->listNarration($policy['selections'], $eligible); }
+        return ['selections' => $policy['selections'], 'swapped' => $policy['swapped'], 'model' => $aiText ? $this->gemini->lastModel : null] + $out;
     }
 
     /** Deterministic catalog picks that follow the same staff feedback and customer preferences. */

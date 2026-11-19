@@ -51,7 +51,7 @@ class MaterialRecommendation extends Model
         'customer_note','linked_by','linked_at','actual_qty_issued',
         'issued_at','created_at','updated_at',
         'staff_feedback','staff_feedback_note','staff_feedback_by','staff_feedback_at',
-        'spec_snapshot',
+        'spec_snapshot','rec_source','rec_meta',
     ];
     protected $casts = [
         'customer_accepted' => 'boolean',
@@ -60,7 +60,14 @@ class MaterialRecommendation extends Model
         'issued_at'         => 'datetime',
         'staff_feedback_at' => 'datetime',
         'spec_snapshot'     => 'array',
+        'rec_meta'          => 'array',
     ];
+    /** True once the provenance migration has run, so generation works before and after it. */
+    public static function provenanceReady(): bool
+    {
+        static $ready = null;
+        return $ready ??= \Illuminate\Support\Facades\Schema::hasColumn('material_recommendations', 'rec_source');
+    }
     public function order()    { return $this->belongsTo(Order::class, 'order_id', 'order_id'); }
     public function material() { return $this->belongsTo(Material::class, 'material_id', 'material_id'); }
     public function linker()   { return $this->belongsTo(User::class, 'linked_by', 'user_id'); }

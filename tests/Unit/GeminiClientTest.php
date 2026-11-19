@@ -166,4 +166,31 @@ class GeminiClientTest extends TestCase
         (new GeminiClient())->call('hi');
         Http::assertSent(fn (Request $r) => str_contains($r->url(), '/models/model-from-env:generateContent'));
     }
+
+    public function test_the_model_that_answered_is_recorded_and_cleared_on_failure(): void
+    {
+        $this->keys();
+        config(['services.gemini.model' => 'primary-m', 'services.gemini.fallback_model' => 'backup-m']);
+        $client = new GeminiClient();
+
+        $mode = 'primary_ok';
+        Http::fake(['*' => function (Request $r) use (&$mode) {
+            return match (true) {
+                $mode === 'primary_ok'                                  => $this->ok([['text' => 'hello']]),
+                $mode === 'backup_only' && str_contains($r->url(), 'backup-m') => $this->ok([['text' => 'from backup']]),
+                default                                                 => Http::response('boom', 500),
+            };
+        }]);
+
+        $client->call('hi');
+        $this->assertSame('primary-m', $client->lastModel);
+
+        $mode = 'backup_only';
+        $this->assertSame('from backup', $client->call('hi'));
+        $this->assertSame('backup-m', $client->lastModel);
+
+        $mode = 'down';
+        $this->assertNull($client->call('hi'));
+        $this->assertNull($client->lastModel);
+    }
 }

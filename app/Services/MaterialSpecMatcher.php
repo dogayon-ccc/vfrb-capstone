@@ -14,6 +14,8 @@ namespace App\Services;
  * Only a verified mismatch on a required attribute removes a material (hard_fail). Everything else stays ranked, with the gap shown.
  * spec_fit is a transparent coverage ratio (verified matches = 1, unconfirmed matches = 0.5, otherwise 0) over the requirements.
  * It is a rules score, not an ML probability, and is never shown as a percentage.
+ * risk counts REQUIRED attributes whose recorded but unverified value fails the requirement. It never removes a material, but a recorded
+ * value that fails is evidence against it, so ranking treats it as worse than a material with no data (which scores the same spec_fit).
  */
 final class MaterialSpecMatcher
 {
@@ -25,12 +27,12 @@ final class MaterialSpecMatcher
     /**
      * @param  array<string,mixed> $material row from `materials` (toArray())
      * @param  array<int,array<string,mixed>> $requirements rows of material_spec_requirements for this garment kind
-     * @return array{checks:array<int,array<string,mixed>>,spec_fit:?float,hard_fail:bool,complete:bool,verified:bool}
+     * @return array{checks:array<int,array<string,mixed>>,spec_fit:?float,hard_fail:bool,complete:bool,verified:bool,risk:int}
      */
     public function evaluate(array $material, array $requirements): array
     {
         $verified = !empty($material['spec_verified_at']);
-        $checks = []; $points = 0.0; $hard = false; $complete = true;
+        $checks = []; $points = 0.0; $hard = false; $complete = true; $risk = 0;
 
         foreach ($requirements as $r) {
             $attr   = (string) ($r['attribute'] ?? '');
@@ -44,11 +46,12 @@ final class MaterialSpecMatcher
             if ($status === 'unknown' || str_ends_with($status, 'unconfirmed')) { $complete = false; }
             $points += ['match' => 1.0, 'match_unconfirmed' => 0.5][$status] ?? 0.0;
             $hard = $hard || ($status === 'mismatch' && !empty($r['is_required']));
+            $risk += $status === 'mismatch_unconfirmed' && !empty($r['is_required']) ? 1 : 0;
             $checks[] = ['attribute' => $attr, 'required' => !empty($r['is_required']), 'status' => $status, 'actual' => $actual,
                          'min' => $r['min_value'] ?? null, 'max' => $r['max_value'] ?? null, 'text' => $r['text_value'] ?? null];
         }
         return ['checks' => $checks, 'spec_fit' => $checks ? round($points / count($checks), 3) : null,
-                'hard_fail' => $hard, 'complete' => $checks ? $complete : false, 'verified' => $verified];
+                'hard_fail' => $hard, 'complete' => $checks ? $complete : false, 'verified' => $verified, 'risk' => $risk];
     }
 
     /** Status words only, no thresholds and no spec values: what a customer may see. */
