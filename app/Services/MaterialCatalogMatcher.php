@@ -207,7 +207,7 @@ final class MaterialCatalogMatcher
         $rank  = array_flip(array_map('intval', $preferredIds));
         $avoid = array_flip(array_map('intval', $avoidIds));
         $key   = fn ($m) => [isset($avoid[$m['material_id']]) ? 1 : 0, ($m['in_stock'] ?? null) === false ? 1 : 0, isset($rank[$m['material_id']]) ? 0 : 1,
-                            self::MATCH_RANK[$m['colour_match'] ?? ''] ?? 3, $m['material_id']];
+                            -(int) round(1000 * (float) ($m['spec']['spec_fit'] ?? 0)), self::MATCH_RANK[$m['colour_match'] ?? ''] ?? 3, $m['material_id']];
         $rows = array_values($eligible);
         usort($rows, fn ($a, $b) => $key($a) <=> $key($b));
         $is     = fn ($m, $kind) => str_contains(mb_strtolower($m['category']), $kind);

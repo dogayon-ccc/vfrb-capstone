@@ -8,6 +8,7 @@ use App\Models\MaterialRecommendation;
 use App\Models\Order;
 use App\Models\RecommendationGuidance;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Builds what the AI sees for one order and asks it for raw-material types. Shared by the customer endpoint, the manager
@@ -15,7 +16,15 @@ use Illuminate\Support\Facades\DB;
  */
 final class MaterialRecommender
 {
-    public function __construct(private GeminiClient $gemini, private MaterialCatalogMatcher $matcher) {}
+    public function __construct(private GeminiClient $gemini, private MaterialCatalogMatcher $matcher, private MaterialSpecMatcher $specs = new MaterialSpecMatcher()) {}
+
+    /** Staff-defined spec requirements for this kind of garment; empty when none are defined or the table is not migrated yet. */
+    private function specRequirements(string $kind): array
+    {
+        return Schema::hasTable('material_spec_requirements')
+            ? DB::table('material_spec_requirements')->where('garment_kind', $kind)->get()->map(fn ($r) => (array) $r)->all()
+            : [];
+    }
 
     /**
      * The catalog rows the AI may choose from for this order, and the garment profile. A string is the customer-facing reason
@@ -33,6 +42,18 @@ final class MaterialRecommender
         $studio   = is_array($order->studio_config) ? $order->studio_config : [];
         $profile  = $this->matcher->garmentProfile($order->garmentName(), $studio);
         $eligible = $this->matcher->eligible($catalog->map->toArray()->all(), $order->garmentName(), $order->designColours(), $profile['aliases']);
+        // Technical fit: only a staff-verified mismatch on a required spec removes a material. Unknown or unconfirmed specs stay, flagged.
+        $reqs = $this->specRequirements($profile['kind']);
+        if ($reqs) {
+            $byId = $catalog->keyBy('material_id');
+            foreach ($eligible as $id => $row) {
+                $m = $byId->get($id);
+                if (!$m || !str_contains(mb_strtolower((string) $m->category), 'fabric')) { continue; }
+                $eval = $this->specs->evaluate($m->toArray(), $reqs);
+                if ($eval['hard_fail']) { unset($eligible[$id]); continue; }
+                $eligible[$id]['spec'] = $eval;
+            }
+        }
         return $eligible ? ['eligible' => $eligible, 'profile' => $profile] : 'No approved materials are configured for this garment yet.';
     }
 
@@ -165,6 +186,12 @@ final class MaterialRecommender
         return ['accept' => $pick('accept'), 'reject' => $pick('reject'), 'notes' => array_intersect_key($notes, array_flip($kept))];
     }
 
+    /** Customer-safe technical-fit view for one eligible row (status words only), or null when no requirements apply. */
+    public function specView(array $row): ?array
+    {
+        return isset($row['spec']) ? $this->specs->customerView($row['spec']) : null;
+    }
+
     public function buildPrompt(array $ctx): string
     {
         $kv          = fn (array $a) => collect($a)->map(fn ($v, $k) => "{$k}={$v}")->implode(', ');
@@ -185,6 +212,7 @@ final class MaterialRecommender
         $catalogLines = collect($ctx['catalog'])->map(fn ($m) =>
             "  {$m['material_id']} | {$m['material_code']} | {$m['material_name']} | {$m['category']} | unit: {$m['unit']}"
             . " | stock: {$stock($m['in_stock'] ?? null)} | colour: {$colour($m['colour_match'] ?? null)}"
+            . (isset($m['spec']) ? " | specs: {$this->specs->promptLine($m['spec'])}" : '')
         )->implode("\n");
         $needLine = !empty($ctx['needs']) ? implode(', ', $ctx['needs']) : 'none beyond fabric and thread';
 
@@ -217,6 +245,7 @@ based on the garment's use category, fit, and features. Write each reason for th
 Match the use: scrubs and medical wear need breathable, wash-resistant fabric; school uniforms need durable, easy-care fabric; corporate wear needs a clean drape.
 Choose a main fabric that matches the body colour, or one made in any colour, before a fabric that is only close to it.
 When a zone (collar, cuffs, pocket, a stripe or check colour) has a different colour, add a fabric or thread in that colour if the list has one.
+Where a material lists specs, prefer one whose specs match and never claim a spec that is unknown or unconfirmed.
 Prefer materials in stock; suggest an OUT OF STOCK one only when nothing in stock fits.
 Never mention stock or availability in a reason or the narration: the customer reads them, and stock is VFRB-internal.
 If no listed material fits a need, leave it out rather than choosing a poor match.

@@ -560,6 +560,9 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
 
     // ── Design showcase moderation (Sept 18 2026) ──────────────────
     // ── AI recommendation guidance (Oct 13 2026): manager-written prompt grounding ──
+    // Fabric spec requirements per garment kind (manager edits, owner read-only via owner.readonly)
+    Route::get('/material-spec-requirements', [\App\Http\Controllers\Api\MaterialSpecRequirementController::class, 'index']);
+    Route::put('/material-spec-requirements/{kind}', [\App\Http\Controllers\Api\MaterialSpecRequirementController::class, 'replace']);
     Route::get('/recommendation-guidance', [RecommendationGuidanceController::class, 'index']);
     Route::post('/recommendation-guidance', [RecommendationGuidanceController::class, 'store']);
     Route::put('/recommendation-guidance/{id}', [RecommendationGuidanceController::class, 'update'])->whereNumber('id');

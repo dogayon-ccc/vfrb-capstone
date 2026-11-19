@@ -144,6 +144,45 @@ class InventoryController extends Controller
     // ── POST /api/admin/materials ─────────────────────────────────────────────
     // Master data only. An opening stock, if given, is booked as the material's
     // first inventory_logs movement so the ledger always explains the quantity.
+    private function hasAnySpec(?object $m): bool
+    {
+        foreach (\App\Support\MaterialSpec::VALUE_FIELDS as $f) { if ($m && ($m->{$f} ?? null) !== null) { return true; } }
+        return false;
+    }
+
+    /**
+     * Technical-spec columns from a manager request (canonical units, provenance, verification). Empty when the request carries none.
+     * Any change to a recorded value clears an earlier verification unless spec_verified=true is sent with it.
+     * @return array<string,mixed>
+     */
+    private function specColumns(Request $request, ?object $existing): array
+    {
+        $request->validate(\App\Support\MaterialSpec::rules());
+        $in   = $request->all();
+        $norm = \App\Support\MaterialSpec::normalize($in);
+        $vals = $norm['values'];
+        $errs = $norm['errors'];
+        if (array_filter($vals, fn ($v) => $v !== null) && empty($in['spec_source'])) {
+            $errs['spec_source'] = 'Say where these specs come from (spec_source).';
+        }
+        if ($errs) {
+            throw \Illuminate\Validation\ValidationException::withMessages(array_map(fn ($m) => [$m], $errs));
+        }
+        $wantsVerify = array_key_exists('spec_verified', $in);
+        if (!$vals && !$wantsVerify) { return []; }
+        if (!$vals && $wantsVerify && !$this->hasAnySpec($existing)) {
+            throw \Illuminate\Validation\ValidationException::withMessages(['spec_verified' => ['There are no recorded specs to verify.']]);
+        }
+
+        $prov = \App\Support\MaterialSpec::provenance($vals, $in, $existing ? json_decode((string) ($existing->spec_provenance ?? ''), true) : null, now()->toIso8601String());
+        if (isset($vals['fiber_composition'])) { $vals['fiber_composition'] = json_encode($vals['fiber_composition']); }
+        return $vals + [
+            'spec_provenance'  => $prov['provenance'] ? json_encode($prov['provenance']) : null,
+            'spec_verified_at' => $prov['verified'] ? now() : null,
+            'spec_verified_by' => $prov['verified'] ? Auth::id() : null,
+        ];
+    }
+
     public function store(Request $request)
     {
         $request->validate([
@@ -157,14 +196,16 @@ class InventoryController extends Controller
             'ownership'         => 'sometimes|in:vfrb,client',
         ]);
 
+        $spec = $this->specColumns($request, null);
+
         $opening   = (float) $request->input('opening_stock', 0);
         $ownership = \App\Services\ClientMaterialService::ready() ? $request->input('ownership', 'vfrb') : null;
         if ($ownership === 'client' && $opening > 0) {
             return response()->json(['message' => 'Client-supplied materials have no VFRB stock. Record what the client delivers on the order instead.'], 422);
         }
 
-        $id = DB::transaction(function () use ($request, $opening, $ownership) {
-            $id = DB::table('materials')->insertGetId(array_filter([
+        $id = DB::transaction(function () use ($request, $opening, $ownership, $spec) {
+            $id = DB::table('materials')->insertGetId(array_filter([...$spec,
                 'material_code'     => $request->input('material_code') ?: \App\Models\Material::nextCode($request->input('category')),
                 'material_name'     => $request->input('material_name'),
                 'category'          => $request->input('category'),
@@ -246,6 +287,8 @@ class InventoryController extends Controller
             'reorder_threshold', 'unit_cost', ...($ledger ? ['ownership'] : []),
         ]))->filter(fn($v) => !is_null($v))->toArray();
 
+        // Spec fields are applied separately: an explicit null clears a value back to "unknown".
+        $fields = [...$fields, ...$this->specColumns($request, $material)];
         $fields['updated_at'] = now();
 
         DB::table('materials')->where('material_id', $id)->update($fields);

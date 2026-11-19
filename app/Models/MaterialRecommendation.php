@@ -51,6 +51,7 @@ class MaterialRecommendation extends Model
         'customer_note','linked_by','linked_at','actual_qty_issued',
         'issued_at','created_at','updated_at',
         'staff_feedback','staff_feedback_note','staff_feedback_by','staff_feedback_at',
+        'spec_snapshot',
     ];
     protected $casts = [
         'customer_accepted' => 'boolean',
@@ -58,6 +59,7 @@ class MaterialRecommendation extends Model
         'linked_at'         => 'datetime',
         'issued_at'         => 'datetime',
         'staff_feedback_at' => 'datetime',
+        'spec_snapshot'     => 'array',
     ];
     public function order()    { return $this->belongsTo(Order::class, 'order_id', 'order_id'); }
     public function material() { return $this->belongsTo(Material::class, 'material_id', 'material_id'); }

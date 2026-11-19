@@ -153,11 +153,30 @@ class VfrbImportCatalog extends Command
                 'created_at'        => now(),
                 'updated_at'        => now(),
             ];
+            $row += $this->specColumns($m);
             DB::table('materials')->insert($row); // one by one so nextCode() sees prior rows
             $out[] = [$m['sheet_id'], $row['material_code'], $row['material_name'], "{$m['category']} -> {$category}",
                 $unit, $row['quantity_in_stock'], $row['reorder_threshold'], $row['unit_cost'], $row['ai_eligible'] ? 'yes' : 'no'];
         }
         $this->table(['sheet', 'code', 'name', 'category', 'unit', 'stock', 'reorder', 'unit_cost', 'AI'], $out);
+    }
+
+    /**
+     * Optional spec columns (gsm, gsm_unit, usable_width, usable_width_unit, stretch_pct, stretch_direction, construction, finish,
+     * shrinkage_pct, spec_reference). An older CSV without them imports exactly as before. Imported specs are recorded as
+     * source "import" and left unverified until staff confirm them; an invalid set is skipped, never partly stored.
+     * @return array<string,mixed>
+     */
+    private function specColumns(array $csvRow): array
+    {
+        $keys = ['gsm', 'gsm_unit', 'usable_width', 'usable_width_unit', 'stretch_pct', 'stretch_direction', 'construction', 'finish', 'shrinkage_pct'];
+        $in   = array_filter(array_intersect_key($csvRow, array_flip($keys)), fn ($v) => $v !== '' && $v !== null);
+        if (!$in || !\Illuminate\Support\Facades\Schema::hasColumn('materials', 'gsm')) { return []; }
+        $in = $in + ['spec_source' => 'import', 'spec_reference' => ($csvRow['spec_reference'] ?? '') ?: 'materials_import.csv'];
+        $n  = \App\Support\MaterialSpec::normalize(array_diff_key($in, array_flip(['spec_source', 'spec_reference'])));
+        if ($n['errors']) { $this->warn("Specs skipped for {$csvRow['material_name']}: " . implode(' ', $n['errors'])); return []; }
+        $p = \App\Support\MaterialSpec::provenance($n['values'], $in, null, now()->toIso8601String());
+        return $n['values'] + ['spec_provenance' => json_encode($p['provenance'])];
     }
 
     private function readCsv(string $path): array

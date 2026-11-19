@@ -1,0 +1,18 @@
+{
+    "mode": "catalog_fallback",
+    "model": null,
+    "scored": 0,
+    "skipped": 0,
+    "ai_failed": 0,
+    "total": {
+        "orders": 0,
+        "picks": 0,
+        "accepted_picked": 0,
+        "rejected_picked": 0,
+        "accepted_total": 0,
+        "precision": null,
+        "recall": null,
+        "rejected_rate": null
+    },
+    "by_garment": []
+}

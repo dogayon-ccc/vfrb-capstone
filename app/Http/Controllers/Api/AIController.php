@@ -135,6 +135,8 @@ class AIController extends Controller
                         'ai_note'       => $sel['reason'],
                         'display_order' => $i,
                         'status'        => 'pending',
+                        // Only written when requirements applied (so only after the spec migration has run).
+                        ...(($mat['spec'] ?? null) ? ['spec_snapshot' => ['at' => now()->toIso8601String(), 'eval' => $mat['spec']]] : []),
                         'created_at'    => now(),
                         'updated_at'    => now(),
                     ]);
@@ -157,7 +159,8 @@ class AIController extends Controller
                 'source'         => $source,
                 'materials'      => $this->withCatalogFacts(
                     MaterialRecommendation::where('order_id', $order->order_id)->orderBy('display_order')->get(MaterialRecommendation::CUSTOMER_COLUMNS),
-                    $order
+                    $order,
+                    $eligible
                 ),
             ]);
         } catch (\Throwable $e) {
@@ -655,12 +658,12 @@ PROMPT;
      * to this order's design. Customer responses only: no stock, quantity or price (staff see stock in their own views).
      * @return array<int,array<string,mixed>>
      */
-    private function withCatalogFacts($rows, Order $order): array
+    private function withCatalogFacts($rows, Order $order, array $eligible = []): array
     {
         $families = $this->matcher->families($order->designColours());
         $catalog  = \App\Models\Material::whereIn('material_id', collect($rows)->pluck('material_id')->filter()->all())
             ->get(['material_id', 'material_code', 'material_name', 'category', 'quantity_in_stock', 'image_path', 'description'])->keyBy('material_id');
-        return collect($rows)->map(function ($r) use ($catalog, $families) {
+        return collect($rows)->map(function ($r) use ($catalog, $families, $eligible) {
             $row = is_array($r) ? $r : $r->toArray();
             $m   = $catalog->get($row['material_id'] ?? 0);
             if (array_key_exists('ai_note', $row)) {
@@ -676,6 +679,7 @@ PROMPT;
                 'description'   => $m?->description,
                 'material_code' => $m?->material_code,
                 'colour_match'  => $match === false ? 'other' : $match,
+                'spec_fit'      => isset($eligible[$row['material_id'] ?? 0]) ? $this->recommender->specView($eligible[$row['material_id']]) : null,
             ];
         })->values()->all();
     }

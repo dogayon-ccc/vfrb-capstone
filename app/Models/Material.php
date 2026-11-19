@@ -25,6 +25,8 @@ class Material extends Model
         'applies_to',
         'image_path',
         'description',
+        'fiber_composition', 'gsm', 'usable_width_cm', 'stretch_pct', 'stretch_direction', 'construction',
+        'finish', 'shrinkage_pct', 'colourfastness_grade', 'spec_provenance', 'spec_verified_at', 'spec_verified_by',
     ];
 
     protected $appends = ['image_url'];
@@ -35,6 +37,14 @@ class Material extends Model
         'unit_cost'         => 'float',
         'ai_eligible'       => 'boolean',
         'applies_to'        => 'array',
+        'fiber_composition' => 'array',
+        'spec_provenance'   => 'array',
+        'gsm'               => 'float',
+        'usable_width_cm'   => 'float',
+        'stretch_pct'       => 'float',
+        'shrinkage_pct'     => 'float',
+        'colourfastness_grade' => 'float',
+        'spec_verified_at'  => 'datetime',
     ];
 
     public static function categoryKey(?string $category): string
