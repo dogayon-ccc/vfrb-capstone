@@ -37,8 +37,7 @@ class VfrbAiEval extends Command
         $limit        = max(1, min(500, (int) $this->option('limit')));
         $sleep        = max(0, (int) $this->option('sleep'));
 
-        $genuine = fn ($q) => AiEvalGuard::scopeFeedback($q, ['before' => now()->addYear()], 'material_recommendations')
-            ->where(fn ($w) => $w->whereNull('ai_note')->orWhere('ai_note', '!=', MaterialRecommendation::CUSTOMER_PICK_NOTE));
+        $genuine = fn ($q) => AiEvalGuard::genuineVerdicts($q);
 
         // Duplicate groups are judged over every reviewed order, not only the newest $limit.
         $reviewedIds = $genuine(MaterialRecommendation::query())->distinct()->pluck('order_id')->all();
