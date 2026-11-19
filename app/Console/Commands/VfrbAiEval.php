@@ -5,13 +5,16 @@ namespace App\Console\Commands;
 use App\Models\MaterialRecommendation;
 use App\Models\Order;
 use App\Services\MaterialRecommender;
+use App\Support\AiEvalGuard;
 use Illuminate\Console\Command;
 
 /**
  * Scores material picks against what VFRB staff actually accepted or rejected on past orders, before a model or prompt change.
  *   php artisan vfrb:ai-eval --fallback-only            (no Gemini calls: scores the catalog fallback as a baseline)
  *   php artisan vfrb:ai-eval --limit=30 --model=<name>  (calls Gemini once per order, with this model for this run only)
- * Each order is scored with its own verdicts left out of the prompt, so it is never shown the answer.
+ * Each order is scored only with staff verdicts recorded before its own earliest verdict, from outside its own near-duplicate group
+ * (same customer, garment, use category and colours), so it is never shown its answer or a later one. Duplicates are scored once.
+ * Precision/recall are withheld (null) unless staff gave both accept and reject verdicts.
  * Read-only: writes nothing, skips the cache, logs nothing. AI mode sends each order's design to Google, as the live endpoint does.
  */
 class VfrbAiEval extends Command
@@ -34,13 +37,17 @@ class VfrbAiEval extends Command
         $limit        = max(1, min(500, (int) $this->option('limit')));
         $sleep        = max(0, (int) $this->option('sleep'));
 
-        $orderIds = MaterialRecommendation::query()
-            ->whereNotNull('staff_feedback')
-            ->where(fn ($q) => $q->whereNull('ai_note')->orWhere('ai_note', '!=', MaterialRecommendation::CUSTOMER_PICK_NOTE))
-            ->groupBy('order_id')->orderByRaw('MAX(rec_id) DESC')->limit($limit)->pluck('order_id');
+        $genuine = fn ($q) => AiEvalGuard::scopeFeedback($q, ['before' => now()->addYear()], 'material_recommendations')
+            ->where(fn ($w) => $w->whereNull('ai_note')->orWhere('ai_note', '!=', MaterialRecommendation::CUSTOMER_PICK_NOTE));
+
+        // Duplicate groups are judged over every reviewed order, not only the newest $limit.
+        $reviewedIds = $genuine(MaterialRecommendation::query())->distinct()->pluck('order_id')->all();
+        $keys        = Order::whereIn('order_id', $reviewedIds)->get()->mapWithKeys(fn ($o) => [(int) $o->order_id => AiEvalGuard::duplicateKey($o)])->all();
+        $newest      = $genuine(MaterialRecommendation::query())->groupBy('order_id')->orderByRaw('MAX(rec_id) DESC')->limit($limit)->pluck('order_id')->all();
+        [$orderIds, $collapsed] = AiEvalGuard::collapse($newest, $keys);
 
         $norm    = fn ($s) => trim(preg_replace('/[^a-z0-9]+/', ' ', mb_strtolower((string) $s)));
-        $blank   = ['orders' => 0, 'picks' => 0, 'accepted_picked' => 0, 'rejected_picked' => 0, 'accepted_total' => 0];
+        $blank   = ['orders' => 0, 'picks' => 0, 'accepted_picked' => 0, 'rejected_picked' => 0, 'accepted_total' => 0, 'rejected_total' => 0];
         $groups  = [];
         $skipped = 0;
         $failed  = 0;
@@ -53,12 +60,14 @@ class VfrbAiEval extends Command
             $eligible = $prep['eligible'];
 
             // Latest verdict per material on this order (ascending, so a later verdict overwrites an earlier one).
-            $verdicts = MaterialRecommendation::where('order_id', $orderId)->whereNotNull('staff_feedback')
+            $verdicts = $genuine(MaterialRecommendation::where('order_id', $orderId))
                 ->orderBy('staff_feedback_at')->orderBy('rec_id')->pluck('staff_feedback', 'material_id')->all();
             $accepted = array_keys(array_intersect_key(array_filter($verdicts, fn ($v) => $v === 'accept'), $eligible));
             $rejected = array_keys(array_filter($verdicts, fn ($v) => $v === 'reject'));
 
-            $context = $recommender->context($order, $eligible, $prep['profile'], (int) $orderId);
+            $earliest = MaterialRecommendation::where('order_id', $orderId)->whereIn('staff_feedback', AiEvalGuard::VERDICTS)->min('staff_feedback_at');
+            $asOf     = AiEvalGuard::scopeFor((int) $orderId, $earliest ? \Illuminate\Support\Carbon::parse($earliest) : null, $keys);
+            $context  = $recommender->context($order, $eligible, $prep['profile'], (int) $orderId, $asOf);
             if ($fallbackOnly) {
                 $picks = $recommender->fallback($context, $eligible)['selections'];
             } else {
@@ -75,13 +84,16 @@ class VfrbAiEval extends Command
             $groups[$g]['accepted_picked'] += count(array_intersect($ids, $accepted));
             $groups[$g]['rejected_picked'] += count(array_intersect($ids, $rejected));
             $groups[$g]['accepted_total']  += count($accepted);
+            $groups[$g]['rejected_total']  += count($rejected);
         }
 
         $total = $blank;
         foreach ($groups as $s) { foreach ($s as $k => $v) { $total[$k] += $v; } }
         $score = function (array $s): array {
-            $judged = $s['accepted_picked'] + $s['rejected_picked'];
-            return $s + [
+            $judged   = $s['accepted_picked'] + $s['rejected_picked'];
+            $withheld = AiEvalGuard::withheldReason($s);
+            if ($withheld) { return $s + ['precision' => null, 'recall' => null, 'rejected_rate' => null, 'withheld' => $withheld]; }
+            return $s + ['withheld' => null,
                 // Of the picks staff judged, the share they accepted.
                 'precision'     => $judged ? round($s['accepted_picked'] / $judged, 3) : null,
                 // Of the materials staff accepted, the share the picks found.
@@ -97,6 +109,7 @@ class VfrbAiEval extends Command
             'scored'      => $total['orders'],
             'skipped'     => $skipped,
             'ai_failed'   => $failed,
+            'duplicates_collapsed' => $collapsed,
             'total'       => $score($total),
             'by_garment'  => array_map(fn ($g, $s) => ['garment' => ucwords($g)] + $score($s), array_keys($groups), $groups),
         ];

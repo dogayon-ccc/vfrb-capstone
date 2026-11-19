@@ -37,7 +37,7 @@ class AiQualityToolsTest extends TestCase
             'order_id' => $order, 'material_id' => $material, 'material_name' => DB::table('materials')->where('material_id', $material)->value('material_name'),
             'category' => 'Fabric', 'unit' => 'yards', 'ai_note' => $aiNote, 'customer_accepted' => (int) $customer,
             'status' => $customer === null ? 'pending' : ($customer ? 'accepted' : 'rejected'),
-            'staff_feedback' => $verdict, 'staff_feedback_note' => $note, 'staff_feedback_at' => $verdict ? now() : null,
+            'staff_feedback' => $verdict, 'staff_feedback_note' => $note, 'staff_feedback_by' => $verdict ? 1 : null, 'staff_feedback_at' => $verdict ? now() : null,
             'created_at' => now(), 'updated_at' => now(),
         ]);
     }
@@ -136,5 +136,93 @@ class AiQualityToolsTest extends TestCase
 
         $this->assertSame([0, 1], [$out['scored'], $out['ai_failed']]);
         $this->assertNull($out['total']['precision']);
+    }
+
+    // ── Evaluation leakage guards (2026-11-19). NOT RUN in the authoring sandbox: run php artisan test --filter=AiQualityToolsTest ──
+
+    private function capturePrompts(array &$prompts): void
+    {
+        $this->mock(GeminiClient::class, function ($m) use (&$prompts) {
+            $m->shouldReceive('call')->andReturnUsing(function ($prompt) use (&$prompts) {
+                $prompts[] = $prompt;
+                return json_encode(['selections' => [['material_id' => 12, 'reason' => 'ok']], 'narration' => 'ok']);
+            });
+        });
+    }
+
+    public function test_eval_never_shows_an_order_feedback_recorded_after_it(): void
+    {
+        $this->line(8, 12, 'accept');
+        DB::table('material_recommendations')->where('order_id', 8)->update(['staff_feedback_at' => now()->subDays(2)]);
+        $this->line(9, 12, 'reject'); // newer verdict, on another order of the same garment
+        $prompts = [];
+        $this->capturePrompts($prompts);
+
+        Artisan::call('vfrb:ai-eval', ['--limit' => 2, '--sleep' => 0, '--json' => true]);
+        $out = json_decode(Artisan::output(), true);
+
+        $this->assertSame([2, 0], [$out['scored'], $out['duplicates_collapsed']], 'orders 8 and 9 must be distinct designs for this test');
+        $this->assertCount(2, $prompts);
+        [$newer, $older] = $prompts; // newest first: order 9, then order 8
+        $this->assertStringContainsString('(good candidates when they fit this design): Cotton Fabric', $newer); // earlier verdict may inform a later order
+        $this->assertStringContainsString('(avoid unless the design clearly needs them): none', $older);        // a later verdict must not inform an earlier one
+        $this->assertStringContainsString('(good candidates when they fit this design): none', $older);
+    }
+
+    public function test_eval_scores_near_duplicate_orders_once_and_never_trains_on_them(): void
+    {
+        $this->line(8, 12, 'accept');
+        $this->line(9, 12, 'reject');
+        $o8 = DB::table('orders')->where('order_id', 8)->first();
+        DB::table('orders')->where('order_id', 9)->update([
+            'user_id' => $o8->user_id, 'garment_type' => $o8->garment_type, 'studio_config' => $o8->studio_config, 'color' => $o8->color,
+        ]);
+        $prompts = [];
+        $this->capturePrompts($prompts);
+
+        Artisan::call('vfrb:ai-eval', ['--limit' => 2, '--sleep' => 0, '--json' => true]);
+        $out = json_decode(Artisan::output(), true);
+
+        $this->assertSame([1, 1], [$out['scored'], $out['duplicates_collapsed']]);
+        $this->assertCount(1, $prompts);
+        $this->assertStringContainsString('(avoid unless the design clearly needs them): none', $prompts[0]);
+        $this->assertStringContainsString('(good candidates when they fit this design): none', $prompts[0]);
+    }
+
+    public function test_eval_withholds_metrics_without_both_verdict_classes_and_ignores_unattributed_verdicts(): void
+    {
+        $this->line(8, 12, 'accept');
+        Http::fake();
+        Artisan::call('vfrb:ai-eval', ['--fallback-only' => true, '--limit' => 5, '--json' => true]);
+        $out = json_decode(Artisan::output(), true);
+        $this->assertNull($out['total']['precision']);
+        $this->assertNull($out['total']['recall']);
+        $this->assertSame('no reject verdicts', $out['total']['withheld']);
+
+        DB::table('material_recommendations')->where('order_id', 8)->update(['staff_feedback_by' => null]); // not attributable to staff
+        Artisan::call('vfrb:ai-eval', ['--fallback-only' => true, '--limit' => 5, '--json' => true]);
+        $out = json_decode(Artisan::output(), true);
+        $this->assertSame([0, 'no rated orders'], [$out['scored'], $out['total']['withheld']]);
+    }
+
+    public function test_customer_reload_shows_the_same_technical_fit_disclosure_as_generation(): void
+    {
+        $fabric = (int) DB::table('materials')->where('category', 'Fabric')->orderBy('material_id')->value('material_id');
+        $eval = ['checks' => [['attribute' => 'gsm', 'status' => 'unknown']], 'spec_fit' => 0.0, 'hard_fail' => false, 'complete' => false, 'verified' => false];
+        DB::table('material_recommendations')->where('order_id', 9)->delete();
+        DB::table('material_recommendations')->insert([
+            'order_id' => 9, 'material_id' => $fabric, 'material_name' => 'X', 'category' => 'Fabric', 'unit' => 'yards', 'ai_note' => 'ok', 'status' => 'pending',
+            'spec_snapshot' => json_encode(['at' => now()->toIso8601String(), 'eval' => $eval + ['secret' => 'min 140 max 220']]), 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        Sanctum::actingAs(User::findOrFail(5), ['*']);
+
+        $res = $this->getJson('/api/customer/orders/9/ai-recommendation')->assertOk();
+
+        $spec = collect($res->json('recommendation.materials_json'))->first()['spec_fit'];
+        $this->assertFalse($spec['complete']);
+        $this->assertSame('unknown', $spec['items'][0]['status']);
+        $this->assertStringContainsString('not yet confirmed', $spec['items'][0]['text']);
+        $this->assertStringNotContainsString('spec_snapshot', $res->getContent());
+        $this->assertStringNotContainsString('min 140', $res->getContent());
     }
 }

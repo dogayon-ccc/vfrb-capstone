@@ -420,7 +420,7 @@ class AIController extends Controller
         }
 
         $facts         = collect($this->withCatalogFacts($rows, $order))->keyBy('material_id')
-            ->map(fn ($r) => array_intersect_key($r, array_flip(['id', 'name', 'note', 'image_url', 'description', 'material_code', 'colour_match'])))->all();
+            ->map(fn ($r) => array_intersect_key($r, array_flip(['id', 'name', 'note', 'image_url', 'description', 'material_code', 'colour_match', 'spec_fit'])))->all();
         $materialsJson = [];
         $notesParts    = [];
         foreach ($rows as $row) {
@@ -679,7 +679,10 @@ PROMPT;
                 'description'   => $m?->description,
                 'material_code' => $m?->material_code,
                 'colour_match'  => $match === false ? 'other' : $match,
-                'spec_fit'      => isset($eligible[$row['material_id'] ?? 0]) ? $this->recommender->specView($eligible[$row['material_id']]) : null,
+                // Fresh evaluation right after generation; the snapshot stored with the line when the order is reloaded later.
+                'spec_fit'      => isset($eligible[$row['material_id'] ?? 0])
+                    ? $this->recommender->specView($eligible[$row['material_id']])
+                    : $this->recommender->specViewFromSnapshot($row['spec_snapshot'] ?? null),
             ];
         })->values()->all();
     }

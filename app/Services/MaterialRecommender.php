@@ -6,6 +6,7 @@ use App\Models\CustomerFabricPreference;
 use App\Models\Material;
 use App\Models\MaterialRecommendation;
 use App\Models\Order;
+use App\Support\AiEvalGuard;
 use App\Models\RecommendationGuidance;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -60,13 +61,15 @@ final class MaterialRecommender
     /**
      * Everything the AI sees for this order. $excludeOrderId leaves that order's own staff verdicts out (used by the evaluation,
      * so an order is never scored against feedback that already contains its answer).
+     * $asOf (evaluation only, see App\Support\AiEvalGuard): ['before' => Carbon, 'exclude' => int[]] limits feedback to genuine staff verdicts
+     * recorded strictly before 'before' and outside the order's near-duplicate group, so a historical score never sees later or same-design answers.
      */
-    public function context(Order $order, array $eligible, array $profile, ?int $excludeOrderId = null): array
+    public function context(Order $order, array $eligible, array $profile, ?int $excludeOrderId = null, ?array $asOf = null): array
     {
         $fabricPrefs = CustomerFabricPreference::where('user_id', $order->user_id)
             ->with('material:material_id,material_name')
             ->get();
-        return $this->designContext($order, $eligible, $fabricPrefs, $excludeOrderId) + ['kind' => $profile['kind'], 'needs' => $profile['needs']];
+        return $this->designContext($order, $eligible, $fabricPrefs, $excludeOrderId, $asOf) + ['kind' => $profile['kind'], 'needs' => $profile['needs']];
     }
 
     /**
@@ -97,7 +100,7 @@ final class MaterialRecommender
     // $fabricPrefs: CustomerFabricPreference rows (with 'material' eager-loaded), or null/empty.
     // Quantity is deliberately NOT read from anywhere here: nothing downstream uses
     // it and it only risks nudging the model toward quantity-flavored output.
-    private function designContext(Order $order, array $eligible, $fabricPrefs = null, ?int $excludeOrderId = null): array
+    private function designContext(Order $order, array $eligible, $fabricPrefs = null, ?int $excludeOrderId = null, ?array $asOf = null): array
     {
         // studio_config is the actual Design Studio state (cast to array on Order).
         $studio = is_array($order->studio_config) ? $order->studio_config : [];
@@ -108,7 +111,7 @@ final class MaterialRecommender
 
         // Manager guidance for this use/garment, and materials staff rejected for this garment before.
         $guidance = RecommendationGuidance::forDesign($category, $garment);
-        $feedback = $this->staffFeedback($garment, $eligible, $excludeOrderId);
+        $feedback = $this->staffFeedback($garment, $eligible, $excludeOrderId, $asOf);
 
         $prefs = collect($fabricPrefs ?? [])
             ->filter(fn ($pref) => $pref->material && isset($eligible[$pref->material->material_id]));
@@ -146,25 +149,27 @@ final class MaterialRecommender
      * notes: the staff reason behind each kept verdict, when one was written and passes the AI text guard.
      * @return array{accept:int[],reject:int[],notes:array<int,string>}
      */
-    private function staffFeedback(string $garment, array $eligible, ?int $excludeOrderId = null): array
+    private function staffFeedback(string $garment, array $eligible, ?int $excludeOrderId = null, ?array $asOf = null): array
     {
         $norm = fn ($s) => trim(preg_replace('/[^a-z0-9]+/', ' ', mb_strtolower((string) $s)));
         $want = $norm($garment);
         // Every stored spelling of this garment ("polo_shirt", "Polo Shirt") among reviewed orders, so the filter runs in SQL.
         $spellings = DB::table('orders')
-            ->whereIn('order_id', MaterialRecommendation::query()->select('order_id')->whereNotNull('staff_feedback'))
+            ->whereIn('order_id', AiEvalGuard::scopeFeedback(MaterialRecommendation::query()->select('order_id'), $asOf, 'material_recommendations'))
             ->when($excludeOrderId, fn ($q) => $q->where('order_id', '!=', $excludeOrderId))
+            ->when($asOf['exclude'] ?? [], fn ($q, $ids) => $q->whereNotIn('order_id', $ids))
             ->distinct()->pluck('garment_type')
             ->filter(fn ($g) => is_string($g) && $norm($g) === $want)->values()->all();
         if (!$spellings) { return ['accept' => [], 'reject' => [], 'notes' => []]; }
 
         // Newest first, streamed, stopping once every eligible material has its latest verdict: no fixed row window to fall out of.
-        $rows = MaterialRecommendation::query()
-            ->join('orders', 'orders.order_id', '=', 'material_recommendations.order_id')
-            ->whereNotNull('material_recommendations.staff_feedback')
+        $rows = AiEvalGuard::scopeFeedback(
+            MaterialRecommendation::query()->join('orders', 'orders.order_id', '=', 'material_recommendations.order_id'),
+            $asOf, 'material_recommendations')
             ->whereIn('material_recommendations.material_id', array_keys($eligible))
             ->whereIn('orders.garment_type', $spellings)
             ->when($excludeOrderId, fn ($q) => $q->where('material_recommendations.order_id', '!=', $excludeOrderId))
+            ->when($asOf['exclude'] ?? [], fn ($q, $ids) => $q->whereNotIn('material_recommendations.order_id', $ids))
             // Explicit nulls-last: Postgres sorts NULL first on DESC, MySQL last.
             ->orderByRaw('CASE WHEN material_recommendations.staff_feedback_at IS NULL THEN 1 ELSE 0 END')
             ->orderByDesc('material_recommendations.staff_feedback_at')->orderByDesc('material_recommendations.rec_id')
@@ -190,6 +195,14 @@ final class MaterialRecommender
     public function specView(array $row): ?array
     {
         return isset($row['spec']) ? $this->specs->customerView($row['spec']) : null;
+    }
+
+    /** The same customer-safe view rebuilt from the evaluation stored with a recommendation line, so a reload shows what generation showed. */
+    public function specViewFromSnapshot(?array $snapshot): ?array
+    {
+        $eval = $snapshot['eval'] ?? null;
+        if (!is_array($eval) || !isset($eval['checks'], $eval['complete'])) { return null; }
+        return $this->specs->customerView($eval) + ['as_of' => $snapshot['at'] ?? null];
     }
 
     public function buildPrompt(array $ctx): string
