@@ -15,7 +15,7 @@ class GeminiClient
     public ?string $lastModel = null;
 
     // DSA: round-robin O(1) — tries key_1, key_2, key_3 on 429
-    public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null): ?string
+    public function call(string $prompt, int $maxTokens = 1500, ?array $jsonSchema = null, array $media = []): ?string
     {
         // The one default lives in config/services.php (GEMINI_MODEL); no second literal here.
         $primary  = (string) config('services.gemini.model');
@@ -23,17 +23,17 @@ class GeminiClient
         $started  = microtime(true);
         $this->lastModel = null;
 
-        $text = $this->callModel($primary, $prompt, $maxTokens, $jsonSchema);
+        $text = $this->callModel($primary, $prompt, $maxTokens, $jsonSchema, $media);
         if ($text !== null) { $this->lastModel = $primary; }
         if ($text === null && $fallback !== '' && $fallback !== $primary && (microtime(true) - $started) < 30) {
             Log::warning('Gemini: primary model failed, trying fallback', ['primary' => $primary, 'fallback' => $fallback]);
-            $text = $this->callModel($fallback, $prompt, $maxTokens, $jsonSchema);
+            $text = $this->callModel($fallback, $prompt, $maxTokens, $jsonSchema, $media);
             if ($text !== null) { $this->lastModel = $fallback; }
         }
         return $text;
     }
 
-    private function callModel(string $model, string $prompt, int $maxTokens, ?array $jsonSchema): ?string
+    private function callModel(string $model, string $prompt, int $maxTokens, ?array $jsonSchema, array $media = []): ?string
     {
         // GEMINI_KEY_COUNT used to gate this loop directly — if it's unset
         // or wrong on a given deploy (defaults to 1), key_2/key_3 are never
@@ -91,7 +91,7 @@ class GeminiClient
                 }
 
                 $body = [
-                    'contents'         => [['parts' => [['text' => $prompt]]]],
+                    'contents'         => [['parts' => [...array_map(fn ($m) => ['inlineData' => ['mimeType' => $m['mime'], 'data' => $m['data']]], $media), ['text' => $prompt]]]],
                     'generationConfig' => $generationConfig,
                     'safetySettings'   => [
                         ['category' => 'HARM_CATEGORY_DANGEROUS_CONTENT', 'threshold' => 'BLOCK_NONE'],

@@ -14,6 +14,11 @@ final class UploadRules
         return 'nullable|file|mimes:'.implode(',', self::REFERENCE_MIMES).'|max:'.self::REFERENCE_MAX_KB;
     }
 
+    public static function referenceRequired(): string
+    {
+        return str_replace('nullable', 'required', self::reference());
+    }
+
     public static function forClient(): array
     {
         return ['reference' => ['mimes' => self::REFERENCE_MIMES, 'max_kb' => self::REFERENCE_MAX_KB]];

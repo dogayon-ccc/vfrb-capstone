@@ -43,6 +43,7 @@ use App\Http\Controllers\Api\BillingProfileController;
 use App\Http\Controllers\Api\ClientMaterialController;
 use App\Http\Controllers\Api\CustomerContactController;
 use App\Http\Controllers\Api\CustomerFabricPreferenceController;
+use App\Http\Controllers\Api\ReferenceCheckController;
 use App\Http\Controllers\Api\DeliveryController;
 use App\Http\Controllers\Api\DesignController;
 use App\Http\Controllers\Api\FeedbackController;
@@ -176,6 +177,7 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // (frontend sends body param, not route param — aliased here)
     // FIX: controller method is recommendMaterials() — recommendByBody() never existed.
     Route::post('/ai/recommend-materials', [AIController::class, 'recommendMaterials'])->middleware('throttle:10,1'); // Gemini cost cap, per user
+    Route::post('/ai/validate-reference', ReferenceCheckController::class)->middleware('throttle:10,1');
 
     // ── Accept AI recommendation (order-level, bulk — used by AIMaterials.jsx) ──
     // AIMaterials.jsx: POST /api/customer/orders/{id}/accept-materials  { notes }
