@@ -4,9 +4,9 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use App\Notifications\PortalMailNotification;
+use App\Support\UploadDisk;
 use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Storage;
@@ -14,6 +14,7 @@ use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 // Same setup as SecurityGateTest: MySQL loaded from vfrb_db.sql, users 5/6 = customers, rollback per test.
+// Every new order is a validated complete set: each test starts from a stored, accepted reference (reference()).
 //   php artisan test --filter OrderLifecycleTest
 class OrderLifecycleTest extends TestCase
 {
@@ -37,15 +38,38 @@ class OrderLifecycleTest extends TestCase
         ];
     }
 
+    private const BYTES = "\x89PNG\r\n\x1a\n0000";
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        DB::table('approved_set_pairs')->insertOrIgnore(['top_garment' => 'Scrub Top', 'bottom_garment' => 'Scrub Pants', 'created_at' => now(), 'updated_at' => now()]);
+    }
+
+    // A server-stored, accepted reference for a customer: the only way a new order can start.
+    private function reference(int $userId = 5): int
+    {
+        Storage::fake(UploadDisk::name());
+        $path = 'design-refs/life-'.uniqid().'.png';
+        Storage::disk(UploadDisk::name())->put($path, self::BYTES);
+
+        return DB::table('reference_validations')->insertGetId([
+            'user_id' => $userId, 'path' => $path, 'sha256' => hash('sha256', self::BYTES), 'status' => 'accepted', 'reason' => 'complete_set',
+            'top_garment' => 'Scrub Top', 'bottom_garment' => 'Scrub Pants', 'prompt_version' => 'set-2', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+    }
+
+    private function matrix(array $top = ['S' => 40, 'M' => 60], array $bottom = ['S' => 40, 'M' => 60]): string
+    {
+        return json_encode(['top' => $top, 'bottom' => $bottom]);
+    }
+
     private function payload(array $over = []): array
     {
         return array_merge([
-            'garment_type' => 'Polo Shirt',
+            'reference_validation_id' => $this->reference(),
+            'size_matrix' => $this->matrix(),
             'color' => 'Navy',
-            'quantity_ordered' => 100,
-            'order_type' => 'direct',
-            'sizing_type' => 'standard',
-            'sizes' => json_encode(['S' => 40, 'M' => 60]),
             'client_design_notes' => 'School Uniform uniform. Polo Shirt style. Primary color: Navy.',
             'studio_config' => json_encode($this->studioConfig()),
             'design_preview_file' => UploadedFile::fake()->image('design.png', 40, 40),
@@ -54,7 +78,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_studio_design_survives_submit_and_comes_back_intact_to_the_owner(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $this->post('/api/customer/orders', $this->payload(['status' => 'completed']), ['Accept' => 'application/json'])->assertStatus(422);
         $res = $this->post('/api/customer/orders', $this->payload(['user_id' => 6]), ['Accept' => 'application/json']);
@@ -79,17 +102,17 @@ class OrderLifecycleTest extends TestCase
 
     public function test_size_breakdown_is_stored_per_size_under_the_authenticated_user(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $id = $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
         $rows = DB::table('measurements')->where('order_id', $id)->get();
-        $this->assertSame(['M' => 60, 'S' => 40], $rows->pluck('qty', 'size_label')->map(fn ($q) => (int) $q)->sortKeys()->all());
+        $byPiece = $rows->groupBy('piece')->map(fn ($g) => $g->pluck('qty', 'size_label')->map(fn ($q) => (int) $q)->sortKeys()->all())->sortKeys()->all();
+        $this->assertSame(['bottom' => ['M' => 60, 'S' => 40], 'top' => ['M' => 60, 'S' => 40]], $byPiece);
+        $this->assertSame(100, (int) DB::table('orders')->where('order_id', $id)->value('quantity_ordered'));
         $this->assertSame([5], $rows->pluck('user_id')->map(fn ($u) => (int) $u)->unique()->values()->all());
     }
 
     public function test_customer_can_choose_pickup_and_the_address_is_not_kept(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $id = $this->post('/api/customer/orders', $this->payload(['delivery_method' => 'pickup', 'delivery_address' => '12 Rizal St']), ['Accept' => 'application/json'])
             ->assertStatus(201)->json('order.order_id');
@@ -100,7 +123,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_another_customer_cannot_read_the_submitted_order(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $id = $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
         $this->actAs(6);
@@ -111,21 +133,19 @@ class OrderLifecycleTest extends TestCase
 
     public function test_negative_or_fractional_size_quantities_are_rejected_and_nothing_is_written(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $before = DB::table('orders')->count();
 
-        foreach ([['S' => 150, 'M' => -50], ['S' => 50.5, 'M' => 49.5], ['S' => 'abc', 'M' => 100]] as $sizes) {
-            $this->post('/api/customer/orders', $this->payload(['sizes' => json_encode($sizes)]), ['Accept' => 'application/json'])->assertStatus(422);
+        foreach ([['S' => 150, 'M' => -50], ['S' => 50.5, 'M' => 49.5], ['S' => 'abc', 'M' => 100], ['XXXL' => 100]] as $bad) {
+            $this->post('/api/customer/orders', $this->payload(['size_matrix' => $this->matrix($bad, $bad)]), ['Accept' => 'application/json'])->assertStatus(422);
         }
-        $this->post('/api/customer/orders', $this->payload(['sizes' => 'not json']), ['Accept' => 'application/json'])->assertStatus(422);
+        $this->post('/api/customer/orders', $this->payload(['size_matrix' => 'not json']), ['Accept' => 'application/json'])->assertStatus(422);
 
         $this->assertSame($before, DB::table('orders')->count());
     }
 
     public function test_unreadable_studio_design_is_rejected_instead_of_silently_dropped(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $before = DB::table('orders')->count();
 
@@ -140,7 +160,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_upload_only_order_without_a_studio_design_still_submits(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
 
         $res = $this->post('/api/customer/orders', $this->payload(['studio_config' => '']), ['Accept' => 'application/json']);
@@ -151,44 +170,41 @@ class OrderLifecycleTest extends TestCase
 
     public function test_size_mismatch_is_rejected_and_nothing_is_written(): void
     {
-        Storage::fake('public');
         $before = DB::table('orders')->count();
         $this->actAs(5);
-        $this->post('/api/customer/orders', $this->payload(['sizes' => json_encode(['S' => 10])]), ['Accept' => 'application/json'])->assertStatus(422);
+        $h = ['Accept' => 'application/json'];
+        $this->post('/api/customer/orders', $this->payload(['size_matrix' => $this->matrix(['M' => 100], ['M' => 99])]), $h)->assertStatus(422);
+        $this->post('/api/customer/orders', $this->payload(['quantity_ordered' => 90]), $h)->assertStatus(422);
         $this->assertSame($before, DB::table('orders')->count());
     }
 
-    public function test_double_submit_inside_the_debounce_window_creates_one_order(): void
+    public function test_double_submit_with_the_same_reference_creates_one_order(): void
     {
-        Storage::fake('public');
         $before = DB::table('orders')->count();
         $this->actAs(5);
-        $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201);
-        $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(409);
+        $body = $this->payload();
+        $this->post('/api/customer/orders', $body, ['Accept' => 'application/json'])->assertStatus(201);
+        $this->post('/api/customer/orders', $this->payload(['reference_validation_id' => $body['reference_validation_id']]), ['Accept' => 'application/json'])->assertStatus(422);
         $this->assertSame($before + 1, DB::table('orders')->count());
     }
 
-    public function test_bulk_minimum_past_deadline_and_executable_upload_are_rejected(): void
+    public function test_bulk_minimum_past_date_and_non_image_preview_are_rejected(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $h = ['Accept' => 'application/json'];
-        $this->post('/api/customer/orders', $this->payload(['quantity_ordered' => 99, 'sizes' => json_encode(['S' => 99])]), $h)->assertStatus(422);
+        $this->post('/api/customer/orders', $this->payload(['size_matrix' => $this->matrix(['S' => 99], ['S' => 99])]), $h)->assertStatus(422);
         $this->post('/api/customer/orders', $this->payload(['preferred_date' => '2020-01-01']), $h)->assertStatus(422);
-        $this->post('/api/customer/orders', $this->payload(['design_ref_file' => UploadedFile::fake()->create('shell.php', 5, 'application/x-php')]), $h)->assertStatus(422);
         $this->post('/api/customer/orders', $this->payload(['design_preview_file' => UploadedFile::fake()->create('x.html', 5, 'text/html')]), $h)->assertStatus(422);
-        $this->assertSame([], Storage::disk('public')->allFiles());
+        $this->assertSame([], Storage::disk(UploadDisk::name())->allFiles('design-previews'));
     }
 
     public function test_preferred_date_is_optional_but_never_a_rush_date(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $h = ['Accept' => 'application/json'];
 
         $id = $this->post('/api/customer/orders', $this->payload(), $h)->assertStatus(201)->json('order.order_id');
         $this->assertNull(DB::table('orders')->where('order_id', $id)->value('target_delivery_date'));
-        Cache::lock('order-submit:5')->forceRelease();
 
         foreach (['preferred_date', 'deadline'] as $field) {
             $this->post('/api/customer/orders', $this->payload([$field => now()->addDays(6)->toDateString()]), $h)
@@ -201,7 +217,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_customer_cannot_set_promised_date_total_status_or_down_payment(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $before = DB::table('orders')->count();
         foreach (['promised_date' => now()->addDays(30)->toDateString(), 'agreed_total' => 1, 'total' => 1, 'status' => 'confirmed', 'down_payment_amount' => 1] as $field => $value) {
@@ -213,7 +228,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_vfrb_promises_a_date_at_least_seven_days_after_confirmation_and_the_customer_accepts(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $id = $this->post('/api/customer/orders', $this->payload(['preferred_date' => now()->addDays(10)->toDateString()]), ['Accept' => 'application/json'])
             ->assertStatus(201)->json('order.order_id');
@@ -246,7 +260,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_proposal_email_links_to_the_customer_order_page(): void
     {
-        Storage::fake('public');
         Notification::fake();
         $this->withoutDefer();
         $this->actAs(5);
@@ -260,7 +273,6 @@ class OrderLifecycleTest extends TestCase
 
     public function test_customer_declines_a_proposal_with_a_reason(): void
     {
-        Storage::fake('public');
         $this->actAs(5);
         $id = $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
         $this->actAs(1);

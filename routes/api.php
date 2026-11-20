@@ -44,6 +44,9 @@ use App\Http\Controllers\Api\ClientMaterialController;
 use App\Http\Controllers\Api\CustomerContactController;
 use App\Http\Controllers\Api\CustomerFabricPreferenceController;
 use App\Http\Controllers\Api\ReferenceCheckController;
+use App\Http\Controllers\Api\ReferenceFileController;
+use App\Http\Controllers\Api\ReferenceReviewController;
+use App\Http\Controllers\Api\SetPairController;
 use App\Http\Controllers\Api\DeliveryController;
 use App\Http\Controllers\Api\DesignController;
 use App\Http\Controllers\Api\FeedbackController;
@@ -178,6 +181,8 @@ Route::middleware(['auth:sanctum', 'role:customer', 'auth.throttle:customer,60']
     // FIX: controller method is recommendMaterials() — recommendByBody() never existed.
     Route::post('/ai/recommend-materials', [AIController::class, 'recommendMaterials'])->middleware('throttle:10,1'); // Gemini cost cap, per user
     Route::post('/ai/validate-reference', ReferenceCheckController::class)->middleware('throttle:10,1');
+    Route::get('/reference-validations', [ReferenceCheckController::class, 'mine']);
+    Route::get('/reference-validations/{id}/file', [ReferenceFileController::class, 'mine'])->whereNumber('id');
 
     // ── Accept AI recommendation (order-level, bulk — used by AIMaterials.jsx) ──
     // AIMaterials.jsx: POST /api/customer/orders/{id}/accept-materials  { notes }
@@ -665,5 +670,13 @@ Route::middleware(['auth:sanctum', 'role:manager,owner', 'owner.readonly', 'auth
     //               POST  /api/admin/settings/company/logo
     Route::patch('/settings/company', [SettingsController::class, 'companyUpdate']);
     Route::post('/settings/company/logo', [SettingsController::class, 'companyLogoUpload'])->middleware('auth.throttle:logo-upload,10');
+    // Held uploads: staff name the top and bottom before a needs_review reference can become an order.
+    Route::get('/reference-validations', [ReferenceReviewController::class, 'index']);
+    Route::get('/reference-validations/{id}/file', [ReferenceFileController::class, 'staff'])->whereNumber('id');
+    Route::post('/reference-validations/{id}/decision', [ReferenceReviewController::class, 'decide']);
+    // Approved top+bottom combinations: the only pairs that can be accepted or approved as a set.
+    Route::get('/set-pairs', [SetPairController::class, 'index']);
+    Route::post('/set-pairs', [SetPairController::class, 'store']);
+    Route::delete('/set-pairs/{id}', [SetPairController::class, 'destroy']);
 
 });

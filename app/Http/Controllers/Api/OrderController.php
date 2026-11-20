@@ -45,6 +45,8 @@ use App\Services\ProductionStageService;
 use App\Support\EmailNotify;
 use App\Support\FileUrl;
 use App\Support\OrderStatusLabel;
+use App\Support\SetOrder;
+use App\Support\SetPairs;
 use App\Support\StudioSet;
 use App\Support\UploadDisk;
 use App\Support\UploadRules;
@@ -56,6 +58,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class OrderController extends Controller
 {
@@ -182,6 +185,7 @@ class OrderController extends Controller
         $order->client_design_ref_file = $this->resolveDesignRefUrl($order->client_design_ref_file);
         $order->design_preview_url = $this->resolveDesignPreviewUrl($order);
         $order->design_3d_snapshot_url = $this->resolveDesignRefUrl($order->client_design_3d_snapshot_file ?? null);
+        $order->size_matrix = $this->sizeMatrix($id);
 
         // Attach AI recommendations
         $recommendations = DB::table('material_recommendations')
@@ -190,11 +194,30 @@ class OrderController extends Controller
             ->get(MaterialRecommendation::CUSTOMER_COLUMNS)
             ->each(fn ($r) => $r->ai_note = MaterialRecommendation::customerNote($r->ai_note, $r->category));
 
+        $recSource = Schema::hasColumn('material_recommendations', 'rec_source')
+            ? DB::table('material_recommendations')->where('order_id', $id)->value('rec_source') : null;
+
         return response()->json([
             'order' => $order,
             'recommendations' => $recommendations,
+            'recommendation_source' => in_array($recSource, ['ai', 'catalog_default'], true) ? $recSource : null,
             'production_stages' => (object) [], // hidden from clients
         ]);
+    }
+
+    // {top:{S:10,..}, bottom:{..}} for set orders; null for legacy orders whose size rows carry no piece.
+    private function sizeMatrix(int $id): ?array
+    {
+        $rows = DB::table('measurements')->where('order_id', $id)->whereNotNull('piece')->orderBy('measurement_id')->get(['piece', 'size_label', 'qty']);
+        if ($rows->isEmpty()) {
+            return null;
+        }
+        $out = ['top' => [], 'bottom' => []];
+        foreach ($rows as $r) {
+            $out[$r->piece][$r->size_label] = (int) $r->qty;
+        }
+
+        return $out;
     }
 
     // ── POST /api/customer/orders ─────────────────────────────────────────────
@@ -232,163 +255,102 @@ class OrderController extends Controller
             ], 422);
         }
 
+        if ($request->filled('reference_validation_id')) {
+            return $this->storeSetOrder($request);
+        }
+        // Every new order is a validated complete set. Historical single-piece orders stay readable; no flag re-opens this path.
+        return response()->json(['message' => 'Upload a complete uniform-set reference and enter top and bottom sizes to place an order.', 'errors' => ['reference_validation_id' => ['A validated uniform-set reference is required.']]], 422);
+    }
+
+    // ── Complete uniform set: one parent order, one top matrix, one bottom matrix ──
+    // The reference verdict comes from reference_validations (written by the server), never from the request.
+    private function storeSetOrder(Request $request)
+    {
+        $minDate = now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString();
         $request->validate([
-            'garment_type' => 'required|string|max:60',
-            'quantity_ordered' => 'required|integer|min:100',
+            'reference_validation_id' => 'required|integer',
+            'size_matrix' => 'required|string',
+            'quantity_ordered' => 'nullable|integer',
             'fabric_type' => 'nullable|string|max:100',
             'delivery_address' => 'nullable|string|max:1000',
             'delivery_method' => 'nullable|in:vfrb_deliver,pickup',
             'color' => 'nullable|string|max:50',
-            'order_type' => 'nullable|in:direct,subcontract,bulk', // no rush orders
-            'sizing_type' => 'nullable|in:standard,custom',
-            'collar_type' => 'nullable|string|max:60',
-            'sleeve_type' => 'nullable|string|max:60',
-            'pocket_type' => 'nullable|string|max:60',
-            // Optional preferred date (deadline is the old name); VFRB confirms or changes it via propose.
-            'preferred_date' => 'nullable|date|after_or_equal:'.now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
-            'deadline' => 'nullable|date|after_or_equal:'.now()->addDays((int) config('vfrb.min_promised_days', 7))->toDateString(),
+            'preferred_date' => 'nullable|date|after_or_equal:'.$minDate,
+            'deadline' => 'nullable|date|after_or_equal:'.$minDate,
             'po_reference' => 'nullable|string|max:100',
-            'client_design_notes' => 'required|string|min:15',
-            'studio_config' => 'nullable|string',    // JSON string from canvas
-            'design_ref_file' => UploadRules::reference(),
+            'client_design_notes' => 'nullable|string|max:2000',
+            'special_notes' => 'nullable|string|max:2000',
+            'studio_config' => 'nullable|string',
             'design_preview_file' => 'nullable|file|mimes:png|max:5120',
             'design_3d_snapshot_file' => 'nullable|file|mimes:png|max:5120',
-            'sizes' => 'nullable|string',    // JSON string
-            'measurements' => 'nullable|string',    // JSON string
-            'custom_qty' => 'nullable|integer|min:0',
-        ], [
-            'quantity_ordered.min' => 'The minimum order is 100 pieces.',
-            'order_type.in' => 'VFRB does not take rush orders. Choose direct, subcontract or bulk.',
-            'preferred_date.after_or_equal' => 'The preferred date must be at least '.(int) config('vfrb.min_promised_days', 7).' days from today. VFRB does not take rush orders.',
-            'deadline.after_or_equal' => 'The preferred date must be at least '.(int) config('vfrb.min_promised_days', 7).' days from today. VFRB does not take rush orders.',
         ]);
 
-        // Idempotency guard (Sept 22 2026): nothing previously stopped a
-        // dropped network response + client retry from creating two
-        // identical orders — the frontend's disabled={busy} on the submit
-        // button doesn't survive a connection drop that happens before the
-        // response arrives back. Cache::lock() runs on the 'file' cache
-        // store (CACHE_STORE=file in .env); file-store atomic locks have
-        // been supported since Laravel 9's FileLock, so this needs no
-        // migration, no new table, and no Redis dependency.
-        //
-        // Deliberately per-user, not per-payload: hashing studio_config to
-        // detect "the same order" risks false negatives from
-        // non-deterministic JSON key ordering, and a real customer placing
-        // two genuinely different bulk orders (100+ pcs, full 4-step
-        // wizard each) inside the same 10-second window isn't a case this
-        // needs to support. The lock is deliberately left to expire on its
-        // own rather than released in a finally block — it's a short
-        // debounce window on the act of submitting, not a mutex meant to
-        // guard the whole method body.
-        // A uniform set submits one order per piece back to back, so each piece of a set gets its own lock;
-        // a retry of the same piece still hits the same key.
-        $setPart = json_decode((string) $request->input('studio_config', ''), true)['uniformSet'] ?? null;
-        $setKey = is_array($setPart) && is_string($setPart['id'] ?? null) && in_array($setPart['role'] ?? null, ['top', 'bottom'], true)
-            ? ':set:'.substr(preg_replace('/[^A-Za-z0-9-]/', '', $setPart['id']), 0, 64).':'.$setPart['role'] : '';
-        $lock = Cache::lock('order-submit:'.Auth::id().$setKey, 10);
+        [$matrix, $err] = SetOrder::normalise($request->input('size_matrix'));
+        $err ??= $matrix ? SetOrder::check($matrix) : null;
+        if (! $err && $request->filled('quantity_ordered') && (int) $request->input('quantity_ordered') !== array_sum($matrix['top'])) {
+            $err = 'The quantity does not match the size matrices.';
+        }
+        if (! $err && $request->filled('studio_config') && ! is_array(json_decode($request->input('studio_config'), true))) {
+            $err = 'The saved design could not be read. Re-open it in Design Studio and try again.';
+        }
+        if ($err) {
+            return response()->json(['message' => $err, 'errors' => ['size_matrix' => [$err]]], 422);
+        }
+
+        $val = DB::table('reference_validations')->where('id', $request->input('reference_validation_id'))->where('user_id', Auth::id())->first();
+        if (! $val || ! in_array($val->status, SetOrder::ORDERABLE, true) || $val->order_id || ! $val->top_garment || ! $val->bottom_garment) {
+            return response()->json(['message' => 'This reference is not confirmed as a complete uniform set. Upload it again or wait for VFRB review.'], 422);
+        }
+        $bytes = null;
+        try {
+            $bytes = Storage::disk(UploadDisk::name())->get($val->path);
+        } catch (\Throwable) {
+        }
+        if (! SetPairs::approved($val->top_garment, $val->bottom_garment)) {
+            return response()->json(['message' => 'This top and bottom are not an approved VFRB set. VFRB will review it.'], 422);
+        }
+        if (! is_string($bytes) || ! hash_equals($val->sha256, hash('sha256', $bytes))) {
+            return response()->json(['message' => 'The uploaded reference could not be re-checked. Please upload it again.'], 422);
+        }
+
+        $lock = Cache::lock('order-submit:'.Auth::id().':set:'.$val->id, 10);
         if (! $lock->get()) {
-            return response()->json([
-                'message' => 'Your previous order submission is still being processed. Please wait a moment before trying again.',
-            ], 409);
+            return response()->json(['message' => 'Your previous order submission is still being processed. Please wait a moment before trying again.'], 409);
         }
 
-        // Size-breakdown-vs-total check (standard sizing only — custom sizing
-        // has no per-size breakdown to sum). Runs BEFORE the order insert so
-        // a mismatched breakdown never reaches the database at all.
-        $sizingType = $request->input('sizing_type', 'standard');
-        $sizesInput = json_decode($request->input('sizes', '{}'), true);
-
-        $invalid = null;
-        if (! is_array($sizesInput) || collect($sizesInput)->contains(fn ($q) => ! is_numeric($q) || $q < 0 || (int) $q != $q)) {
-            $invalid = 'Size breakdown must be a JSON object of whole, non-negative quantities.';
-        } elseif ($request->filled('studio_config') && ! is_array(json_decode($request->input('studio_config'), true))) {
-            $invalid = 'The saved design could not be read. Re-open it in Design Studio and try again.';
-        }
-        if ($invalid) {
-            $lock->release();
-
-            return response()->json(['message' => $invalid], 422);
-        }
-
-        if ($sizingType === 'standard' && ! empty($sizesInput)) {
-            $sizeSum = array_sum(array_map('intval', $sizesInput));
-            $qtyOrdered = (int) $request->input('quantity_ordered');
-            if ($sizeSum !== $qtyOrdered) {
-                // Release immediately: this is the customer correcting a typo,
-                // not a duplicate submission — they shouldn't have to wait out
-                // the 10-second debounce window just to fix a number and
-                // resubmit right away.
-                $lock->release();
-
-                return response()->json([
-                    'message' => "Size breakdown ({$sizeSum} pcs) doesn't match the total quantity ordered ({$qtyOrdered} pcs). They must add up exactly.",
-                    'size_sum' => $sizeSum,
-                    'quantity_ordered' => $qtyOrdered,
-                ], 422);
-            }
-        }
-
-        // Handle design reference file upload
-        $refFilePath = null;
-        if ($request->hasFile('design_ref_file')) {
-            $refFilePath = $request->file('design_ref_file')
-                ->store('design-refs', $this->designRefDisk());
-        }
-
-        // Design Studio preview PNG, uploaded as a real file by OrderWizard.
-        $previewFilePath = null;
-        if ($request->hasFile('design_preview_file')) {
-            $previewFilePath = $request->file('design_preview_file')
-                ->store('design-previews', $this->designRefDisk());
-        }
-
-        // Optional 3D (approx.) snapshot the customer took in the wizard; skipped until migration 2026_10_22_000001 has run.
-        $snapshotFilePath = null;
-        if ($request->hasFile('design_3d_snapshot_file') && Schema::hasColumn('orders', 'client_design_3d_snapshot_file')) {
-            $snapshotFilePath = $request->file('design_3d_snapshot_file')
-                ->store('design-previews', $this->designRefDisk());
-        }
-
-        // Parse studio_config JSON string
+        $previewPath = $request->hasFile('design_preview_file') ? $request->file('design_preview_file')->store('design-previews', $this->designRefDisk()) : null;
+        $snapshotPath = $request->hasFile('design_3d_snapshot_file') && Schema::hasColumn('orders', 'client_design_3d_snapshot_file')
+            ? $request->file('design_3d_snapshot_file')->store('design-previews', $this->designRefDisk()) : null;
         $studioConfig = null;
         if ($request->filled('studio_config')) {
-            // previewPng duplicates the stored preview file; keeping it bloats a column adminIndex() decodes per row.
             $decoded = json_decode($request->input('studio_config'), true);
             unset($decoded['previewPng']);
             $studioConfig = json_encode($decoded);
         }
+        $sets = array_sum($matrix['top']);
 
-        // TRANSACTION FIX (Sept 25 audit): the order insert, its two
-        // measurements inserts, and the manager-notification inserts used
-        // to run as separate, unwrapped statements. A failure partway
-        // through (e.g. the measurements insert) left a committed order row
-        // with no size/measurement data and no notification — an orphaned,
-        // effectively invisible order, since staff only ever get pointed at
-        // new orders via that notification. Wrapping the whole write in one
-        // transaction makes it all-or-nothing: any exception rolls every
-        // insert back and the customer sees the failure instead of a "sent"
-        // order nobody in the system knows exists.
-        $orderId = DB::transaction(function () use ($request, $refFilePath, $previewFilePath, $snapshotFilePath, $studioConfig, $sizesInput) {
-            $orderId = DB::table('orders')->insertGetId(($snapshotFilePath ? ['client_design_3d_snapshot_file' => $snapshotFilePath] : []) + [
+        $orderId = DB::transaction(function () use ($request, $val, $matrix, $sets, $previewPath, $snapshotPath, $studioConfig) {
+            $fresh = DB::table('reference_validations')->where('id', $val->id)->lockForUpdate()->first();
+            if ($fresh->order_id) {
+                abort(422, 'This reference was already used for an order.');
+            }
+            $orderId = DB::table('orders')->insertGetId(($snapshotPath ? ['client_design_3d_snapshot_file' => $snapshotPath] : []) + [
                 'user_id' => Auth::id(),
-                'garment_type' => $request->input('garment_type'),
-                'collar_type' => $request->input('collar_type'),
-                'sleeve_type' => $request->input('sleeve_type'),
-                'pocket_type' => $request->input('pocket_type'),
+                'garment_type' => $val->top_garment.' + '.$val->bottom_garment,
                 'color' => $request->input('color'),
-                'quantity_ordered' => (int) $request->input('quantity_ordered'),
-                'order_type' => 'direct', // customers place direct orders; a manager marks subcontract ones
+                'quantity_ordered' => $sets,
+                'order_type' => 'direct',
                 'payment_terms' => self::paymentTermsFor('direct'),
-                'sizing_type' => $request->input('sizing_type', 'standard'),
+                'sizing_type' => 'standard',
                 'target_delivery_date' => $request->input('preferred_date') ?: $request->input('deadline'),
                 'fabric_type' => $request->input('fabric_type'),
                 'delivery_address' => $request->input('delivery_method') === 'pickup' ? null : $request->input('delivery_address'),
                 'delivery_method' => $request->input('delivery_method') ?: 'vfrb_deliver',
                 'po_reference' => $request->input('po_reference'),
                 'client_design_notes' => $request->input('client_design_notes'),
-                'client_design_ref_file' => $refFilePath,
-                'client_design_preview_file' => $previewFilePath,
+                'client_design_ref_file' => $val->path,
+                'reference_validation_id' => $val->id,
+                'client_design_preview_file' => $previewPath,
                 'studio_config' => $studioConfig,
                 'status' => 'pending',
                 'ai_recommendation_status' => 'not_requested',
@@ -398,60 +360,39 @@ class OrderController extends Controller
                 'updated_at' => now(),
             ], 'order_id');
 
-            // Store per-size quantities in measurements table if provided
-            // (reuses $sizesInput, already decoded + validated above — no need to decode twice)
-            $sizes = $sizesInput;
-            if (is_array($sizes)) {
-                foreach ($sizes as $sizeLabel => $qty) {
+            DB::table('reference_validations')->where('id', $val->id)->update(['order_id' => $orderId, 'updated_at' => now()]);
+            foreach ($matrix as $piece => $row) {
+                foreach ($row as $size => $qty) {
                     if ($qty > 0) {
-                        DB::table('measurements')->insert([
-                            'order_id' => $orderId,
-                            'user_id' => Auth::id(),
-                            'type' => 'standard',
-                            'size_label' => strtoupper($sizeLabel),
-                            'qty' => (int) $qty,
-                            'created_at' => now(),
-                            'updated_at' => now(),
-                        ]);
+                        DB::table('measurements')->insert(['order_id' => $orderId, 'user_id' => Auth::id(), 'type' => 'standard',
+                            'size_label' => $size, 'piece' => $piece, 'qty' => $qty, 'created_at' => now(), 'updated_at' => now()]);
                     }
                 }
             }
-
-            // Store custom measurements if sizing_type = custom
-            $customMeasurements = json_decode($request->input('measurements', '{}'), true);
-            if (is_array($customMeasurements) && ! empty($customMeasurements)) {
-                DB::table('measurements')->insert([
-                    'order_id' => $orderId,
-                    'user_id' => Auth::id(),
-                    'type' => 'custom',
-                    'size_label' => 'custom',
-                    'chest' => $customMeasurements['chest'] ?? null,
-                    'waist' => $customMeasurements['waist'] ?? null,
-                    'hip' => $customMeasurements['hip'] ?? null,
-                    'sleeve_length' => $customMeasurements['sleeve_length'] ?? null,
-                    'neck' => $customMeasurements['neck'] ?? null,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
-            }
-
-            // Notify managers of new order (in-app now, email after the response)
-            $managerIds = $this->notifyManagers($orderId, "New order #$orderId submitted by customer.");
+            $managerIds = $this->notifyManagers($orderId, "New uniform-set order #$orderId submitted by customer ({$sets} sets).");
             EmailNotify::users($managerIds, new PortalMailNotification(
-                "New VFRB order #{$orderId}", ["A customer submitted order #{$orderId}. It is waiting for review and confirmation."],
+                "New VFRB order #{$orderId}", ["A customer submitted set order #{$orderId} ({$sets} sets). It is waiting for review and confirmation."],
                 'Review order', "/admin/orders/{$orderId}"));
 
             return $orderId;
         });
 
         Cache::forget('dashboard_stats');
-
         $order = DB::table('orders')->where('order_id', $orderId)->first();
         if ($order->studio_config) {
             $order->studio_config = json_decode($order->studio_config, true);
         }
 
         return response()->json(['order' => self::clientMoney(self::clientStatus($order))], 201);
+    }
+
+    // Quote and payment steps stop if the stored reference verdict is no longer orderable.
+    private function setBlock(object $order): ?JsonResponse
+    {
+        $val = empty($order->reference_validation_id) ? null : DB::table('reference_validations')->where('id', $order->reference_validation_id)->first();
+        $msg = SetOrder::blockedMessage($order, $val);
+
+        return $msg ? response()->json(['message' => $msg], 422) : null;
     }
 
     // ── GET /api/customer/dashboard ───────────────────────────────────────────
@@ -922,6 +863,9 @@ class OrderController extends Controller
             'proposal_note.required' => 'Add a note for the customer: fabric availability, any cheaper or better alternative, and the reason for the date and total.',
         ]);
 
+        if ($blocked = $this->setBlock($order)) {
+            return $blocked;
+        }
         if ($order->status !== 'pending') {
             return response()->json(['message' => "Order #{$id} is {$order->status}; proposals can only be sent for pending orders."], 422);
         }
@@ -971,6 +915,9 @@ class OrderController extends Controller
             'reference_no' => 'nullable|string|max:50',
         ]);
 
+        if ($blocked = $this->setBlock($order)) {
+            return $blocked;
+        }
         if (in_array($order->status, ['completed', 'cancelled'], true)) {
             return response()->json(['message' => "Order #{$id} is {$order->status}; a down payment can no longer be recorded."], 422);
         }
@@ -1021,6 +968,9 @@ class OrderController extends Controller
         $order = $this->customerProposalOrder($id);
         if ($order instanceof JsonResponse) {
             return $order;
+        }
+        if ($blocked = $this->setBlock($order)) {
+            return $blocked;
         }
         // Confirmation happens now, so the 7-day rule is checked against today.
         if ($err = Order::promisedDateError($order->promised_date)) {

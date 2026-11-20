@@ -458,6 +458,8 @@ class AIController extends Controller
                 'rec_id'                => $rows->first()->rec_id,
                 'status'                => $order->ai_recommendation_status,
                 'customer_accepted'     => $rows->first()->customer_accepted,
+                // What produced these lines, kept from generation so a reload labels them the same way ('ai' | 'catalog_default' | null for older rows).
+                'source'                => in_array($rows->first()->rec_source ?? null, ['ai', 'catalog_default'], true) ? $rows->first()->rec_source : null,
                 'materials_json'        => $materialsJson,
                 'notes'                 => implode(' ', $notesParts),
             ],
