@@ -55,6 +55,34 @@ class OwnerReadOnlyTest extends TestCase
         $this->postJson('/api/admin/users', ['role' => 'staff'])->assertStatus(403);
     }
 
+    // Fabric requirements: manager reads and writes, owner reads only, station and customer are refused.
+    // The owner's access is that one path, not the rest of the AI guidance area.
+    public function test_material_spec_requirements_follow_manager_write_owner_read_rule(): void
+    {
+        $body = ['requirements' => [['attribute' => 'gsm', 'min_value' => 140, 'is_required' => true]]];
+
+        $this->actingAs($this->makeUser('manager'), 'sanctum');
+        $this->putJson('/api/admin/material-spec-requirements/top', $body)->assertOk();
+
+        $this->actingAs($this->makeUser('owner'), 'sanctum');
+        $this->getJson('/api/admin/material-spec-requirements')->assertOk();
+        $this->getJson('/api/admin/material-spec-requirements?garment_kind=top')->assertOk();
+        $this->putJson('/api/admin/material-spec-requirements/top', ['requirements' => []])->assertStatus(403);
+        $this->getJson('/api/admin/recommendation-guidance')->assertStatus(403);
+        $this->getJson('/api/admin/ai/recommendation-metrics')->assertStatus(403);
+
+        foreach (['staff', 'customer'] as $role) {
+            $this->actingAs($this->makeUser($role), 'sanctum');
+            $this->getJson('/api/admin/material-spec-requirements')->assertStatus(403);
+            $this->putJson('/api/admin/material-spec-requirements/top', $body)->assertStatus(403);
+        }
+
+        // The owner's refused write changed nothing.
+        $this->actingAs($this->makeUser('manager'), 'sanctum');
+        $rows = $this->getJson('/api/admin/material-spec-requirements?garment_kind=top')->assertOk()->json('data');
+        $this->assertCount(1, $rows);
+    }
+
     public function test_only_a_manager_creates_lists_and_edits_owner_accounts(): void
     {
         Role::firstOrCreate(['name' => 'owner', 'guard_name' => 'web']);
