@@ -68,6 +68,10 @@ class ReferencePrivacyTest extends TestCase
         $url = "/api/admin/reference-validations/{$id}/file";
         $this->actingAs($this->user('manager'), 'sanctum')->get($url)->assertOk();
         $this->actingAs($this->user('owner'), 'sanctum')->get($url)->assertOk();
+        $owner = $this->user('owner');
+        $this->actingAs($owner, 'sanctum')->getJson('/api/admin/set-pairs')->assertOk();
+        $this->actingAs($owner, 'sanctum')->postJson("/api/admin/reference-validations/{$id}/decision", ['decision' => 'reject'])->assertForbidden();
+        $this->actingAs($owner, 'sanctum')->postJson('/api/admin/set-pairs', ['top_garment' => 'Blazer', 'bottom_garment' => 'Skirt'])->assertForbidden();
         $this->actingAs($this->user('customer'), 'sanctum')->get($url)->assertForbidden();
         $this->app['auth']->forgetGuards();
         $this->get($url)->assertUnauthorized();

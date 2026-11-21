@@ -7,12 +7,24 @@ namespace App\Http\Middleware;
 
 use Closure;
 use Illuminate\Cache\RateLimiter;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 class ApiThrottle
 {
     public function __construct(private RateLimiter $limiter) {}
+
+    private function guard(callable $fn, mixed $fallback): mixed
+    {
+        try {
+            return $fn();
+        } catch (QueryException $e) {
+            if ($e->getCode() !== '40001') throw $e;
+            report($e);
+            return $fallback;
+        }
+    }
 
     public function handle(Request $request, Closure $next, string $key = 'api', int $maxAttempts = 60): Response
     {
@@ -27,7 +39,7 @@ class ApiThrottle
         $rateKey = "{$key}:{$identifier}";
 
         // 🚫 Too many attempts
-        if ($this->limiter->tooManyAttempts($rateKey, $maxAttempts)) {
+        if ($this->guard(fn () => $this->limiter->tooManyAttempts($rateKey, $maxAttempts), false)) {
 
             $retryAfter = $this->limiter->availableIn($rateKey);
 
@@ -42,13 +54,13 @@ class ApiThrottle
         }
 
         // ✅ Record this hit (60-second decay window)
-        $this->limiter->hit($rateKey, 60);
+        $this->guard(fn () => $this->limiter->hit($rateKey, 60), 0);
 
         // Continue request
         $response = $next($request);
 
         // Remaining attempts
-        $remaining = max(0, $maxAttempts - $this->limiter->attempts($rateKey));
+        $remaining = max(0, $maxAttempts - $this->guard(fn () => $this->limiter->attempts($rateKey), 0));
 
         // headers->add works on every response type; withHeaders() is missing on StreamedResponse (CSV downloads).
         $response->headers->add([

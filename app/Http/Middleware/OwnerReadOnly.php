@@ -10,7 +10,7 @@ use Illuminate\Http\Request;
 class OwnerReadOnly
 {
     // First path segment after /api/admin/.
-    public const AREAS = ['dashboard', 'orders', 'reports', 'transactions', 'invoices', 'inventory', 'materials', 'material-spec-requirements', 'activity-log', 'audit-logs'];
+    public const AREAS = ['dashboard', 'orders', 'reports', 'transactions', 'invoices', 'inventory', 'materials', 'material-spec-requirements', 'reference-validations', 'set-pairs', 'activity-log', 'audit-logs'];
 
     public function handle(Request $request, Closure $next): mixed
     {
