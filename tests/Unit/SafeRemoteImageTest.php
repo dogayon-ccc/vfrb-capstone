@@ -4,11 +4,12 @@ namespace Tests\Unit;
 
 use App\Support\SafeRemoteImage;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class SafeRemoteImageTest extends TestCase
 {
-    /** @dataProvider blockedSources */
+    #[DataProvider('blockedSources')]
     public function test_blocks_ssrf_and_unsafe_sources(string $src): void
     {
         Http::fake();
