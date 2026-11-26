@@ -169,9 +169,9 @@ class MessageController extends Controller
                 'orders.status',
                 'orders.color',
                 DB::raw('MAX(order_messages.sent_at) as last_message_at'),
-                DB::raw('COUNT(CASE WHEN order_messages.is_read = 0 AND order_messages.sender_id != ' . $userId . ' THEN 1 END) as unread_count'),
                 DB::raw('(SELECT body FROM order_messages om2 WHERE om2.order_id = orders.order_id ORDER BY om2.sent_at DESC LIMIT 1) as last_body')
             )
+            ->selectRaw('COUNT(CASE WHEN order_messages.is_read = 0 AND order_messages.sender_id != ? THEN 1 END) as unread_count', [$userId])
             ->groupBy('orders.order_id', 'orders.garment_type', 'orders.status', 'orders.color')
             ->orderByDesc('last_message_at')
             ->paginate($perPage);

@@ -78,6 +78,9 @@ class DemoDataSeeder extends Seeder
 
     private function guardDatabase(): void
     {
+        if (app()->environment('production')) {
+            throw new RuntimeException('DemoDataSeeder never runs in production (public demo password). Nothing was written.');
+        }
         $name = config('database.default');
         $db = config("database.connections.$name.database");
         $this->command?->info("Connection: $name / database: $db / host: ".config("database.connections.$name.host"));

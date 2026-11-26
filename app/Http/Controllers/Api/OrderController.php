@@ -46,6 +46,7 @@ use App\Support\EmailNotify;
 use App\Support\FileUrl;
 use App\Support\OrderStatusLabel;
 use App\Support\SetOrder;
+use App\Support\SafeRemoteImage;
 use App\Support\SetPairs;
 use App\Support\StudioSet;
 use App\Support\UploadDisk;
@@ -56,7 +57,6 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 
@@ -570,26 +570,10 @@ class OrderController extends Controller
         return $pdf->download("VFRB-Spec-Sheet-ORD-{$id}.pdf");
     }
 
-    // dompdf has remote loading off, so remote images are fetched here and embedded; data URLs pass through.
+    // dompdf has remote loading off, so images are embedded here. SafeRemoteImage blocks SSRF (host allowlist, public IPs only, no redirects).
     private function pdfImage(?string $src): ?string
     {
-        if (! $src) {
-            return null;
-        }
-        if (str_starts_with($src, 'data:image/')) {
-            return $src;
-        }
-        if (! preg_match('#^https?://#i', $src)) {
-            return null;
-        }
-        try {
-            $res = Http::timeout(8)->get($src);
-            $type = $res->header('Content-Type');
-
-            return $res->successful() && str_starts_with($type, 'image/') ? "data:{$type};base64,".base64_encode($res->body()) : null;
-        } catch (\Throwable) {
-            return null;
-        }
+        return SafeRemoteImage::dataUrl($src);
     }
 
     // ── GET /api/admin/orders/{id}/invoice-pdf ────────────────────────────────
