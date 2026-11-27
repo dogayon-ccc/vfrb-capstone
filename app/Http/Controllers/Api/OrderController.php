@@ -841,7 +841,7 @@ class OrderController extends Controller
         $request->validate([
             'promised_date' => 'nullable|date|after:today',
             'lead_days' => 'nullable|integer|min:1|max:365',
-            'total' => 'required|numeric|min:0',
+            'total' => 'required|numeric|gt:0|max:99999999.99', // orders.agreed_total is decimal(10,2)
             'proposal_note' => 'required|string|min:10|max:5000',
         ], [
             'proposal_note.required' => 'Add a note for the customer: fabric availability, any cheaper or better alternative, and the reason for the date and total.',

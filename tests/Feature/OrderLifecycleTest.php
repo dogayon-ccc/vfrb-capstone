@@ -285,6 +285,49 @@ class OrderLifecycleTest extends TestCase
         $this->assertSame(['pending', 'declined'], [$row->status, $row->proposal_status]);
     }
 
+    private function pendingOrder(): int
+    {
+        $this->actAs(5);
+
+        return $this->post('/api/customer/orders', $this->payload(), ['Accept' => 'application/json'])->assertStatus(201)->json('order.order_id');
+    }
+
+    public function test_a_proposal_total_must_be_positive_and_fit_the_column(): void
+    {
+        $id = $this->pendingOrder();
+        $this->actAs(1);
+        $note = 'Earliest feasible date with current workers.';
+
+        foreach ([0, -5, 'abc', 100000000, 1e12] as $bad) {
+            $this->postJson("/api/admin/orders/{$id}/propose", ['total' => $bad, 'proposal_note' => $note])
+                ->assertStatus(422)->assertJsonValidationErrors('total');
+        }
+        $this->assertNull(DB::table('orders')->where('order_id', $id)->value('agreed_total'));
+
+        $this->postJson("/api/admin/orders/{$id}/propose", ['total' => 99999999.99, 'proposal_note' => $note])->assertOk();
+        $this->assertSame('99999999.99', (string) DB::table('orders')->where('order_id', $id)->value('agreed_total'));
+    }
+
+    public function test_only_the_owner_can_answer_a_proposal_and_it_can_be_accepted_once(): void
+    {
+        $id = $this->pendingOrder();
+        $this->actAs(1);
+        $this->postJson("/api/admin/orders/{$id}/propose", ['total' => 25000, 'proposal_note' => 'Earliest feasible date with current workers.'])->assertOk();
+
+        $this->actAs(6);
+        $this->postJson("/api/customer/orders/{$id}/accept")->assertNotFound();
+        $this->postJson("/api/customer/orders/{$id}/decline", ['reason' => 'Not mine to decline.'])->assertNotFound();
+        $this->assertSame('pending', DB::table('orders')->where('order_id', $id)->value('proposal_status'));
+
+        $this->actAs(5);
+        $this->postJson("/api/customer/orders/{$id}/accept")->assertOk();
+        $this->postJson("/api/customer/orders/{$id}/accept")->assertStatus(422);
+
+        $this->actAs(1);
+        $this->postJson("/api/admin/orders/{$id}/propose", ['total' => 1, 'proposal_note' => 'Trying to change an accepted price.'])->assertStatus(422);
+        $this->assertSame('25000.00', (string) DB::table('orders')->where('order_id', $id)->value('agreed_total'));
+    }
+
     public function test_draft_is_per_user_and_survives_until_deleted(): void
     {
         $this->actAs(5);
