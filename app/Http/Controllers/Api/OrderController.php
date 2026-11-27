@@ -865,14 +865,25 @@ class OrderController extends Controller
             return response()->json(['message' => $err, 'errors' => ['promised_date' => [$err]]], 422);
         }
 
-        DB::table('orders')->where('order_id', $id)->update([
-            'promised_date' => $promised,
-            'agreed_total' => $request->input('total'),
-            'proposal_note' => $request->input('proposal_note'),
-            'proposal_status' => 'pending',
-            'updated_at' => now(),
-        ]);
-        AuditLog::record('order_proposal_sent', 'orders', $id);
+        $stale = DB::transaction(function () use ($id, $promised, $request) {
+            $fresh = DB::table('orders')->where('order_id', $id)->lockForUpdate()->first();
+            if (! $fresh || $fresh->status !== 'pending' || ($fresh->proposal_status ?? null) === 'accepted') {
+                return true;
+            }
+            DB::table('orders')->where('order_id', $id)->update([
+                'promised_date' => $promised,
+                'agreed_total' => $request->input('total'),
+                'proposal_note' => $request->input('proposal_note'),
+                'proposal_status' => 'pending',
+                'updated_at' => now(),
+            ]);
+            AuditLog::record('order_proposal_sent', 'orders', $id);
+
+            return false;
+        });
+        if ($stale) {
+            return response()->json(['message' => "Order #{$id} changed while you were writing the proposal (the customer may have just accepted). Reload the order."], 422);
+        }
 
         $this->notifyCustomer($order->user_id, $id, "VFRB sent a proposal for order #{$id}: delivery by {$promised}. Please accept or decline.");
         EmailNotify::users([$order->user_id], new PortalMailNotification(
@@ -961,11 +972,14 @@ class OrderController extends Controller
             return response()->json(['message' => $err.' Please message VFRB for a new date.'], 422);
         }
 
-        DB::table('orders')->where('order_id', $id)->update([
-            'proposal_status' => 'accepted',
-            'status' => 'confirmed',
-            'updated_at' => now(),
-        ]);
+        // One write claims the exact proposal the customer saw: a double click, or VFRB re-proposing a moment earlier, changes nothing here.
+        $claimed = DB::table('orders')->where('order_id', $id)->where('user_id', Auth::id())
+            ->where('status', 'pending')->where('proposal_status', 'pending')
+            ->where('agreed_total', $order->agreed_total)->where('promised_date', $order->promised_date)
+            ->update(['proposal_status' => 'accepted', 'status' => 'confirmed', 'updated_at' => now()]);
+        if ($claimed !== 1) {
+            return response()->json(['message' => "The proposal for order #{$id} changed or was already answered. Please review it again."], 422);
+        }
         AuditLog::record('order_status_changed', 'orders', $id);
 
         $stockNote = app(MaterialShortageService::class)->summary($id);
@@ -994,7 +1008,12 @@ class OrderController extends Controller
             return $order;
         }
 
-        DB::table('orders')->where('order_id', $id)->update(['proposal_status' => 'declined', 'updated_at' => now()]);
+        $claimed = DB::table('orders')->where('order_id', $id)->where('user_id', Auth::id())
+            ->where('status', 'pending')->where('proposal_status', 'pending')
+            ->update(['proposal_status' => 'declined', 'updated_at' => now()]);
+        if ($claimed !== 1) {
+            return response()->json(['message' => "The proposal for order #{$id} was already answered."], 422);
+        }
         AuditLog::record('order_proposal_declined', 'orders', $id);
 
         // Kept in the order's message thread so the customer and VFRB both see the reason.
