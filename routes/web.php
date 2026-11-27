@@ -3,9 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::get('/', fn () => response()->json(['service' => 'vfrb-api', 'status' => 'ok']));
 
 // ── Google OAuth — Customer Sign-In (Aug 23 2026) ──────────────────────────
 // Real implementation. These live here in web.php (not api.php) because

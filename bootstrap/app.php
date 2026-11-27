@@ -12,7 +12,7 @@
 //   - statefulApi()     → DISABLED (causes 419 with Sanctum token auth)
 //
 // Task EE additions:
-//   - trustProxies enabled for the reverse proxy in front of the app (Cloudflare / Hostinger)
+//   - trustProxies enabled for the reverse proxy in front of the app (Cloudflare / Vercel)
 //   - ValidationException → 422 JSON (explicit for production)
 //   - ModelNotFoundException → 404 JSON (explicit for production)
 //

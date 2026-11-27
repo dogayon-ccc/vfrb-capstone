@@ -26,3 +26,4 @@ yarn-error.log
 .env.vercel
 .claude/
 CLAUDE.md
+/ai-eval.json
