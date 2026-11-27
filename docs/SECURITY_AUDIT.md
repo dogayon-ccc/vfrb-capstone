@@ -129,3 +129,25 @@ Laravel `mimes` checks the detected content type, not only the extension. No SVG
 
 ### 6.2 Cleanup
 - Removed dead code (owner approved): `app/Providers/RouteServiceProvider.php` (never registered, so its named limiters never ran) and `app/Models/Measurement.php` (no references).
+
+## Re-verification, 2026-11-27 (source and unit tests only)
+Method: current `chore/remove-stray-get-file` source read, `phpunit tests/Unit` run on PHP 8.3 (project targets 8.4), SQLite in memory. Not run: Feature tests (no baseline schema in the repo, see below), anything on PostgreSQL/Supabase, any live request.
+
+| Finding from 2026-10-30 | Status now | Evidence |
+|---|---|---|
+| Sanctum tokens never expire | FIXED in source | `config/sanctum.php:25` `SANCTUM_EXPIRATION`, default 7 days |
+| No HSTS | FIXED in source | `SecurityHeaders.php:35` (Cloudflare may also add it: owner to confirm) |
+| Verify-email link checked only the hash | FIXED in source | `routes/web.php:26-28` `signed` middleware, plus `hash_equals` in `AuthController::verifyEmail` |
+| Reset flow reveals whether an account exists | FIXED for forgot | `AuthController::forgotPassword` returns one message for every email |
+| Production localhost CORS | FIXED in source | `config/cors.php` gates localhost on `CORS_ALLOW_LOCALHOST` / `APP_ENV=local` |
+| Cron endpoint | PASS in source | `AutomationController::cron` needs a bearer secret (`hash_equals`), is throttled 10/min and holds a 300 s lock |
+| AI cost and abuse | PASS in source | `routes/api.php:102,104,182,183` per-route throttles (30, 20, 10, 10 per minute) behind `auth:sanctum` |
+| PDF image SSRF | TEST VERIFIED (unit) | `SafeRemoteImageTest`: `phpunit tests/Unit` OK (110 tests, 324 assertions) |
+| `APP_DEBUG` | PASS in source | `config/app.php:13` defaults to false; `.env.example` is `local`/true, so production must override it (OWNER VERIFICATION REQUIRED) |
+| Secrets in history | NOT FOUND by pattern scan | `git log --all -G` for Stripe keys, private keys and `AIza` keys found no added lines. A pattern scan is not a guarantee; run gitleaks before launch |
+
+Still open or unverifiable here:
+- `trustProxies(at: '*')` (`bootstrap/app.php:64`) is safe only if the origin accepts traffic from Cloudflare alone. OWNER VERIFICATION REQUIRED.
+- Supabase RLS, runtime database role, backups and restore, billing alerts and uptime checks need account access. OWNER VERIFICATION REQUIRED.
+- IDOR on admin `{id}` routes (3b above) stays UNVERIFIED until Feature tests run.
+- PostgreSQL compatibility is NOT VERIFIED: a fresh `migrate` fails on PostgreSQL 16 at `2026_04_01_000001_add_missing_columns_to_orders_table` because no migration creates `orders`; the base tables came from the original dump. Feature tests cannot run from a clean checkout for the same reason. Fix: commit `database/schema/pgsql-schema.sql` (see `.github/workflows/backend-tests.yml`).
