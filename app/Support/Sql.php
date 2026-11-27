@@ -37,6 +37,13 @@ final class Sql
         return self::isPostgres() ? 'ilike' : 'like';
     }
 
+    // A 0/1 flag column as an integer. The dump stores flags as tinyint(1); a Postgres copy may hold them as boolean,
+    // where `flag = 1` is an error. `(flag)::int` reads both, so raw SQL can keep comparing to 1.
+    public static function flag(string $column): string
+    {
+        return self::isPostgres() ? "({$column})::int" : $column;
+    }
+
     // Integer cast of a string expression, for numeric ordering.
     public static function toInt(string $expr): string
     {

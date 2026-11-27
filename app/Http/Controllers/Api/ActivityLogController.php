@@ -31,6 +31,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Support\Sql;
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -73,7 +74,7 @@ class ActivityLogController extends Controller
 
             DB::table('qc_checklists')
                 ->selectRaw("'qc_checked' as action_type, checked_by as actor_user_id,
-                    CONCAT('QC ', CASE WHEN passed=1 THEN 'passed' ELSE 'failed' END, ' — ', items_passed, '/', items_checked, ' items — order #', order_id) as description,
+                    CONCAT('QC ', CASE WHEN ".Sql::flag('passed')."=1 THEN 'passed' ELSE 'failed' END, ' — ', items_passed, '/', items_checked, ' items — order #', order_id) as description,
                     CONCAT('order:', order_id) as target, COALESCE(checked_at, created_at) as occurred_at"),
 
             DB::table('physical_count_logs')
@@ -83,7 +84,7 @@ class ActivityLogController extends Controller
 
             DB::table('physical_count_logs')
                 ->selectRaw("'count_reconciled' as action_type, reconciled_by as actor_user_id,
-                    CONCAT('Reconciled count for material #', material_id, CASE WHEN stock_adjusted=1 THEN ' (stock adjusted)' ELSE '' END) as description,
+                    CONCAT('Reconciled count for material #', material_id, CASE WHEN ".Sql::flag('stock_adjusted')."=1 THEN ' (stock adjusted)' ELSE '' END) as description,
                     CONCAT('material:', material_id) as target, reconciled_at as occurred_at")
                 ->where('reconciled', 1)
                 ->whereNotNull('reconciled_by'),

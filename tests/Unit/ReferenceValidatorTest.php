@@ -99,4 +99,22 @@ class ReferenceValidatorTest extends TestCase
         $this->assertSame('unsupported_file', app(ReferenceValidator::class)->validate('GIF89a....')['reason']);
         Http::assertNothingSent();
     }
+
+    public function test_same_file_twice_asks_the_provider_once_and_still_decides_in_code(): void
+    {
+        $this->fake(['is_uniform_reference' => 'yes', 'garments' => ['Polo Shirt', 'Pants'], 'colors' => ['navy'], 'unknown' => []]);
+        $first = $this->check();
+        $second = $this->check();
+        $this->assertSame(['accepted', 'complete_set'], [$second['verdict'], $second['reason']]);
+        $this->assertSame($first['verdict'], $second['verdict']);
+        Http::assertSentCount(1);
+    }
+
+    public function test_a_failed_provider_answer_is_not_cached(): void
+    {
+        $this->fake(null, 500);
+        $this->check();
+        $this->fake(['is_uniform_reference' => 'yes', 'garments' => ['Polo Shirt', 'Pants'], 'colors' => [], 'unknown' => []]);
+        $this->assertSame('accepted', $this->check()['verdict']);
+    }
 }

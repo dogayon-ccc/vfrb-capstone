@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 // Bounded vision check: the model only names garments from the allowlist. The complete-set verdict is decided here, in code.
@@ -70,15 +71,21 @@ List only garments you can clearly see, using exactly these names: {$list}. Name
 If a piece may be cut off, hidden or unclear, add "garment_type" to "unknown". Do not guess sizes, quantities, prices or dates.
 PROMPT;
 
-        $text = $this->gemini->call($prompt, 600, self::SCHEMA, [['mime' => $mime, 'data' => base64_encode($bytes)]]);
-        if ($text === null) {
-            return $this->result('needs_review', 'ai_unavailable');
-        }
-        $data = json_decode($text, true);
+        // Same file + same prompt = same model answer. Only the model's parsed answer is cached; decide() always runs fresh.
+        $key = 'ref_check:'.self::PROMPT_VERSION.':'.hash('sha256', $bytes);
+        $data = Cache::get($key);
         if (! is_array($data)) {
-            Log::warning('Reference check: unreadable model output');
+            $text = $this->gemini->call($prompt, 600, self::SCHEMA, [['mime' => $mime, 'data' => base64_encode($bytes)]]);
+            if ($text === null) {
+                return $this->result('needs_review', 'ai_unavailable');
+            }
+            $data = json_decode($text, true);
+            if (! is_array($data)) {
+                Log::warning('Reference check: unreadable model output');
 
-            return $this->result('needs_review', 'ai_unreadable');
+                return $this->result('needs_review', 'ai_unreadable');
+            }
+            Cache::put($key, $data, now()->addDay());
         }
 
         return $this->decide($data);

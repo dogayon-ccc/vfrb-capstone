@@ -1,0 +1,14 @@
+name: Postgres compatibility guard
+on:
+  push:
+  pull_request:
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+      - name: MySQL-only SQL must go through App\Support\Sql
+        run: php scripts/pg-compat-check.php
