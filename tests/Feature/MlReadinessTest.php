@@ -18,7 +18,7 @@ class MlReadinessTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertNotSame('pgsql', DB::connection()->getDriverName(), 'Point DB_* at the local vfrb_test database.');
+        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
         DB::table('material_recommendations')->where(fn ($q) => $q->whereNotNull('staff_feedback')->orWhereIn('order_id', [8, 9]))->delete();
     }
 

@@ -15,7 +15,7 @@ class DailyDigestRfqTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertNotSame('pgsql', DB::connection()->getDriverName(), 'Point DB_* at the local vfrb_test database.');
+        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
     }
 
     private function material(string $name, float $stock, float $threshold): Material

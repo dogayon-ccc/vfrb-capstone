@@ -1,7 +1,7 @@
 # Runs the PHPUnit suite on PostgreSQL 16, the platform production (Supabase) uses.
-# The migrations alone cannot build an empty database (they alter tables created by the original dump), so the job needs a baseline:
-#   database/schema/pgsql-schema.sql  (schema-only pg_dump of the migrated database; Laravel loads it before the remaining migrations)
-# Until that file is committed the job skips with a notice instead of failing.
+# database/schema/pgsql-schema.sql is the structure-only baseline (migrations alone cannot build an empty database);
+# the remaining migrations run on top of it. DemoDataSeeder only runs on vfrb_demo and the tests only on vfrb_test,
+# so the job seeds vfrb_demo and clones it. Six classes still expect a hand-built local database and run as an informational step.
 name: backend-tests
 
 on:
@@ -22,30 +22,25 @@ jobs:
         env:
           POSTGRES_USER: vfrb
           POSTGRES_PASSWORD: vfrb
-          POSTGRES_DB: vfrb_test
+          POSTGRES_DB: vfrb_demo
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U vfrb -d vfrb_test"
+          --health-cmd "pg_isready -U vfrb -d vfrb_demo"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       DB_CONNECTION: pgsql
       DB_HOST: 127.0.0.1
       DB_PORT: 5432
-      DB_DATABASE: vfrb_test
+      DB_DATABASE: vfrb_demo
       DB_USERNAME: vfrb
       DB_PASSWORD: vfrb
+      PGPASSWORD: vfrb
       APP_ENV: testing
+      FIXTURE_DEPENDENT: AiRecommendationTest|AiRecommendationFeedbackTest|SecurityGateTest|OrderStatusLockTest|MaterialSpecTest|MlReadinessTest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Baseline schema present?
-        id: baseline
-        run: |
-          if [ -f database/schema/pgsql-schema.sql ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
-          else echo "::notice title=PostgreSQL tests skipped::Commit database/schema/pgsql-schema.sql (schema-only pg_dump) to enable them."; echo "ok=false" >> "$GITHUB_OUTPUT"; fi
-
       - name: PHP 8.4
-        if: steps.baseline.outputs.ok == 'true'
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
@@ -53,17 +48,34 @@ jobs:
           coverage: none
 
       - name: Install dependencies
-        if: steps.baseline.outputs.ok == 'true'
         run: composer install --no-interaction --no-progress --prefer-dist
 
       - name: Prepare app
-        if: steps.baseline.outputs.ok == 'true'
         run: cp .env.example .env && php artisan key:generate
 
-      - name: Migrations on PostgreSQL
-        if: steps.baseline.outputs.ok == 'true'
-        run: php artisan migrate --force
+      - name: Baseline schema and remaining migrations
+        run: |
+          psql -h 127.0.0.1 -U vfrb -d vfrb_demo -v ON_ERROR_STOP=1 -q -f database/schema/pgsql-schema.sql
+          php artisan migrate --force
+
+      - name: Seed demo data
+        run: |
+          psql -h 127.0.0.1 -U vfrb -d vfrb_demo -v ON_ERROR_STOP=1 -q -c "INSERT INTO roles (name, guard_name, created_at, updated_at) VALUES ('manager','web',now(),now()),('staff','web',now(),now()),('customer','web',now(),now())"
+          php artisan db:seed --class=DemoDataSeeder --force
+
+      - name: Clone to vfrb_test with catalogue fixtures
+        run: |
+          psql -h 127.0.0.1 -U vfrb -d postgres -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE vfrb_test TEMPLATE vfrb_demo"
+          DB_DATABASE=vfrb_test php artisan db:seed --class=CiMaterialsSeeder --force
+          psql -h 127.0.0.1 -U vfrb -d vfrb_test -q -c "SELECT setval(pg_get_serial_sequence('materials','material_id'), 22)"
 
       - name: PHPUnit
-        if: steps.baseline.outputs.ok == 'true'
-        run: vendor/bin/phpunit --no-coverage
+        env:
+          DB_DATABASE: vfrb_test
+        run: vendor/bin/phpunit --no-coverage --filter "/^(?!.*(${FIXTURE_DEPENDENT})::).*\$/"
+
+      - name: PHPUnit, fixture-dependent classes (informational)
+        continue-on-error: true
+        env:
+          DB_DATABASE: vfrb_test
+        run: vendor/bin/phpunit --no-coverage --filter "/(${FIXTURE_DEPENDENT})::/"

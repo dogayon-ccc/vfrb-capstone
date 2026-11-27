@@ -19,7 +19,7 @@ class OwnerReadOnlyTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertNotSame('pgsql', DB::connection()->getDriverName(), 'Point DB_* at the local vfrb_test database.');
+        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
     }
 
     // A fresh verified account, so the seeded manager/staff accounts are never used or changed.

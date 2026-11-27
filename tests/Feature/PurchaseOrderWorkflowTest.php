@@ -18,7 +18,7 @@ class PurchaseOrderWorkflowTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertNotSame('pgsql', DB::connection()->getDriverName(), 'Point DB_* at the local vfrb_test database.');
+        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
         Sanctum::actingAs(User::findOrFail(1), ['*']);
     }
 
