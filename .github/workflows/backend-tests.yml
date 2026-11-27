@@ -1,0 +1,69 @@
+# Runs the PHPUnit suite on PostgreSQL 16, the platform production (Supabase) uses.
+# The migrations alone cannot build an empty database (they alter tables created by the original dump), so the job needs a baseline:
+#   database/schema/pgsql-schema.sql  (schema-only pg_dump of the migrated database; Laravel loads it before the remaining migrations)
+# Until that file is committed the job skips with a notice instead of failing.
+name: backend-tests
+
+on:
+  push:
+    branches: [main, chore/remove-stray-get-file]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  phpunit-pgsql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vfrb
+          POSTGRES_PASSWORD: vfrb
+          POSTGRES_DB: vfrb_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U vfrb -d vfrb_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: vfrb_test
+      DB_USERNAME: vfrb
+      DB_PASSWORD: vfrb
+      APP_ENV: testing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Baseline schema present?
+        id: baseline
+        run: |
+          if [ -f database/schema/pgsql-schema.sql ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice title=PostgreSQL tests skipped::Commit database/schema/pgsql-schema.sql (schema-only pg_dump) to enable them."; echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: PHP 8.4
+        if: steps.baseline.outputs.ok == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_pgsql, mbstring, gd, bcmath, intl
+          coverage: none
+
+      - name: Install dependencies
+        if: steps.baseline.outputs.ok == 'true'
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Prepare app
+        if: steps.baseline.outputs.ok == 'true'
+        run: cp .env.example .env && php artisan key:generate
+
+      - name: Migrations on PostgreSQL
+        if: steps.baseline.outputs.ok == 'true'
+        run: php artisan migrate --force
+
+      - name: PHPUnit
+        if: steps.baseline.outputs.ok == 'true'
+        run: vendor/bin/phpunit --no-coverage
