@@ -18,7 +18,7 @@ class PurchaseOrderWorkflowTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
         Sanctum::actingAs(User::findOrFail(1), ['*']);
     }
 

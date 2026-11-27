@@ -22,7 +22,7 @@ class ProfilePhotoAppearanceTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
         Storage::fake(UploadDisk::name());
     }
 

@@ -23,7 +23,7 @@ class AiQualityToolsTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
         config(['services.gemini.key_1' => 'test-key', 'services.gemini.key_2' => null, 'services.gemini.key_3' => null]);
         if (Schema::hasColumn('materials', 'ownership')) {
             DB::table('materials')->where('category', 'Fabric')->update(['ownership' => 'vfrb']);

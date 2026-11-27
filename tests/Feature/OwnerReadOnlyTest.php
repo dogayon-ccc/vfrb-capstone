@@ -19,7 +19,7 @@ class OwnerReadOnlyTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
     }
 
     // A fresh verified account, so the seeded manager/staff accounts are never used or changed.

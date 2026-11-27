@@ -21,7 +21,7 @@ class OrderWorkflowIntegrityTest extends TestCase
     {
         parent::setUp();
         // Never write test rows to the hosted database.
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
     }
 
     private function actAs(int $userId): void

@@ -24,7 +24,7 @@ class AiRecommendationFeedbackTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        $this->assertSame('vfrb_test', DB::connection()->getDatabaseName(), 'Tests run only against a database named vfrb_test.');
+        $this->assertTestDatabase();
         config(['services.gemini.key_1' => 'test-key', 'services.gemini.key_2' => null, 'services.gemini.key_3' => null]);
 
         // These tests use fabric VFRB buys for direct orders; the reclassification is master data and rolls back.

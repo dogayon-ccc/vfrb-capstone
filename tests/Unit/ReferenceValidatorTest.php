@@ -20,6 +20,8 @@ class ReferenceValidatorTest extends TestCase
     private function fake(array|string|null $payload, int $status = 200): void
     {
         $body = $payload === null ? [] : ['candidates' => [['content' => ['parts' => [['text' => is_string($payload) ? $payload : json_encode($payload)]]]]]];
+        // A later fake() would sit behind the first stub, so start from a fresh factory each time.
+        Http::swap(new \Illuminate\Http\Client\Factory());
         Http::fake(['*' => Http::response($body, $status)]);
     }
 
